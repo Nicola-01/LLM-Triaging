@@ -3,22 +3,10 @@ import argparse
 import sys
 from pathlib import Path
 import zipfile
-import shutil
-import subprocess
-import textwrap
+from utils import *
 from jadx_automation import *
+from ghidra_automation import *
 
-RED='\033[0;31m'                                                   
-YELLOW='\033[0;33m'                                                                                                                          
-GREEN='\033[0;32m'                                                                                                                           
-NC='\033[0m'                                                                                                                                 
-BLUE='\033[0;34m'         # Blue                                      
-PURPLE='\033[0;35m'       # Purple                                                                                                           
-CYAN='\033[0;36m'         # Cyan 
-
-
-def print_message(color: str, level:str, msg: str):
-    print(f'{color}[{level}]{NC} {msg}')
 
 def is_valid_apk(p: Path) -> bool:
     """Check if the given file is a valid APK (extension, ZIP, has AndroidManifest.xml)."""
@@ -38,14 +26,6 @@ def is_valid_apk(p: Path) -> bool:
     except Exception:
         return False
 
-def require_executable(name_or_path: str, friendly: str):
-    """Ensure that an executable exists in PATH."""
-    exe = shutil.which(name_or_path)
-    if exe is None:
-        print_message(RED, "ERROR", f"'{friendly}' not found in PATH (command: {name_or_path}).")
-        sys.exit(1)
-    return exe
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Open an APK with jadx-gui and query gemini-cli (MCP Jadx) using a text file."
@@ -62,7 +42,7 @@ def parse_args():
                         help="Skip opening Jadx GUI, only query gemini-cli")
     return parser.parse_args()
 
-def main():
+def main_jadx():
     args = parse_args()
 
     # Validate APK
@@ -71,13 +51,19 @@ def main():
 
     # Validate prompt file
     if not args.file.is_file():
-        sys.exit("Error: the prompt file does not exist.")
+        sys.exit("Error: the file does not exist.")
 
     start_jadx_gui(args.apk_path, args.jadx)
 
     gemini_cmd = require_executable(args.gemini, "gemini-cli")
     query_gemini_cli(gemini_cmd, "what is the app name of the app in the jadx-gui window?")
     query_gemini_cli(gemini_cmd, "what is the app size in the jadx-gui window?")
+    
+def main_ghidra():
+    ghidra_init_project("/home/nicola/Desktop/Tesi/test", "MyProject3", "/home/nicola/Desktop/Tesi/test/libmylib.so")
+    open_ghidra_project("/home/nicola/Desktop/Tesi/test", "MyProject3")
+    gemini_cmd = require_executable("gemini", "gemini-cli")
+    query_gemini_cli(gemini_cmd, "What are the methods in libmylib.so using ghidra mcp?")
 
 if __name__ == "__main__":
-    main()
+    main_ghidra()

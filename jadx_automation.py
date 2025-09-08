@@ -1,7 +1,7 @@
 import subprocess
 import sys
 import textwrap
-from main import print_message, require_executable, RED, GREEN, CYAN, BLUE, PURPLE, NC
+from utils import *
 
 def start_jadx_gui(apk_path: str, jadx_cmd: str):
     print_message(CYAN, "INFO", "Opening APK with Jadx GUI...")

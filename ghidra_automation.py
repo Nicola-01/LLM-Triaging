@@ -1,35 +1,69 @@
+import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from main import print_message, require_executable, RED, GREEN, CYAN, BLUE, PURPLE, NC
+from utils import *
 
 SUPPORTED_GHIDRA_EXTS = {
     ".so", ".elf", ".bin", ".o", ".a",       # ELF / raw
     ".exe", ".dll", ".sys", ".ocx", ".drv",  # PE
     ".dylib", ".mach", ".macho",             # Mach-O
-    ".dex", ".jar", ".class", ".aar",        # JVM/Android (Ghidra can import some)
-    ".apk"                                   # APK (Ghidra can import, but better for native libs/.dex)
+    ".dex", ".jar", ".class", ".aar"         # JVM/Android (Ghidra can import some)
 }
 
 def is_supported_ghidra_input(p: Path) -> bool:
     """Basic check for file existence and a known extension type Ghidra can import."""
     return p.is_file() and p.suffix.lower() in SUPPORTED_GHIDRA_EXTS
 
-def start_ghidra_gui(input_path: str, ghidra_cmd: str = "ghidraRun"):
+def ghidra_init_project(project_dir: str, project_name: str, file_to_import: str, ghidra_headless_cmd: str = "analyzeHeadless"):
     """
-    Open a binary in Ghidra GUI.
-    - input_path: path to the binary (e.g., .so, .exe, .elf, .dex, .apk)
-    - ghidra_cmd: launcher command for Ghidra GUI (default 'ghidraRun').
-      On some installs it could be an absolute path like '/opt/ghidra/ghidraRun'.
+    Initialize a Ghidra project directory if it doesn't exist.
+    - project_dir: path to the directory where the project will be created
+    - project_name: name of the Ghidra project
     """
-    path = Path(input_path)
-    if not is_supported_ghidra_input(path):
-        print_message(RED, "ERROR", f"Unsupported or missing input for Ghidra: '{input_path}'")
+    proj_dir = Path(project_dir)
+    if not proj_dir.exists():
+        try:
+            proj_dir.mkdir(parents=True, exist_ok=True)
+            print_message(GREEN, "OK", f"Created Ghidra project directory: '{project_dir}'")
+        except Exception as e:
+            sys.exit(f"Error creating project directory '{project_dir}': {e}")
+    else:
+        print_message(CYAN, "INFO", f"Ghidra project directory already exists: '{project_dir}'")
+    
+    
+    gpr_path = os.path.join(project_dir, f"{project_name}.gpr")
+
+    if os.path.exists(gpr_path):
+        print_message(CYAN, "INFO", f"Project '{project_name}' already exists at {gpr_path}, skipping import.")
+        return
+    ghidra_headless = require_executable(ghidra_headless_cmd, "analyzeHeadless")
+    try:
+        # Launch detached and silence output
+        subprocess.Popen(
+            [ghidra_headless, str(project_dir), project_name, "-import", str(file_to_import)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print_message(GREEN, "OK", f"File '{file_to_import}' imported in  {project_dir + "/" + project_name}.")
+    except Exception as e:
+        sys.exit(f"Error opening Ghidra GUI: {e}")
+
+
+"""
+ghidra /home/nicola/Desktop/Tesi/test/Test1.gpr
+"""
+
+def open_ghidra_project(project_dir: str, project_name: str, ghidra_cmd: str = "ghidra"):
+
+    path = Path(project_dir) / f"{project_name}.gpr"
+    if not path.is_file():
+        print_message(RED, "ERROR", f"Ghidra project file '{path}' does not exist.")
         sys.exit(1)
 
     print_message(CYAN, "INFO", "Opening input with Ghidra GUI...")
-    ghidra_exe = require_executable(ghidra_cmd, "ghidraRun")
+    ghidra_exe = require_executable(ghidra_cmd, "ghidra")
     try:
         # Launch detached and silence output
         subprocess.Popen(
@@ -37,60 +71,9 @@ def start_ghidra_gui(input_path: str, ghidra_cmd: str = "ghidraRun"):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        print_message(GREEN, "OK", f"Opened '{input_path}' with {ghidra_exe}.")
+        print_message(GREEN, "OK", f"Opened '{path}' with {ghidra_exe}.")
     except Exception as e:
         sys.exit(f"Error opening Ghidra GUI: {e}")
-
-def analyze_headless(project_dir: str,
-                     project_name: str,
-                     import_path: str,
-                     ghidra_headless_cmd: str = "analyzeHeadless",
-                     extra_args: list[str] | None = None):
-    """
-    Run Ghidra headless analysis.
-    - project_dir: directory for the Ghidra project (will be created if missing)
-    - project_name: name of the Ghidra project
-    - import_path: file to import/analyze
-    - ghidra_headless_cmd: analyzeHeadless launcher (default 'analyzeHeadless')
-    - extra_args: additional CLI args, e.g. ['-scriptPath', '/path/to/scripts', '-postScript', 'MyScript.java', 'arg1', 'arg2']
-    """
-    proj_dir = Path(project_dir)
-    proj_dir.mkdir(parents=True, exist_ok=True)
-
-    import_file = Path(import_path)
-    if not import_file.is_file():
-        print_message(RED, "ERROR", f"Input file not found for headless analyze: '{import_path}'")
-        sys.exit(1)
-
-    ghidra_headless = require_executable(ghidra_headless_cmd, "analyzeHeadless")
-
-    cmd = [ghidra_headless, str(proj_dir), project_name, "-import", str(import_file)]
-    if extra_args:
-        cmd.extend(extra_args)
-
-    print_message(CYAN, "INFO", f"Running Ghidra headless analyze: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        # Show condensed output to the user (optional)
-        out = result.stdout.strip()
-        if out:
-            print_message(PURPLE, "Ghidra", out if len(out) < 1000 else out[:1000] + "\n... [truncated]")
-        print_message(GREEN, "OK", "Headless analysis completed.")
-    except subprocess.CalledProcessError as e:
-        msg = textwrap.dedent(f"""\
-        Error during headless analysis (exit code {e.returncode}).
-        Command: {' '.join(cmd)}
-        Stdout:
-        {e.stdout}
-        Stderr:
-        {e.stderr}
-        """)
-        sys.exit(msg)
 
 def gemini_response_parser(output: str) -> str:
     """Clean gemini-cli output and return only the relevant response."""
