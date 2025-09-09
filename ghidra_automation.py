@@ -42,7 +42,7 @@ def ghidra_init_project(project_dir: str, project_name: str, file_to_import: str
     try:
         # Launch detached and silence output
         subprocess.Popen(
-            [ghidra_headless, str(project_dir), project_name, "-import", str(file_to_import)],
+            [ghidra_headless, str(project_dir), project_name, "-import", str(file_to_import), "-overwrite", "-analysisTimeoutPerFile", "0"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
