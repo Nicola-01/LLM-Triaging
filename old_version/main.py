@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 import zipfile
 from utils import *
+from jadx_automation import *
+from ghidra_automation import *
 
 
 def is_valid_apk(p: Path) -> bool:
@@ -26,10 +28,10 @@ def is_valid_apk(p: Path) -> bool:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="APK file to analise, using the output file from droidot"
+        description="Open an APK with jadx-gui and query gemini-cli (MCP Jadx) using a text file."
     )
     parser.add_argument("apk_path", type=Path, help="Path to the APK file")
-    parser.add_argument("droidot_file", type=Path, help="Path to the .txt file")
+    parser.add_argument("file", type=Path, help="Path to the .txt file containing the prompt")
     parser.add_argument("--jadx", default="jadx-gui",
                         help="Command to run Jadx GUI (default: 'jadx-gui')")
     parser.add_argument("--gemini", default="gemini",
