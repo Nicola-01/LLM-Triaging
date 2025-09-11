@@ -7,12 +7,6 @@ from get_agent import get_agent
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import *
 
-from pydantic_ai import Agent
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.mcp import MCPServerStdio
-
-
 # export JADX_MCP_DIR="/home/nicola/Desktop/Tesi/jadx-ai-mcp/jadx-mcp-server-v3.1.0/jadx-mcp-server"
 jadx_dir = os.getenv("JADX_MCP_DIR")
 if not jadx_dir:
@@ -29,11 +23,6 @@ jadx_server = MCPServerStdio(
     ], 
     timeout=30
 )
-
-# 3) Output schema
-class AppInfo(BaseModel):
-    app_name: str
-    package: str
     
 SYSTEM_PROMPT = """
 If you need to find the name of the app opened in JADX:
@@ -46,23 +35,22 @@ If you need to find the name of the app opened in JADX:
 Respond exclusively by populating the output schema.
 """
 
-agent = get_agent(SYSTEM_PROMPT, AppInfo, [jadx_server])
+class AppInfo(BaseModel):
+    app_name: str
+    package: str
 
 
 # print("Jadx tools:")
 # toolList = asyncio.run(jadx_server.list_tools())
 # for tool in toolList:
-#     print(tool.name)
-    
-# print("Ghidra tools:")
-# toolList = asyncio.run(ghidra_server.list_tools())
-# for tool in toolList:
-#     print(tool.name)
-    
+#     print(f" - {tool.name}")
+   
+   
+agent = get_agent(SYSTEM_PROMPT, AppInfo, [jadx_server])
 
-async def main():
+async def test():
     async with agent:
         result = await agent.run("Retrieve the app name and package from the current JADX project.")
     print(result.output)
     
-asyncio.run(main())
+asyncio.run(test())
