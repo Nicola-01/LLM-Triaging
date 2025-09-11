@@ -30,7 +30,6 @@ jadx_server = MCPServerStdio(
     timeout=30
 )
 
-
 # 3) Output schema
 class AppInfo(BaseModel):
     app_name: str
@@ -47,16 +46,7 @@ If you need to find the name of the app opened in JADX:
 Respond exclusively by populating the output schema.
 """
 
-print_message(GREEN, "INFO", "Creating agent...")
-
-model = GoogleModel('gemini-1.5-flash', provider=GoogleProvider(api_key="AIzaSyB9vn8BJoN-FP8-aWjL9eO6CGvlItORkCY"))
-agent = Agent(
-        model, 
-        system_prompt=SYSTEM_PROMPT,
-        toolsets=[jadx_server]
-    )
-    
-print_message(GREEN, "INFO", "Agent created.")
+agent = get_agent(SYSTEM_PROMPT, AppInfo, [jadx_server])
 
 
 # print("Jadx tools:")
