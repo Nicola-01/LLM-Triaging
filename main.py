@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import subprocess
 import sys
 from pathlib import Path
+import time
 import zipfile
 from utils import *
+from MCPs.jadxMCP import *
+from jadx_helper_functions import *
 
 
 def is_valid_apk(p: Path) -> bool:
@@ -24,20 +28,21 @@ def is_valid_apk(p: Path) -> bool:
     except Exception:
         return False
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="APK file to analise, using the output file from droidot"
     )
     parser.add_argument("apk_path", type=Path, help="Path to the APK file")
     parser.add_argument("droidot_file", type=Path, help="Path to the .txt file")
-    parser.add_argument("--jadx", default="jadx-gui",
-                        help="Command to run Jadx GUI (default: 'jadx-gui')")
-    parser.add_argument("--gemini", default="gemini",
-                        help="Gemini CLI command (default: 'gemini-cli')")
-    parser.add_argument("--workspace", default=None,
-                        help="Optional workspace/project argument for gemini-cli")
-    parser.add_argument("--no-open-jadx", action="store_true",
-                        help="Skip opening Jadx GUI, only query gemini-cli")
+
+    parser.add_argument(
+        "--jadx",
+        type=str,
+        default="jadx-gui",  # assuming it's in PATH
+        help="Path to the jadx-gui executable (default: 'jadx-gui' in PATH)",
+    )
+
     return parser.parse_args()
 
 def main_jadx():
@@ -48,20 +53,17 @@ def main_jadx():
         sys.exit("Error: the specified file is not a valid APK.")
 
     # Validate prompt file
-    if not args.file.is_file():
+    if not args.droidot_file.is_file():
         sys.exit("Error: the file does not exist.")
 
     start_jadx_gui(args.apk_path, args.jadx)
 
-    gemini_cmd = require_executable(args.gemini, "gemini-cli")
-    query_gemini_cli(gemini_cmd, "what is the app name of the app in the jadx-gui window?")
-    query_gemini_cli(gemini_cmd, "what is the app size in the jadx-gui window?")
-    
-def main_ghidra():
-    ghidra_init_project("/home/nicola/Desktop/Tesi/test", "MyProject3", "/home/nicola/Desktop/Tesi/test/libmylib.so")
-    open_ghidra_project("/home/nicola/Desktop/Tesi/test", "MyProject3")
-    gemini_cmd = require_executable("gemini", "gemini-cli")
-    query_gemini_cli(gemini_cmd, "What are the methods in libmylib.so using ghidra mcp?")
+    # Wait a bit for jadx to open
+
+    print_message(GREEN, "OK", "Prompting the LLM...")
+    print_message(BLUE, "NOTE", "This may take a while depending on the LLM and the complexity of the task.")
+    asyncio.run(test_jadx())
+    print_message(GREEN, "OK", "Done.")
 
 if __name__ == "__main__":
-    main_ghidra()
+    main_jadx()
