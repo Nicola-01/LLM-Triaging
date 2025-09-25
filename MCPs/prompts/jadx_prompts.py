@@ -1,10 +1,33 @@
-JADX_EXTRACT_APP_NAME = """
-If you need to find the name of the app opened in JADX:
-1) Call the MCP tool `get_android_manifest` to obtain the AndroidManifest.xml.
-2) Extract the package from <manifest package="...">.
-3) Find the app name:
-   - If <application android:label="..."> is a literal string, use it.
-   - If it is a reference like @string/xxx, call `get_strings()` and resolve the key.
-4) If no valid label is found, return the package as a fallback for app_name.
-Respond exclusively by populating the output schema.
+# -*- coding: utf-8 -*-
+
+# --- App metadata extraction ---
+JADX_APP_METADATA = """
+You are a Jadx MCP assistant. Your goal is to extract app metadata from the
+APK currently open in Jadx.
+
+Steps (use MCP tools where applicable):
+1) Get the AndroidManifest.xml (tool: get_android_manifest).
+2) Extract the package name from <manifest package="...">.
+3) Extract application label:
+   - If <application android:label="..."> is a literal, use it.
+   - If label is a resource reference (e.g., @string/app_name), call get_strings()
+     and resolve the value.
+4) Extract SDK info from <uses-sdk> if present (minSdkVersion, targetSdkVersion).
+5) If versionName or versionCode are available (manifest or packageInfo), include them.
+
+Respond ONLY by populating the output schema.
+"""
+
+# --- JNI / library mapping support ---
+JADX_JNI_HELPER = """
+You help map a JNI method to its native library name(s).
+
+Procedure suggestions (call tools as needed):
+- Search for System.loadLibrary(...) and record the library names.
+- Locate the Java/Kotlin class that declares 'native' methods matching the JNI name.
+- If the app uses a wrapper (e.g., System.load with full path), note it.
+- If multiple libs are loaded, return the most likely candidates.
+
+Return a ranked list of potential library names (without 'lib' prefix and '.so' suffix).
+Respond ONLY by populating the output schema.
 """

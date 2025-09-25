@@ -1,24 +1,22 @@
 import os
 import sys
+from typing import Optional, List
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.mcp import MCPServerStdio
 from utils import *
 
-# export LLM_API_KEY="your-api-key"
-api_key = os.getenv("LLM_API_KEY")
-if not api_key:
-    print_message(RED, "ERROR", "Environment variable 'LLM_API_KEY' is not set.")
-    sys.exit()
-    
-llm_model_name = os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash")
-
-def get_agent(system_prompt: str, output_type, toolsets: list[MCPServerStdio]) -> Agent:  
-    model = GoogleModel(llm_model_name, provider=GoogleProvider(api_key=api_key))
+def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], model_name: Optional[str] = None) -> Agent:
+    """
+    Create a Pydantic-AI Agent with the given MCP toolsets.
+    If model_name is None, falls back to env LLM_MODEL_NAME or 'gemini-2.5-flash'.
+    """
+    llm_model_name = model_name or os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash")
+    model = GoogleModel(llm_model_name, provider=GoogleProvider(api_key=os.getenv("LLM_API_KEY")))
     return Agent(
-            model, 
-            system_prompt=system_prompt,
-            output_type=output_type,
-            toolsets=toolsets
-        )
+        model,
+        system_prompt=system_prompt,
+        output_type=output_type,
+        toolsets=toolsets,
+    )

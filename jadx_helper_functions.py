@@ -13,12 +13,14 @@ JADX_READY = threading.Event()
 JADX_READY_RE = re.compile(r"JADX AI MCP Plugin HTTP Serve Started", re.IGNORECASE)
 
 
-def _reader_thread(stream):
+def _reader_thread(stream, debug: bool = False):
     """Read Jadx output line by line and set the readiness event when the server is started."""
     try:
         for line in iter(stream.readline, ""):
             # Optional: forward logs to your console
             # print(line, end='', flush=True)
+            if debug:
+                print_message(GREEN, "DEBUG-JADX", line.strip())
             if JADX_READY_RE.search(line):
                 JADX_READY.set()
     finally:
@@ -58,12 +60,13 @@ def _install_signal_handlers():
         signal.signal(s, _handler)
 
 
-def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45):
+def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45, debug: bool = False):
     """Start Jadx GUI, wait until the MCP HTTP server is ready, then return."""
     print_message(CYAN, "INFO", "Opening APK with Jadx GUI...")
     jadx_cmd = require_executable(jadx_cmd, "jadx-gui")
-    print_message(GREEN, "OK", f"Using Jadx command: {jadx_cmd}")
-    print_message(GREEN, "OK", f"Opening APK: {apk_path}")
+    if debug:
+        print_message(GREEN, "DEBUG", f"Using Jadx command: {jadx_cmd}")
+        print_message(GREEN, "DEBUG", f"Opening APK: {apk_path}")
 
     global JADX_PROC
     try:
@@ -82,7 +85,7 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45):
 
         # Start a background thread to read log lines
         t = threading.Thread(
-            target=_reader_thread, args=(JADX_PROC.stdout,), daemon=True
+            target=_reader_thread, args=(JADX_PROC.stdout, debug,), daemon=True
         )
         t.start()
 
@@ -96,7 +99,7 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45):
             _kill_jadx()
             sys.exit(1)
 
-        print_message(GREEN, "OK", "JADX MCP is ready: the HTTP server has started.")
+        print_message(CYAN, "INFO", "JADX MCP is ready: the MCP HTTP server has started.")
 
     except Exception as e:
         print_message(RED, "ERROR", f"Failed to open Jadx GUI: {e}")

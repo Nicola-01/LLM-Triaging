@@ -1,6 +1,6 @@
-import asyncio
 import os
 import sys
+from typing import Optional
 from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
@@ -8,39 +8,54 @@ from utils import *
 from .prompts.jadx_prompts import *
 from .get_agent import get_agent
 
-# export JADX_MCP_DIR="/home/nicola/Desktop/Tesi/jadx-ai-mcp/jadx-mcp-server-v3.1.0/jadx-mcp-server"
-jadx_dir = os.getenv("JADX_MCP_DIR")
-if not jadx_dir:
-    print_message(RED, "ERROR", "Environment variable 'JADX_MCP_DIR' is not set.")
-    sys.exit()
+# export JADX_MCP_DIR="/path/to/jadx-mcp-server"
+def make_jadx_server(timeout: int = 30) -> MCPServerStdio:
+    """
+    Start the Jadx MCP server using uv, assuming the environment variable JADX_MCP_DIR is set.
+    """
+    jadx_dir = os.getenv("JADX_MCP_DIR")
+    return MCPServerStdio(
+        "uv",
+        args=["--directory", jadx_dir, "run", "jadx_mcp_server.py"],
+        timeout=timeout,
+    )
 
-jadx_server = MCPServerStdio(
-    "uv",
-    args=["--directory", os.environ["JADX_MCP_DIR"], "run", "jadx_mcp_server.py"],
-    timeout=30,
-)
-
-
-class AppInfo(BaseModel):
+class AppMetadata(BaseModel):
     app_name: str
     package: str
+    min_sdk: Optional[int] = None
+    target_sdk: Optional[int] = None
+    version_name: Optional[str] = None
+    version_code: Optional[str] = None
+    
+    def __str__(self) -> str:
+        fields = [
+            f"App Name     : {self.app_name}",
+            f"Package      : {self.package}",
+            f"Min SDK      : {self.min_sdk}" if self.min_sdk is not None else "Min SDK: N/A",
+            f"Target SDK   : {self.target_sdk}" if self.target_sdk is not None else "Target SDK: N/A",
+            f"Version Name : {self.version_name}" if self.version_name is not None else "Version Name: N/A",
+            f"Version Code : {self.version_code}" if self.version_code is not None else "Version Code: N/A",
+        ]
+        return "AppMetadata : \n" + "\n".join(fields)
 
+async def get_jadx_metadata_agent(model_name: Optional[str] = None, verbose: bool = False):
+    """Return an Agent configured to extract app metadata from Jadx."""
+    server = make_jadx_server()
+    if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
+    
+    async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
+        j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
+    app: AppMetadata = j_meta.output
+    
+    if verbose: print_message(PURPLE, "RESPONSE", str(app))
+    
+    return get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name)
 
-# print("Jadx tools:")
-# toolList = asyncio.run(jadx_server.list_tools())
-# for tool in toolList:
-#     print(f" - {tool.name}")
+class JNILibCandidates(BaseModel):
+    libraries: list[str]  # without lib prefix and .so suffix
 
-
-agent = get_agent(JADX_EXTRACT_APP_NAME, AppInfo, [jadx_server])
-
-
-async def test_jadx():
-    async with agent:
-        result = await agent.run(
-            "Retrieve the app name and package from the current JADX project."
-        )
-        print_message(PURPLE, "RESPONSE", result.output)
-
-
-# asyncio.run(test_jadx())
+def get_jadx_jni_agent(model_name: Optional[str] = None):
+    """Return an Agent configured to map JNI method -> likely native library names."""
+    server = make_jadx_server()
+    return get_agent(JADX_JNI_HELPER, JNILibCandidates, [server], model_name=model_name)
