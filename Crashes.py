@@ -77,7 +77,7 @@ class Crashes:
     """
 
     # Class-level constants to recognize section boundaries
-    SECTION_START_TOKEN = "CRASH NR"
+    _SECTION_START_TOKEN = "CRASH NR"
 
     def __init__(self, crash_report_path: Path):
         """
@@ -159,13 +159,13 @@ class Crashes:
         in_section = False
         for line in lines:
             # Start of section: a hashes-line containing "CRASH NR"
-            if line.startswith("#") and self.SECTION_START_TOKEN in line:
+            if line.startswith("#") and self._SECTION_START_TOKEN in line:
                 flush()            # close any previously open section
                 in_section = True
                 continue
 
             # End of section: a hashes-line without "CRASH NR"
-            if line.startswith("#") and self.SECTION_START_TOKEN not in line:
+            if line.startswith("#") and self._SECTION_START_TOKEN not in line:
                 flush()
                 in_section = False
                 continue

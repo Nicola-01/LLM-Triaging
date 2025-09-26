@@ -39,7 +39,7 @@ class AppMetadata(BaseModel):
         ]
         return "AppMetadata : \n" + "\n".join(fields)
 
-async def get_jadx_metadata_agent(model_name: Optional[str] = None, verbose: bool = False):
+async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False):
     """Return an Agent configured to extract app metadata from Jadx."""
     server = make_jadx_server()
     if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
@@ -50,12 +50,12 @@ async def get_jadx_metadata_agent(model_name: Optional[str] = None, verbose: boo
     
     if verbose: print_message(PURPLE, "RESPONSE", str(app))
     
-    return get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name)
+    return app
 
 class JNILibCandidates(BaseModel):
     libraries: list[str]  # without lib prefix and .so suffix
 
-def get_jadx_jni_agent(model_name: Optional[str] = None):
-    """Return an Agent configured to map JNI method -> likely native library names."""
-    server = make_jadx_server()
-    return get_agent(JADX_JNI_HELPER, JNILibCandidates, [server], model_name=model_name)
+# def get_jadx_jni_agent(model_name: Optional[str] = None):
+#     """Return an Agent configured to map JNI method -> likely native library names."""
+#     server = make_jadx_server()
+#     return get_agent(JADX_JNI_HELPER, JNILibCandidates, [server], model_name=model_name)

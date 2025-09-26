@@ -39,13 +39,13 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from Crashes import Crashes
+from MCPs.vulnAssessment import mcp_vuln_assessment
 from utils import *
 from jadx_helper_functions import start_jadx_gui
-from MCPs.jadxMCP import make_jadx_server, get_jadx_metadata_agent, get_jadx_jni_agent, AppMetadata
+from MCPs.jadxMCP import get_jadx_metadata #, make_jadx_server, get_jadx_jni_agent, AppMetadata
 from MCPs.ghidraMCP import make_ghidra_server
 from MCPs.get_agent import get_agent
-from MCPs.prompts.ghidra_prompts import GHIDRA_VULN_ASSESSMENT
-from MCPs.prompts.jadx_prompts import JADX_APP_METADATA
+# from MCPs.prompts import *
 
 # ---------- APK helpers ----------
 
@@ -105,45 +105,10 @@ def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: 
 
 # ---------- Output schema ----------
 
-from pydantic import BaseModel, Field
-
-class VulnAssessment(BaseModel):
-    is_vulnerability: bool = Field(..., description="True if the crash is likely due to a real vulnerability")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score from 0.0 to 1.0")
-    reasons: List[str] = Field(default_factory=list, description="Short bullet points supporting the decision")
-    apk_path: str
-    apk_sha256: str
-    app_name: Optional[str] = None
-    package: Optional[str] = None
-    min_sdk: Optional[int] = None
-    target_sdk: Optional[int] = None
-    version_name: Optional[str] = None
-    version_code: Optional[str] = None
-    android_version: Optional[str] = None  # if available from context
-    jni_methods: List[str] = Field(default_factory=list)
-    native_functions: List[str] = Field(default_factory=list)
 
 # ---------- System prompt for the orchestrator agent ----------
 
-ASSESSMENT_SYSTEM_PROMPT = """
-You are a senior mobile RE + security engineer. You have access to Jadx MCP (Android Java/Manifest)
-and Ghidra MCP (native .so analysis). You must decide if a given crash is LIKELY caused by a real
-code vulnerability (e.g., memory safety bug) or by harness/environmental issues.
 
-Guidelines:
-- Use Jadx MCP to extract: package, app label, min/target SDK, versionName/versionCode.
-- Use Ghidra MCP to inspect the native functions referenced in the crash (names provided in the user message).
-  Try to decompile and look for: missing bounds checks, use-after-free/double-free, integer over/underflow,
-  null deref from unchecked pointers, dangerous APIs with unchecked lengths (memcpy, fwrite, sprintf, etc.).
-- Cross-check the call path from the JNI entrypoint to the crashing function where possible.
-- If evidence is weak or the crash could be due to fuzzing harness misuse (bad pointers from JNI, unrealistic inputs),
-  lower the confidence and explain.
-- Only return the structured JSON defined by the output schema, no prose.
-
-IMPORTANT:
-- Do not hallucinate fields: if a value is unknown, leave it null/None.
-- Confidence must be in [0,1]. Use 0.9+ only with specific code evidence.
-"""
 
 # ---------- CLI ----------
 
@@ -206,10 +171,14 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> VulnAssessment:
     # TODO: da riattivare
     # start_jadx_gui(str(apk), "jadx-gui", debug=args.debug)
     # # Extract metadata via Jadx MCP
-    # app = await get_jadx_metadata_agent(model_name=args.model_name, verbose=args.verbose)      
+    # app = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
 
     # Parse crash report
     crashes = Crashes(crash_txt)
+    
+    # print(crashes[0])
+    # print(crashes[1])
+    # print(crashes[2])
         
     # Prepare native libs via APK extraction
     with tempfile.TemporaryDirectory(prefix="apk_so_") as td:
@@ -227,16 +196,12 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> VulnAssessment:
                 print_message(GREEN, "SELECTED", f"{pth}")
                 
                     
+        assessments = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
+        
         # TODO: to remove
         exit(0)
 
-        # Build Ghidra MCP server for the relevant libs
-        ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=args.timeout)
-        jadx_server = make_jadx_server(timeout=args.timeout)
 
-        # Build a joint agent that can use BOTH toolsets
-        # Output schema is VulnAssessment
-        agent = get_agent(ASSESSMENT_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=args.model_name)
 
         # User message gives the concrete context
         user_task = {
