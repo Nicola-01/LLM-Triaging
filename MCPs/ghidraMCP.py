@@ -9,7 +9,7 @@ from .get_agent import get_agent
 from .prompts.ghidra_prompts import GHIDRA_FUNCTION_ANALYZER, GHIDRA_VULN_ASSESSMENT
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
-def make_ghidra_server(files: List[str], silent: bool = True, timeout: int = 120) -> MCPServerStdio:
+def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 120) -> MCPServerStdio:
     """
     Build a Ghidra MCP server for the given list of binaries (.so, executables).
     It uses uvx pyghidra-mcp -t stdio "<file1>" "<file2>" ...
@@ -21,7 +21,7 @@ def make_ghidra_server(files: List[str], silent: bool = True, timeout: int = 120
         sys.exit(1)
 
     quoted = " ".join([f'"{f}"' for f in files])
-    redir = "2>/dev/null" if silent else ""
+    redir = "" if verbose else "2>/dev/null"
     cmd = f'uvx --quiet pyghidra-mcp -t stdio {quoted} {redir}'
 
     return MCPServerStdio(

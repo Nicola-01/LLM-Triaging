@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from typing import Optional
@@ -38,6 +39,15 @@ class AppMetadata(BaseModel):
             f"Version Code : {self.version_code}" if self.version_code is not None else "Version Code: N/A",
         ]
         return "AppMetadata : \n" + "\n".join(fields)
+    
+    def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False, ) -> str:
+        """
+        Serialize this AppMetadata to a JSON string.
+        - exclude_none=True drops unset optional fields
+        - indent provides pretty-printing
+        """
+        data = self.model_dump(exclude_none=exclude_none)
+        return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
 
 async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False):
     """Return an Agent configured to extract app metadata from Jadx."""

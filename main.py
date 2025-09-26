@@ -38,8 +38,8 @@ import zipfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from Crashes import Crashes
-from MCPs.vulnAssessment import mcp_vuln_assessment
+from CrashSummary import Crashes
+from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assessment
 from utils import *
 from jadx_helper_functions import start_jadx_gui
 from MCPs.jadxMCP import get_jadx_metadata #, make_jadx_server, get_jadx_jni_agent, AppMetadata
@@ -126,7 +126,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_assessment(apk: Path, crash_txt: Path, args) -> VulnAssessment:
+async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -169,18 +169,19 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> VulnAssessment:
         sys.exit(1)
 
     # TODO: da riattivare
-    # start_jadx_gui(str(apk), "jadx-gui", debug=args.debug)
+    start_jadx_gui(str(apk), "jadx-gui", debug=args.debug)
     # # Extract metadata via Jadx MCP
     # app = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
 
     # Parse crash report
     crashes = Crashes(crash_txt)
-    
+        
     # print(crashes[0])
     # print(crashes[1])
     # print(crashes[2])
         
     # Prepare native libs via APK extraction
+    print_message(BLUE, "INFO", f"Extracting .so files from APK: {apk}")
     with tempfile.TemporaryDirectory(prefix="apk_so_") as td:
         workdir = Path(td)
         so_paths = extract_so_files(apk, workdir)
@@ -196,41 +197,29 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> VulnAssessment:
                 print_message(GREEN, "SELECTED", f"{pth}")
                 
                     
-        assessments = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
+        print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
+        assessments : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
         
-        # TODO: to remove
-        exit(0)
+        assessments.to_json_file(Path("assessments.json"))
+        
+    #     # TODO: to remove
+    #     exit(0)
 
 
+    # # Fill in extra fields
+    # # assessment.apk_path = str(apk.resolve())
+    # # assessment.apk_sha256 = sha256_file(apk)
+    # # assessment.jni_methods = crash.jni_methods
+    # # assessment.native_functions = crash.native_candidates
+    # # Merge app metadata
+    # if 'app_name' in app.__dict__: assessment.app_name = app.app_name
+    # if 'package' in app.__dict__: assessment.package = app.package
+    # if 'min_sdk' in app.__dict__: assessment.min_sdk = app.min_sdk
+    # if 'target_sdk' in app.__dict__: assessment.target_sdk = app.target_sdk
+    # if 'version_name' in app.__dict__: assessment.version_name = app.version_name
+    # if 'version_code' in app.__dict__: assessment.version_code = app.version_code
 
-        # User message gives the concrete context
-        user_task = {
-            "crash_entries": [e.frames for e in crash.entries],
-            "jni_methods": crash.jni_methods,
-            "native_functions": crash.native_candidates,
-            "instructions": "Use Jadx to get app/package/sdk and Ghidra to inspect target native functions. Return only the JSON schema."
-        }
-        if args.verbose:
-            print_message(BLUE, "USER", json.dumps(user_task, indent=2))
-
-        async with agent:
-            result = await agent.run(json.dumps(user_task))
-            assessment: VulnAssessment = result.output
-
-    # Fill in extra fields
-    assessment.apk_path = str(apk.resolve())
-    assessment.apk_sha256 = sha256_file(apk)
-    assessment.jni_methods = crash.jni_methods
-    assessment.native_functions = crash.native_candidates
-    # Merge app metadata
-    if 'app_name' in app.__dict__: assessment.app_name = app.app_name
-    if 'package' in app.__dict__: assessment.package = app.package
-    if 'min_sdk' in app.__dict__: assessment.min_sdk = app.min_sdk
-    if 'target_sdk' in app.__dict__: assessment.target_sdk = app.target_sdk
-    if 'version_name' in app.__dict__: assessment.version_name = app.version_name
-    if 'version_code' in app.__dict__: assessment.version_code = app.version_code
-
-    return assessment
+    # return assessment
 
 def main():
     args = parse_args()
@@ -266,17 +255,17 @@ def main():
         
     # --- Run the assessment ---
 
-    assessment = asyncio.run(run_assessment(args.apk, args.crash_txt, args))
+    asyncio.run(run_assessment(args.apk, args.crash_txt, args))
 
-    # Human-readable summary
-    verdict = "LIKELY VULNERABILITY" if assessment.is_vulnerability else "LIKELY NOT A REAL VULNERABILITY"
-    print_message(GREEN if assessment.is_vulnerability else YELLOW, "VERDICT", f"{verdict} (confidence={assessment.confidence:.2f})")
-    if assessment.reasons:
-        print_message(CYAN, "REASONS", "\\n - " + "\\n - ".join(assessment.reasons))
+    # # Human-readable summary
+    # verdict = "LIKELY VULNERABILITY" if assessment.is_vulnerability else "LIKELY NOT A REAL VULNERABILITY"
+    # print_message(GREEN if assessment.is_vulnerability else YELLOW, "VERDICT", f"{verdict} (confidence={assessment.confidence:.2f})")
+    # if assessment.reasons:
+    #     print_message(CYAN, "REASONS", "\\n - " + "\\n - ".join(assessment.reasons))
 
-    # Save JSON
-    args.json_out.write_text(assessment.model_dump_json(indent=2))
-    print_message(GREEN, "OK", f"Saved JSON report to: {args.json_out}")
+    # # Save JSON
+    # args.json_out.write_text(assessment.model_dump_json(indent=2))
+    # print_message(GREEN, "OK", f"Saved JSON report to: {args.json_out}")
 
 if __name__ == "__main__":
     main()

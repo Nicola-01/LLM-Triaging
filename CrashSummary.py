@@ -8,7 +8,7 @@ from pathlib import Path
 # ----------------------------
 
 @dataclass
-class CrashEntry:
+class CrashSummary:
     """
     Represents a single crash entry parsed from the report.
 
@@ -83,16 +83,16 @@ class Crashes:
         """
         Parse the given crash report file immediately and store results internally.
         """
-        self.__entries: List[CrashEntry] = self.__parse_crash_report(crash_report_path)
+        self.__entries: List[CrashSummary] = self.__parse_crash_report(crash_report_path)
 
     # ---- Read-only access to entries ----
     @property
-    def entries(self) -> Sequence[CrashEntry]:
+    def entries(self) -> Sequence[CrashSummary]:
         """Read-only view of parsed entries."""
         return tuple(self.__entries)
 
     # ---- Core parsing ----
-    def __parse_crash_report(self, path: Path) -> List[CrashEntry]:
+    def __parse_crash_report(self, path: Path) -> List[CrashSummary]:
         """
         Parse the crash report format produced by your tool.
 
@@ -108,7 +108,7 @@ class Crashes:
         # Drop empty lines, keep order; strip trailing/leading spaces
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         cur: List[str] = []
-        results: List[CrashEntry] = []
+        results: List[CrashSummary] = []
 
         def flush() -> None:
             """
@@ -145,7 +145,7 @@ class Crashes:
                     StackTrace.append(line)
 
             results.append(
-                CrashEntry(
+                CrashSummary(
                     ProcessTermination=ProcessTermination,
                     StackTrace=StackTrace,
                     AppNativeFunction=AppNativeFunction,
@@ -183,11 +183,11 @@ class Crashes:
         """Number of parsed crash entries."""
         return len(self.__entries)
 
-    def __iter__(self) -> Iterable[CrashEntry]:
+    def __iter__(self) -> Iterable[CrashSummary]:
         """Iterate over crash entries in order."""
         return iter(self.__entries)
 
-    def __getitem__(self, key: Union[int, slice]) -> Union[CrashEntry, List[CrashEntry]]:
+    def __getitem__(self, key: Union[int, slice]) -> Union[CrashSummary, List[CrashSummary]]:
         """Indexing and slicing support (e.g., crashes[0], crashes[:3])."""
         return self.__entries[key]
     
