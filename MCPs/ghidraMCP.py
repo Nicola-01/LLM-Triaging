@@ -34,8 +34,8 @@ def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 1
 class GhidraFunctionList(BaseModel):
     methods: list[str]
 
-def get_ghidra_functions_agent(files: List[str]):
-    """Quick agent to list functions; useful for smoke tests."""
-    server = make_ghidra_server(files)
-    return get_agent(GHIDRA_FUNCTION_ANALYZER, GhidraFunctionList, [server])
+# def get_ghidra_functions_agent(files: List[str]):
+#     """Quick agent to list functions; useful for smoke tests."""
+#     server = make_ghidra_server(files)
+#     return get_agent(GHIDRA_FUNCTION_ANALYZER, GhidraFunctionList, [server])
 

@@ -23,7 +23,8 @@ What it does:
 All prompts and key steps are commented in English.
 """
 
-from __future__ import annotations
+TOOL_VERSION = "0.1"
+
 import argparse
 import asyncio
 import json
@@ -36,16 +37,48 @@ import tempfile
 import zipfile
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
 
 from CrashSummary import Crashes
 from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assessment
 from utils import *
 from jadx_helper_functions import start_jadx_gui
-from MCPs.jadxMCP import get_jadx_metadata #, make_jadx_server, get_jadx_jni_agent, AppMetadata
-from MCPs.ghidraMCP import make_ghidra_server
-from MCPs.get_agent import get_agent
-# from MCPs.prompts import *
+from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
+
+# ---------- Data models for JSON output ----------
+class ToolInfo(BaseModel):
+    model_name: Optional[str] = None
+    timestamp_utc: str = Field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    apk_path: Optional[str] = None
+    apk_sha256: Optional[str] = None
+    version: Optional[str] = None          
+    notes: Optional[str] = None
+
+class AnalysisBlock(BaseModel):
+    tool: Optional[ToolInfo] = None
+    app: Optional[AppMetadata] = None
+    analysisResults: List[AnalysisResult] = Field(default_factory=list)
+    
+class AnalysisEnvelope(BaseModel):
+    """Top-level wrapper to nest results under 'analysis' and attach metadata."""
+    analysis: AnalysisBlock
+
+
+    def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False,) -> str:
+        """
+        Serialize the whole envelope to JSON.
+        """
+        data = self.model_dump(mode="python", exclude_none=exclude_none)
+        return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
+
+    def to_json_file(self, path: Path, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False, encoding: str = "utf-8",) -> None:
+        path.write_text(
+            self.to_json(indent=indent, exclude_none=exclude_none, ensure_ascii=ensure_ascii),
+            encoding=encoding,
+        )
 
 # ---------- APK helpers ----------
 
@@ -103,15 +136,7 @@ def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: 
         
     return relevant_libs
 
-# ---------- Output schema ----------
-
-
-# ---------- System prompt for the orchestrator agent ----------
-
-
-
-# ---------- CLI ----------
-
+# ---------- Argument parsing ----------
 def parse_args():
     p = argparse.ArgumentParser(description="APK + crash report -> vulnerability assessment via Jadx/Ghidra MCP")
     p.add_argument("apk", type=Path, help="Path to the APK file")
@@ -168,10 +193,9 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
         print_message(RED, "ERROR", f"Crash file not found: {crash_txt}")
         sys.exit(1)
 
-    # TODO: da riattivare
     start_jadx_gui(str(apk), "jadx-gui", debug=args.debug)
-    # # Extract metadata via Jadx MCP
-    # app = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
+    # Extract metadata via Jadx MCP
+    appMetadata = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
 
     # Parse crash report
     crashes = Crashes(crash_txt)
@@ -198,28 +222,14 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
                 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
-        assessments : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
+        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
         
-        assessments.to_json_file(Path("assessments.json"))
-        
-    #     # TODO: to remove
-    #     exit(0)
-
-
-    # # Fill in extra fields
-    # # assessment.apk_path = str(apk.resolve())
-    # # assessment.apk_sha256 = sha256_file(apk)
-    # # assessment.jni_methods = crash.jni_methods
-    # # assessment.native_functions = crash.native_candidates
-    # # Merge app metadata
-    # if 'app_name' in app.__dict__: assessment.app_name = app.app_name
-    # if 'package' in app.__dict__: assessment.package = app.package
-    # if 'min_sdk' in app.__dict__: assessment.min_sdk = app.min_sdk
-    # if 'target_sdk' in app.__dict__: assessment.target_sdk = app.target_sdk
-    # if 'version_name' in app.__dict__: assessment.version_name = app.version_name
-    # if 'version_code' in app.__dict__: assessment.version_code = app.version_code
-
-    # return assessment
+    tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
+    envelope = AnalysisEnvelope(
+        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool)
+    )
+    envelope.to_json_file(Path("analysis_report.json"))
+    
 
 def main():
     args = parse_args()
@@ -257,15 +267,6 @@ def main():
 
     asyncio.run(run_assessment(args.apk, args.crash_txt, args))
 
-    # # Human-readable summary
-    # verdict = "LIKELY VULNERABILITY" if assessment.is_vulnerability else "LIKELY NOT A REAL VULNERABILITY"
-    # print_message(GREEN if assessment.is_vulnerability else YELLOW, "VERDICT", f"{verdict} (confidence={assessment.confidence:.2f})")
-    # if assessment.reasons:
-    #     print_message(CYAN, "REASONS", "\\n - " + "\\n - ".join(assessment.reasons))
-
-    # # Save JSON
-    # args.json_out.write_text(assessment.model_dump_json(indent=2))
-    # print_message(GREEN, "OK", f"Saved JSON report to: {args.json_out}")
 
 if __name__ == "__main__":
     main()
