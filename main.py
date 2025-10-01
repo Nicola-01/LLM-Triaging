@@ -80,62 +80,6 @@ class AnalysisEnvelope(BaseModel):
             encoding=encoding,
         )
 
-# ---------- APK helpers ----------
-
-def is_valid_apk(p: Path) -> bool:
-    """Check if the given file is a valid APK (extension, ZIP, has AndroidManifest.xml)."""
-    if not p.is_file() or p.suffix.lower() != ".apk":
-        return False
-    try:
-        with zipfile.ZipFile(p, "r") as zf:
-            zf.testzip()  # ensure ZIP is valid
-            if "AndroidManifest.xml" not in set(zf.namelist()):
-                return False
-        return True
-    except Exception:
-        return False
-
-def extract_so_files(apk: Path, workdir: Path) -> List[Path]:
-    """
-    Extract .so files from the APK into workdir/lib/<abi>/.
-    Returns list of extracted file paths (preferring arm64-v8a first).
-    """
-    so_paths: List[Path] = []
-    with zipfile.ZipFile(apk, "r") as zf:
-        for name in zf.namelist():
-            if name.startswith("lib/") and name.endswith(".so"):
-                out_path = workdir / name
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(out_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                so_paths.append(out_path)
-    # Prefer arm64-v8a ordering
-    so_paths.sort(key=lambda p: (0 if "arm64-v8a" in str(p) else 1, str(p)))
-    return so_paths
-
-def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: bool = False) -> List[Path]:
-    """
-
-    """
-    relevant_libs: List[Path] = []
-    
-    nm = shutil.which("nm") or shutil.which("llvm-nm") 
-    if not nm:
-        print_message(RED, "ERROR", "Neither 'nm' nor 'llvm-nm' command is available in PATH.")
-        print_message(YELLOW, "WARN", "Returning all .so files without filtering.")
-        return so_paths
-    
-    for so in so_paths:
-        try:
-            nm_out = subprocess.check_output([nm, "-D", str(so)], text=True, stderr=subprocess.DEVNULL)
-            symbols = set(line.split()[-1] for line in nm_out.splitlines() if line and not line.startswith("U "))
-            if any(jni in symbols for jni in jniBridgeMethod):
-                relevant_libs.append(so)
-        except Exception:
-            continue
-        
-    return relevant_libs
-
 # ---------- Argument parsing ----------
 def parse_args():
     p = argparse.ArgumentParser(description="APK + crash report -> vulnerability assessment via Jadx/Ghidra MCP")
