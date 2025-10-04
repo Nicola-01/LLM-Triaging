@@ -164,7 +164,7 @@ async def mcp_vuln_assessment(model_name: str, files: List[str], crashes : Crash
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout, verbose=True)
+    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()

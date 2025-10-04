@@ -25,24 +25,31 @@ All prompts and key steps are commented in English.
 
 TOOL_VERSION = "0.1"
 
+
 import argparse
 import asyncio
 import json
 import os
 import sys
 import tempfile
+import re
 
 from pathlib import Path
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 
 from CrashSummary import Crashes
 from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assessment
 from utils import *
 from jadx_helper_functions import start_jadx_gui
 from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
+
+# Matches case folders like: fname-signature@cs_number-io_matching_possibility
+_CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
 
 # ---------- Data models for JSON output ----------
 class ToolInfo(BaseModel):
@@ -79,12 +86,15 @@ class AnalysisEnvelope(BaseModel):
 
 # ---------- Argument parsing ----------
 def parse_args():
-    p = argparse.ArgumentParser(description="APK + crash report -> vulnerability assessment via Jadx/Ghidra MCP")
-    p.add_argument("apk", type=Path, help="Path to the APK file")
-    p.add_argument("crash_txt", type=Path, help="Path to the crash report .txt")
+    default_outdir = Path(f"classification_{datetime.now(timezone.utc).astimezone().strftime("%Y_%m_%d_%H:%M")}")
+    p = argparse.ArgumentParser(description="POIROT output dir-> vulnerability assessment via Jadx/Ghidra MCP")
+    p.add_argument("target_APK", type=Path, help="Path to the POIROT output folder (containing the APPNAME/ subfolders)")
+
+    p.add_argument("--apk-list", type=Path, default=None, help="Path to a .txt file containing the list of APKs/APPNAMEs to be included (one per line)." )
     p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
-    p.add_argument("-o", "--json-out", type=Path, default=Path("report.json"), help="Path to save JSON report")
+    p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=120, help="Timeout (seconds) for MCP servers")
+    p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
     # p.add_argument("--headless", action="store_true", help="Do NOT open Jadx GUI (requires that Jadx MCP can operate headlessly)")
     p.add_argument("-d", "--debug", action="store_true", help="Enable verbose debug logs")
     p.add_argument("-v", "--verbose", action="store_true", help="Echo system/user prompts and model outputs")
@@ -92,7 +102,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
+async def run_assessment(apk: Path, backtraces: Path, args) -> AnalysisEnvelope:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -112,8 +122,8 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
     ----------
     apk : pathlib.Path
         Path to the target APK.
-    crash_txt : pathlib.Path
-        Path to the crash report (.txt) for a single JNI-driven crash.
+    backtraces : pathlib.Path
+        Path to folder2backtraces.txt for a single JNI-driven crash.
     args : argparse.Namespace
 
     Returns
@@ -130,8 +140,8 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
     if not is_valid_apk(apk):
         print_message(RED, "ERROR", f"Invalid APK: {apk}")
         sys.exit(1)
-    if not crash_txt.is_file():
-        print_message(RED, "ERROR", f"Crash file not found: {crash_txt}")
+    if not backtraces.is_file():
+        print_message(RED, "ERROR", f"Crash file not found: {backtraces}")
         sys.exit(1)
 
     start_jadx_gui(str(apk))
@@ -139,7 +149,7 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
     appMetadata = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
 
     # Parse crash report
-    crashes = Crashes(crash_txt)
+    crashes = Crashes(backtraces)
                 
     # Prepare native libs via APK extraction
     print_message(BLUE, "INFO", f"Extracting .so files from APK: {apk}")
@@ -165,8 +175,171 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
     envelope = AnalysisEnvelope(
         analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool)
     )
-    envelope.to_json_file(Path("analysis_report.json"))
+    print_message(BLUE, "INFO", f"Assessment completed. Summary:")
+    return envelope
     
+    
+def _normalize_name_for_filter(s: str) -> str:
+    """Normalize a --apk-list line so it can be matched with APPNAME or the APK filename."""
+    s = s.strip()
+    if not s:
+        return ""
+    base = os.path.basename(s)
+    # strip trailing ".apk" if present
+    if base.lower().endswith(".apk"):
+        base = base[:-4]
+    return base
+
+def load_filter_set(apk_list_path: Optional[Path], *, debug: bool=False) -> Optional[set]:
+    """Load a set of names from --apk-list (APPNAME or APK name without extension)."""
+    if not apk_list_path:
+        return None
+    if not apk_list_path.is_file():
+        print_message(YELLOW, "WARN", f"--apk-list not found: {apk_list_path}")
+        return None
+    names = set()
+    for line in apk_list_path.read_text(encoding="utf-8").splitlines():
+        name = _normalize_name_for_filter(line)
+        if name:
+            names.add(name)
+    if debug:
+        print_message(GREEN, "DEBUG", f"Filter loaded with {len(names)} entries from --apk-list")
+    return names or None
+
+def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=None, debug: bool=False):
+    """
+    Return a list of tuples: (path_to_folder2backtraces_txt, path_to_base_apk).
+
+    Expected structure:
+      target_APK/
+        ├── APPNAME/
+            ├── base.apk
+            └── fuzzing_output/
+                └── <case_dir>/
+                    └── reproduced_crashes/
+                        └── folder2backtraces.txt
+
+    Rules:
+    - Only consider <case_dir> names matching _CASE_DIR_RE.
+    - Only include cases that contain 'reproduced_crashes/folder2backtraces.txt'.
+    - If apk_filter is provided, keep only apps whose APPNAME or APK basename (without .apk) is in the filter.
+    - If debug=True, print selected directories and summary counts.
+    """
+    results = []
+
+    if not target_apk_dir.is_dir():
+        print_message(RED, "ERROR", f"target_APK is not a valid directory: {target_apk_dir}")
+        return results
+
+    for app_dir in sorted(target_apk_dir.iterdir()):
+        if not app_dir.is_dir():
+            continue
+        appname = app_dir.name
+
+        base_apk = app_dir / "base.apk"
+        if not base_apk.is_file():
+            if debug:
+                print_message(YELLOW, "WARN", f"base.apk not found for {appname} in {app_dir}")
+            continue
+
+        # Apply --apk-list filter (match APPNAME or APK stem)
+        if apk_filter:
+            base_stem = base_apk.stem
+            if (appname not in apk_filter) and (base_stem not in apk_filter):
+                continue
+
+        fuzz_dir = app_dir / "fuzzing_output"
+        if not fuzz_dir.is_dir():
+            if debug:
+                print_message(YELLOW, "WARN", f"fuzzing_output not found for {appname}")
+            continue
+
+        for case_dir in sorted(fuzz_dir.iterdir()):
+            if not case_dir.is_dir():
+                continue
+            if not _CASE_DIR_RE.match(case_dir.name):
+                continue
+
+            reproduced = case_dir / "reproduced_crashes"
+            bt_file = reproduced / "folder2backtraces.txt"
+            if bt_file.is_file():
+                results.append((bt_file, base_apk))
+                if debug:
+                    print_message(GREEN, "SELECTED", f"{appname} : {case_dir.name}")
+
+    print_message(BLUE, "INFO", f"Found {len(results)} (folder2backtraces.txt, base.apk) pairs")
+    return results
+
+    # --- Single job runner (used by workers or sequential mode) ---
+def _run_single(pair, out_root, args, debug=False):
+    """Run the assessment for a single (backtraces, apk) pair."""
+    backtraces, apk = pair
+    appname = apk.parent.name
+    case_dir_name = backtraces.parent.parent.name  # .../reproduced_crashes/.. -> case dir
+
+    # Final path: out_root/APPNAME/<case_dir>/report.json
+    final_dir = out_root / appname / case_dir_name
+    final_dir.mkdir(parents=True, exist_ok=True)
+    final_json = final_dir / "report.json"
+
+    if debug:
+        print_message(BLUE, "INFO", f"Starting assessment: {appname} :: {case_dir_name}")
+    result = asyncio.run(run_assessment(apk, backtraces, args))
+    result.to_json_file(final_json)
+    if debug:
+        print_message(GREEN, "DONE", f"Wrote {final_json}")
+
+def run(args):
+    """Run the full assessment for all APKs in target_APK."""
+    
+    out_root = args.out_dir
+    out_root.mkdir(parents=True, exist_ok=True)
+    print_message(BLUE, "INFO", f"Output root: {out_root}")
+        
+    # --- Optional filter set ---
+    apk_filter = load_filter_set(args.apk_list, debug=args.debug)
+
+    # --- Discover pairs (backtraces, apk) ---
+    pairs = find_backtrace_apk_pairs(args.target_APK, apk_filter=apk_filter, debug=args.debug)
+    if not pairs:
+        print_message(YELLOW, "WARN", "No pairs found. Exiting.")
+        sys.exit(0)
+        
+
+    # --- Execution: single or multi-thread ---
+    n_threads = max(1, int(args.threads or 1))
+    if n_threads == 1:
+        if args.debug:
+            print_message(GREEN, "DEBUG", "Running single-thread (method: asyncio.run per job).")
+        for pair in pairs:
+            _run_single(pair, out_root, args, debug=args.debug)
+    else:
+        if args.debug:
+            print_message(GREEN, "DEBUG", f"Running multi-thread with {n_threads} threads (method: asyncio.run per job).")
+        print_message(RED, "NOT IMPLEMENTED", "Multi-threaded execution is not yet implemented.")
+        sys.exit(1)
+        # Fair split across threads
+        chunks = [[] for _ in range(n_threads)]
+        for i, pair in enumerate(pairs):
+            chunks[i % n_threads].append(pair)
+
+        if args.debug:
+            for i, ch in enumerate(chunks, start=1):
+                print_message(GREEN, "DEBUG", f"Thread {i} gets {len(ch)} items.")
+
+        def _worker(idx, chunk):
+            if args.debug:
+                print_message(BLUE, "INFO", f"Thread {idx} started (method: asyncio.run per job).")
+            for pair in chunk:
+                _run_single(pair, out_root, args, debug=args.debug)
+
+        with ThreadPoolExecutor(max_workers=n_threads) as ex:
+            futures = [ex.submit(_worker, i+1, chunks[i]) for i in range(n_threads)]
+            for fut in as_completed(futures):
+                exc = fut.exception()
+                if exc:
+                    print_message(RED, "ERROR", f"Worker raised an exception: {exc}")
+                    # Keep going; other workers may still complete.
 
 def main():
     args = parse_args()
@@ -201,8 +374,8 @@ def main():
         print_message(GREEN, "DEBUG", f"Using Ghidra install dir: {os.getenv('GHIDRA_INSTALL_DIR')}")
         
     # --- Run the assessment ---
-
-    asyncio.run(run_assessment(args.apk, args.crash_txt, args))
+    
+    run(args)
 
 
 if __name__ == "__main__":
