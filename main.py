@@ -45,7 +45,7 @@ from functools import partial
 from CrashSummary import Crashes
 from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assessment
 from utils import *
-from jadx_helper_functions import start_jadx_gui
+from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
 
 # Matches case folders like: fname-signature@cs_number-io_matching_possibility
@@ -55,9 +55,9 @@ _CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
 class ToolInfo(BaseModel):
     """Information about the tool and environment used for the assessment."""
     model_name: Optional[str] = None
-    timestamp_utc: str = Field(default_factory=lambda: datetime.now(datetime.timezone.utc).isoformat(timespec="seconds") + "Z")
+    # timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z")
     apk_path: Optional[str] = None
-    apk_sha256: Optional[str] = None
+    # apk_sha256: Optional[str] = None
     version: Optional[str] = None          
     notes: Optional[str] = None
 
@@ -65,7 +65,7 @@ class AnalysisBlock(BaseModel):
     """Holds the full analysis block, including tool info, app metadata, and results."""
     tool: Optional[ToolInfo] = None
     app: Optional[AppMetadata] = None
-    analysisResults: List[AnalysisResult] = Field(default_factory=list)
+    analysisResults: AnalysisResults = Field(default_factory=AnalysisResults)
     
 class AnalysisEnvelope(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""
@@ -102,7 +102,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_assessment(apk: Path, backtraces: Path, args) -> AnalysisEnvelope:
+async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisEnvelope:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -144,10 +144,6 @@ async def run_assessment(apk: Path, backtraces: Path, args) -> AnalysisEnvelope:
         print_message(RED, "ERROR", f"Crash file not found: {backtraces}")
         sys.exit(1)
 
-    start_jadx_gui(str(apk))
-    # Extract metadata via Jadx MCP
-    appMetadata = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
-
     # Parse crash report
     crashes = Crashes(backtraces)
                 
@@ -169,7 +165,7 @@ async def run_assessment(apk: Path, backtraces: Path, args) -> AnalysisEnvelope:
                 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
-        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, files=[str(p) for p in relevant], crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
+        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
         
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisEnvelope(
@@ -271,7 +267,7 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
     return results
 
     # --- Single job runner (used by workers or sequential mode) ---
-def _run_single(pair, out_root, args, debug=False):
+def _run_single(pair, appMetadata : AppMetadata, out_root : Path, args, debug=False) -> None:
     """Run the assessment for a single (backtraces, apk) pair."""
     backtraces, apk = pair
     appname = apk.parent.name
@@ -284,7 +280,7 @@ def _run_single(pair, out_root, args, debug=False):
 
     if debug:
         print_message(BLUE, "INFO", f"Starting assessment: {appname} :: {case_dir_name}")
-    result = asyncio.run(run_assessment(apk, backtraces, args))
+    result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
     result.to_json_file(final_json)
     if debug:
         print_message(GREEN, "DONE", f"Wrote {final_json}")
@@ -311,8 +307,30 @@ def run(args):
     if n_threads == 1:
         if args.debug:
             print_message(GREEN, "DEBUG", "Running single-thread (method: asyncio.run per job).")
+            
+        previous_appname = None
+        previous_appMetadata = None
         for pair in pairs:
-            _run_single(pair, out_root, args, debug=args.debug)
+            apk = pair[1]
+            appname = apk.parent.name
+            
+            if appname == previous_appname:
+                if args.debug:
+                    print_message(GREEN, "DEBUG", f"Re-using previous appMetadata for {appname}")
+                appMetadata = previous_appMetadata
+            else:
+                # Open Jadx GUI to make the project available to Jadx MCP
+                if args.debug:
+                    print_message(BLUE, "INFO", f"Killing (if any) and re-opening Jadx GUI for {appname}")
+                kill_jadx()  # kill previous instance (if any)
+                start_jadx_gui(str(apk))
+                # Extract metadata via Jadx MCP
+                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose))      
+
+            
+            _run_single(pair, appMetadata, out_root, args, debug=args.debug)
+            previous_appname = appname
+            previous_appMetadata = appMetadata
     else:
         if args.debug:
             print_message(GREEN, "DEBUG", f"Running multi-thread with {n_threads} threads (method: asyncio.run per job).")
@@ -376,6 +394,9 @@ def main():
     # --- Run the assessment ---
     
     run(args)
+    
+    #cleanup_temp_dirs()
+    shutil.rmtree('/pyghidra_mcp_projects', ignore_errors=True)
 
 
 if __name__ == "__main__":

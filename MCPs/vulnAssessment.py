@@ -158,7 +158,7 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
-async def mcp_vuln_assessment(model_name: str, files: List[str], crashes : Crashes, relevant: List[Path], timeout: int = 45, verbose: bool = False) -> AnalysisResults:
+async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List[Path], timeout: int = 45, verbose: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
     Returns a list of VulnAssessment, in the same order as 'crashes'.
@@ -170,7 +170,7 @@ async def mcp_vuln_assessment(model_name: str, files: List[str], crashes : Crash
     results = AnalysisResults()
 
     if verbose:
-        print_message(BLUE, "PROMPT", ASSESSMENT_SYSTEM_PROMPT)
+        print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
 
     # Build agent with BOTH toolsets
     async with get_agent(
