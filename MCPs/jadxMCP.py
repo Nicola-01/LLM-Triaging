@@ -22,6 +22,9 @@ def make_jadx_server(timeout: int = 30) -> MCPServerStdio:
     )
 
 class AppMetadata(BaseModel):
+    """
+    Metadata about an Android app extracted from Jadx.
+    """
     app_name: str
     package: str
     min_sdk: Optional[int] = None
@@ -64,8 +67,3 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
 
 class JNILibCandidates(BaseModel):
     libraries: list[str]  # without lib prefix and .so suffix
-
-# def get_jadx_jni_agent(model_name: Optional[str] = None):
-#     """Return an Agent configured to map JNI method -> likely native library names."""
-#     server = make_jadx_server()
-#     return get_agent(JADX_JNI_HELPER, JNILibCandidates, [server], model_name=model_name)

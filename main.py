@@ -29,12 +29,8 @@ import argparse
 import asyncio
 import json
 import os
-import re
-import shutil
-import subprocess
 import sys
 import tempfile
-import zipfile
 
 from pathlib import Path
 from typing import List, Optional
@@ -50,14 +46,16 @@ from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
 
 # ---------- Data models for JSON output ----------
 class ToolInfo(BaseModel):
+    """Information about the tool and environment used for the assessment."""
     model_name: Optional[str] = None
-    timestamp_utc: str = Field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    timestamp_utc: str = Field(default_factory=lambda: datetime.now(datetime.timezone.utc).isoformat(timespec="seconds") + "Z")
     apk_path: Optional[str] = None
     apk_sha256: Optional[str] = None
     version: Optional[str] = None          
     notes: Optional[str] = None
 
 class AnalysisBlock(BaseModel):
+    """Holds the full analysis block, including tool info, app metadata, and results."""
     tool: Optional[ToolInfo] = None
     app: Optional[AppMetadata] = None
     analysisResults: List[AnalysisResult] = Field(default_factory=list)
@@ -68,13 +66,12 @@ class AnalysisEnvelope(BaseModel):
 
 
     def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False,) -> str:
-        """
-        Serialize the whole envelope to JSON.
-        """
+        """Serialize the whole envelope to JSON."""
         data = self.model_dump(mode="python", exclude_none=exclude_none)
         return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
 
     def to_json_file(self, path: Path, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False, encoding: str = "utf-8",) -> None:
+        """Serialize to JSON and write to `path`."""
         path.write_text(
             self.to_json(indent=indent, exclude_none=exclude_none, ensure_ascii=ensure_ascii),
             encoding=encoding,
@@ -137,17 +134,13 @@ async def run_assessment(apk: Path, crash_txt: Path, args) -> None:
         print_message(RED, "ERROR", f"Crash file not found: {crash_txt}")
         sys.exit(1)
 
-    start_jadx_gui(str(apk), "jadx-gui", debug=args.debug)
+    start_jadx_gui(str(apk))
     # Extract metadata via Jadx MCP
     appMetadata = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose)      
 
     # Parse crash report
     crashes = Crashes(crash_txt)
-        
-    # print(crashes[0])
-    # print(crashes[1])
-    # print(crashes[2])
-        
+                
     # Prepare native libs via APK extraction
     print_message(BLUE, "INFO", f"Extracting .so files from APK: {apk}")
     with tempfile.TemporaryDirectory(prefix="apk_so_") as td:

@@ -30,7 +30,7 @@ def _reader_thread(stream, debug: bool = False):
             pass
 
 
-def _kill_jadx():
+def kill_jadx():
     """Terminate Jadx process group gracefully, fallback to SIGKILL if needed."""
     global JADX_PROC
     if not JADX_PROC:
@@ -52,7 +52,7 @@ def _install_signal_handlers():
     """Ensure Jadx is killed if the Python script receives SIGINT or SIGTERM."""
 
     def _handler(signum, frame):
-        _kill_jadx()
+        kill_jadx()
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -60,7 +60,7 @@ def _install_signal_handlers():
         signal.signal(s, _handler)
 
 
-def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45, debug: bool = False):
+def start_jadx_gui(apk_path: str, jadx_cmd: str = "jadx-gui", timeout_sec: int = 45, debug: bool = False):
     """Start Jadx GUI, wait until the MCP HTTP server is ready, then return."""
     print_message(CYAN, "INFO", "Opening APK with Jadx GUI...")
     jadx_cmd = require_executable(jadx_cmd, "jadx-gui")
@@ -80,7 +80,7 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45, debug: b
             preexec_fn=os.setsid,  # start a new process group (Unix)
             close_fds=True,
         )
-        atexit.register(_kill_jadx)
+        atexit.register(kill_jadx)
         _install_signal_handlers()
 
         # Start a background thread to read log lines
@@ -96,12 +96,12 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str, timeout_sec: int = 45, debug: b
                 "ERROR",
                 f"JADX did not report MCP server startup within {timeout_sec}s.",
             )
-            _kill_jadx()
+            kill_jadx()
             sys.exit(1)
 
         print_message(CYAN, "INFO", "JADX MCP is ready: the MCP HTTP server has started.")
 
     except Exception as e:
         print_message(RED, "ERROR", f"Failed to open Jadx GUI: {e}")
-        _kill_jadx()
+        kill_jadx()
         sys.exit(1)

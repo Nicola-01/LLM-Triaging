@@ -22,6 +22,10 @@ def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 1
 
     quoted = " ".join([f'"{f}"' for f in files])
     redir = "" if verbose else "2>/dev/null"
+    
+    # Clean up old projects
+    shutil.rmtree('/pyghidra_mcp_projects', ignore_errors=True)
+    
     cmd = f'uvx --quiet pyghidra-mcp -t stdio {quoted} {redir}'
 
     return MCPServerStdio(
@@ -33,9 +37,3 @@ def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 1
 
 class GhidraFunctionList(BaseModel):
     methods: list[str]
-
-# def get_ghidra_functions_agent(files: List[str]):
-#     """Quick agent to list functions; useful for smoke tests."""
-#     server = make_ghidra_server(files)
-#     return get_agent(GHIDRA_FUNCTION_ANALYZER, GhidraFunctionList, [server])
-

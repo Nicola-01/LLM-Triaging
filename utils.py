@@ -63,7 +63,7 @@ def extract_so_files(apk: Path, workdir: Path) -> List[Path]:
 
 def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: bool = False) -> List[Path]:
     """
-
+    Given a list of .so files, return those that implement JNI methods.
     """
     relevant_libs: List[Path] = []
     

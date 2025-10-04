@@ -13,6 +13,9 @@ from .prompts.vulnAssesment_prompts import ASSESSMENT_SYSTEM_PROMPT
 
 @dataclass
 class EvidenceItem(BaseModel):
+    """
+    A single piece of evidence supporting a vulnerability assessment.
+    """
     function: Optional[str] = None       # e.g., "mp4_write_one_h264"
     address: Optional[str] = None        # e.g., "0x7fa1234"
     file: Optional[str] = None           # source/path if known
@@ -39,6 +42,8 @@ class EvidenceItem(BaseModel):
 
 @dataclass
 class VulnAssessment(BaseModel):
+    """
+    Result of a vulnerability assessment for a single crash."""
     is_vulnerability: bool = Field(..., description="True if likely a genuine vulnerability")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0,1]")
     reasons: List[str] = Field(default_factory=list, description="Bullet points supporting the decision")
@@ -89,6 +94,8 @@ class VulnAssessment(BaseModel):
         )
 
 class AnalysisResult(BaseModel):
+    """
+    Combines a CrashSummary with its corresponding VulnAssessment."""
     crash: CrashSummary
     assessment: VulnAssessment
     
@@ -113,6 +120,9 @@ class AnalysisResult(BaseModel):
     
 
 class AnalysisResults(BaseModel):
+    """
+    Collection of AnalysisResult entries.
+    """
     analysisResults: List[AnalysisResult]
     
     def __init__(self, **data):
@@ -154,7 +164,7 @@ async def mcp_vuln_assessment(model_name: str, files: List[str], crashes : Crash
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout)
+    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout, verbose=True)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
