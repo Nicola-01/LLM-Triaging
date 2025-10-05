@@ -5,14 +5,9 @@ from typing import Optional
 from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
-from ollamaLocal import get_agent
 from utils import *
-# from .prompts.jadx_prompts import *
-
-JADX_APP_METADATA = """
-You are a Jadx MCP assistant. Your goal is to extract app metadata from the
-APK currently open in Jadx.
-"""
+from .prompts.jadx_prompts import *
+from .ollamaLocal import get_agent
 
 # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
 def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
@@ -20,7 +15,6 @@ def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
     Start the Jadx MCP server using uv, assuming the environment variable JADX_MCP_DIR is set.
     """
     jadx_dir = os.getenv("JADX_MCP_DIR")
-    jadx_dir = "/home/nicola/Desktop/Tesi/jadx-ai-mcp/jadx-mcp-server-v3.1.0/jadx-mcp-server"
     return MCPServerStdio(
         "uv",
         args=["--directory", jadx_dir, "run", "jadx_mcp_server.py"],
@@ -63,48 +57,16 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     server = make_jadx_server()
     if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
     
-    # async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
-    #     j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
-    # app: AppMetadata = j_meta.output
-    
     async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
-        j_meta = await j_agent.run("Can you access to the MCP Server? Only respond with yes or no. If yesm, give me the value of 'package' field.")
+        j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
     app: AppMetadata = j_meta.output
-    
+        
     if verbose: print_message(PURPLE, "RESPONSE", str(app))
     
     if debug:
         print_message(GREEN, "LLM-USAGE", j_meta.usage())
-        
-    sys.exit(0)  # DEBUGGING: exit here to inspect the output
-    
+            
     return app
 
 class JNILibCandidates(BaseModel):
     libraries: list[str]  # without lib prefix and .so suffix
-    
-
-import asyncio
-
-def chatBotMode():
-    
-    while True:
-        # input_text = str(input("Enter your question: "))
-        input_text = "Can you access to the MCP Server? Only respond with yes or no. If yesm, give me the value of 'package' field."
-        # print(f"You asked: {input_text}")
-
-        async def run_chat():
-            async with get_agent(JADX_APP_METADATA, AppMetadata, toolsets=[make_jadx_server()]) as j_agent:
-                j_libs = await j_agent.run(input_text)
-                
-                print_message(PURPLE, "RESPONSE", str(j_libs.output))
-                print_message(GREEN, "LLM-USAGE", j_libs.usage())
-                
-        asyncio.run(run_chat())
-                
-        input_text = input("New question? (y/n): ")
-        if input_text.lower() != 'y':
-            break
-
-
-chatBotMode()
