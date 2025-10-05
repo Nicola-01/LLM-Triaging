@@ -54,7 +54,7 @@ from typing import List, Dict, Any, Optional
 # Project-local imports (do not change existing modules)
 
 from utils import *
-from MCPs.get_agent import get_agent
+from MCPs.ollamaLocal import get_agent
 from MCPs.jadxMCP import make_jadx_server
 from MCPs.ghidraMCP import make_ghidra_server
 
