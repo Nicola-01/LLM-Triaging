@@ -10,7 +10,7 @@ from .prompts.jadx_prompts import *
 from .get_agent import get_agent
 
 # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
-def make_jadx_server(timeout: int = 30) -> MCPServerStdio:
+def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
     """
     Start the Jadx MCP server using uv, assuming the environment variable JADX_MCP_DIR is set.
     """
@@ -62,6 +62,9 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     app: AppMetadata = j_meta.output
     
     if verbose: print_message(PURPLE, "RESPONSE", str(app))
+    
+    if debug:
+        print_message(GREEN, "LLM-USAGE", j_meta.usage())
     
     return app
 

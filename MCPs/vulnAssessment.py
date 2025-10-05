@@ -158,7 +158,7 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
-async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List[Path], timeout: int = 45, verbose: bool = False) -> AnalysisResults:
+async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List[Path], timeout: int = 45, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
     Returns a list of VulnAssessment, in the same order as 'crashes'.
@@ -194,6 +194,9 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List
 
             if verbose:
                 print_message(PURPLE, "RESPONSE", vuln)
+                
+            if debug:
+                print_message(GREEN, "LLM-USAGE", resp.usage())
 
     return results
         

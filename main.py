@@ -152,9 +152,9 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
     with tempfile.TemporaryDirectory(prefix="apk_so_") as td:
         workdir = Path(td)
         so_paths = extract_so_files(apk, workdir)
-        if args.debug:
-            for pth in so_paths:
-                print_message(GREEN, "SO", f"found {pth}")
+        # if args.debug:
+        #     for pth in so_paths:
+        #         print_message(GREEN, "SO", f"found {pth}")
         relevant = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug) or so_paths[:3]  # fallback to top few
         if not relevant:
             print_message(YELLOW, "WARN", "No relevant libs identified; proceeding with all .so files.")
@@ -165,7 +165,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
                 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
-        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose)
+        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
         
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisEnvelope(
@@ -246,8 +246,8 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
 
         fuzz_dir = app_dir / "fuzzing_output"
         if not fuzz_dir.is_dir():
-            if debug:
-                print_message(YELLOW, "WARN", f"fuzzing_output not found for {appname}")
+            # if debug:
+            #     print_message(YELLOW, "WARN", f"fuzzing_output not found for {appname}")
             continue
 
         for case_dir in sorted(fuzz_dir.iterdir()):
@@ -325,7 +325,7 @@ def run(args):
                 kill_jadx()  # kill previous instance (if any)
                 start_jadx_gui(str(apk))
                 # Extract metadata via Jadx MCP
-                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose))      
+                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=args.debug))      
 
             
             _run_single(pair, appMetadata, out_root, args, debug=args.debug)
