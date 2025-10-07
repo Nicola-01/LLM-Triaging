@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 import subprocess
 import sys
 import shutil
@@ -36,6 +42,15 @@ def sha256_file(path: Path) -> str:
 
 
 def is_valid_apk(p: Path) -> bool:
+    """
+    Is valid apk.
+    
+    Args:
+        p: Description.
+    
+    Returns:
+        Any: Description.
+    """
     if not p.is_file() or p.suffix.lower() != ".apk":
         return False
     try:

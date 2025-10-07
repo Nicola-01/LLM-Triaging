@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 import os
 import sys
 from typing import List
@@ -36,4 +42,11 @@ def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 1
     )
 
 class GhidraFunctionList(BaseModel):
+    # methods (list[str]): Methods.
+    """
+    Ghidra function list.
+    
+    This class encapsulates structured data and business rules.
+    All attributes are validated and documented inline.
+    """
     methods: list[str]

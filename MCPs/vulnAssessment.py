@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 from dataclasses import asdict, dataclass, is_dataclass
 import json
 import textwrap
@@ -16,6 +22,13 @@ class EvidenceItem(BaseModel):
     """
     A single piece of evidence supporting a vulnerability assessment.
     """
+    # function (Optional[str]): Function.
+    # Fields
+    # - **function** (Optional[str]): Function.
+    # - **address** (Optional[str]): Address.
+    # - **file** (Optional[str]): File.
+    # - **snippet** (Optional[str]): Snippet.
+    # - **note** (Optional[str]): Note.
     function: Optional[str] = None       # e.g., "mp4_write_one_h264"
     address: Optional[str] = None        # e.g., "0x7fa1234"
     file: Optional[str] = None           # source/path if known
@@ -44,6 +57,18 @@ class EvidenceItem(BaseModel):
 class VulnAssessment(BaseModel):
     """
     Result of a vulnerability assessment for a single crash."""
+    # is_vulnerability (bool): Is vulnerability.
+    # Fields
+    # - **is_vulnerability** (bool): Is vulnerability.
+    # - **confidence** (float): Confidence.
+    # - **reasons** (List[str]): Reasons.
+    # - **cwe_ids** (List[str]): Cwe ids.
+    # - **severity** (Optional[str]): Severity.
+    # - **affected_libraries** (List[str]): Affected libraries.
+    # - **evidence** (List[EvidenceItem]): Evidence.
+    # - **recommendations** (List[str]): Recommendations.
+    # - **assumptions** (List[str]): Assumptions.
+    # - **limitations** (List[str]): Limitations.
     is_vulnerability: bool = Field(..., description="True if likely a genuine vulnerability")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0,1]")
     reasons: List[str] = Field(default_factory=list, description="Bullet points supporting the decision")
@@ -96,6 +121,10 @@ class VulnAssessment(BaseModel):
 class AnalysisResult(BaseModel):
     """
     Combines a CrashSummary with its corresponding VulnAssessment."""
+    # crash (CrashSummary): Crash.
+    # Fields
+    # - **crash** (CrashSummary): Crash.
+    # - **assessment** (VulnAssessment): Assessment.
     crash: CrashSummary
     assessment: VulnAssessment
     
@@ -123,11 +152,32 @@ class AnalysisResults(BaseModel):
     """
     Collection of AnalysisResult entries.
     """
+    # analysisResults (List[AnalysisResult]): Analysis results.
+    # Fields
+    # - **analysisResults** (List[AnalysisResult]): Analysis results.
+    """
+    Init.
+    
+    Args:
+        **data: Description.
+    
+    Returns:
+        Any: Description.
+    """
     analysisResults: List[AnalysisResult]
     
     def __init__(self, **data):
         if "analysisResults" not in data:
             data["analysisResults"] = []
+    """
+    Append.
+    
+    Args:
+        item: Description.
+    
+    Returns:
+        Any: Description.
+    """
         super().__init__(**data)
         
     def append(self, item: AnalysisResult):

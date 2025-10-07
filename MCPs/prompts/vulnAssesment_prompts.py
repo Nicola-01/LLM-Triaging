@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 ASSESSMENT_SYSTEM_PROMPT = """
 You are a senior mobile reverse-engineering and security engineer. You can use two MCP toolsets:
 - Jadx MCP: Android manifest/resources/class exploration.

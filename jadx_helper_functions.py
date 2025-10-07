@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 from utils import *
 import subprocess
 import os

@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 import json
 import os
 import sys
@@ -24,6 +30,20 @@ def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
 class AppMetadata(BaseModel):
     """
     Metadata about an Android app extracted from Jadx.
+    """
+    # app_name (str): App name.
+    # Fields
+    # - **app_name** (str): App name.
+    # - **package** (str): Package.
+    # - **min_sdk** (Optional[int]): Min sdk.
+    # - **target_sdk** (Optional[int]): Target sdk.
+    # - **version_name** (Optional[str]): Version name.
+    # - **version_code** (Optional[str]): Version code.
+    """
+    Str.
+    
+    Returns:
+        Any: Description.
     """
     app_name: str
     package: str
@@ -69,4 +89,9 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     return app
 
 class JNILibCandidates(BaseModel):
+    # libraries (list[str]): Libraries.
+    """
+    This class encapsulates structured data and business rules.
+    All attributes are validated and documented inline.
+    """
     libraries: list[str]  # without lib prefix and .so suffix

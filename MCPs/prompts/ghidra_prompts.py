@@ -9,6 +9,12 @@
 # """
 
 # Vulnerability assessor prompt used from the orchestrator.
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 GHIDRA_VULN_ASSESSMENT = """
 You are a native code vulnerability assessor using Ghidra. You will be given:
 - A list of target function names 

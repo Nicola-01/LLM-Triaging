@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 import textwrap
 from typing import List, Iterable, Union, Sequence
 from dataclasses import dataclass
@@ -20,6 +26,14 @@ class CrashSummary:
         FuzzHarnessEntry:   The line at position (len(section) - 2).
         ProgramEntry:       The last line in the section (typically 'main').
     """
+    # ProcessTermination (str): Process termination.
+    # Fields
+    # - **ProcessTermination** (str): Process termination.
+    # - **StackTrace** (List[str]): Stack trace.
+    # - **AppNativeFunction** (str): App native function.
+    # - **JNIBridgeMethod** (str): J n i bridge method.
+    # - **FuzzHarnessEntry** (str): Fuzz harness entry.
+    # - **ProgramEntry** (str): Program entry.
     ProcessTermination: str
     StackTrace: List[str]
     AppNativeFunction: str

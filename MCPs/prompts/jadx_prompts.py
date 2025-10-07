@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 
 # --- App metadata extraction ---
+"""
+Module overview:
+- Purpose: Provide high-level description of this module.
+- Important classes/functions are documented inline.
+"""
+
 JADX_APP_METADATA = """
 You are a Jadx MCP assistant. Your goal is to extract app metadata from the
 APK currently open in Jadx.
