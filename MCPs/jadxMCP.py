@@ -7,7 +7,7 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from utils import *
 from .prompts.jadx_prompts import *
-from .ollamaLocal import get_agent
+from .get_agent import get_agent
 
 # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
 def make_jadx_server(timeout: int = 60) -> MCPServerStdio:

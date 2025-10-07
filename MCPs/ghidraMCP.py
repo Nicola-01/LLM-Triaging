@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
 from utils import *
-from .ollamaLocal import get_agent
+from .get_agent import get_agent
 from .prompts.ghidra_prompts import GHIDRA_VULN_ASSESSMENT
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
