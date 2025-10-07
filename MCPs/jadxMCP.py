@@ -7,7 +7,7 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from utils import *
 from .prompts.jadx_prompts import *
-from .get_agent import get_agent
+from .ollamaLocal import get_agent
 
 # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
 def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
@@ -52,7 +52,7 @@ class AppMetadata(BaseModel):
         data = self.model_dump(exclude_none=exclude_none)
         return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
 
-async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False):
+async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False, debug: bool = False) -> AppMetadata:
     """Return an Agent configured to extract app metadata from Jadx."""
     server = make_jadx_server()
     if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
@@ -60,12 +60,12 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
         j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
     app: AppMetadata = j_meta.output
-    
+        
     if verbose: print_message(PURPLE, "RESPONSE", str(app))
     
     if debug:
         print_message(GREEN, "LLM-USAGE", j_meta.usage())
-    
+            
     return app
 
 class JNILibCandidates(BaseModel):

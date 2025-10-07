@@ -8,7 +8,7 @@ from CrashSummary import CrashSummary, Crashes
 from MCPs.ghidraMCP import make_ghidra_server
 from MCPs.jadxMCP import make_jadx_server
 from utils import *
-from .get_agent import get_agent
+from .ollamaLocal import get_agent
 from .prompts.vulnAssesment_prompts import ASSESSMENT_SYSTEM_PROMPT
 
 @dataclass
