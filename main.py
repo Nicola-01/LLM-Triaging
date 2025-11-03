@@ -48,6 +48,7 @@ from utils import *
 from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
 
+
 # Matches case folders like: fname-signature@cs_number-io_matching_possibility
 _CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
 
@@ -91,9 +92,9 @@ def parse_args():
     p.add_argument("target_APK", type=Path, help="Path to the POIROT output folder (containing the APPNAME/ subfolders)")
 
     p.add_argument("--apk-list", type=Path, default=None, help="Path to a .txt file containing the list of APKs/APPNAMEs to be included (one per line)." )
-    p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
+    p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gpt-5"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
-    p.add_argument("--timeout", type=int, default=120, help="Timeout (seconds) for MCP servers")
+    p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
     p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
     # p.add_argument("--headless", action="store_true", help="Do NOT open Jadx GUI (requires that Jadx MCP can operate headlessly)")
     p.add_argument("-d", "--debug", action="store_true", help="Enable verbose debug logs")
@@ -155,7 +156,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
         # if args.debug:
         #     for pth in so_paths:
         #         print_message(GREEN, "SO", f"found {pth}")
-        relevant = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug) or so_paths[:3]  # fallback to top few
+        relevant = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug)
         if not relevant:
             print_message(YELLOW, "WARN", "No relevant libs identified; proceeding with all .so files.")
             relevant = so_paths
@@ -165,7 +166,11 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
                 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
-        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        
+        try:
+            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        except Exception as e:
+            handle_model_errors(e)
         
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisEnvelope(
@@ -279,7 +284,7 @@ def _run_single(pair, appMetadata : AppMetadata, out_root : Path, args, debug=Fa
     final_json = final_dir / "report.json"
 
     if debug:
-        print_message(BLUE, "INFO", f"Starting assessment: {appname} :: {case_dir_name}")
+        print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
     result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
     result.to_json_file(final_json)
     if debug:
@@ -303,34 +308,40 @@ def run(args):
         
 
     # --- Execution: single or multi-thread ---
-    n_threads = max(1, int(args.threads or 1))
-    if n_threads == 1:
-        if args.debug:
-            print_message(GREEN, "DEBUG", "Running single-thread (method: asyncio.run per job).")
+    # n_threads = max(1, int(args.threads or 1))
+    # if n_threads == 1:
+    if args.debug:
+        print_message(GREEN, "DEBUG", "Running single-thread (method: asyncio.run per job).")
+        
+    previous_appname = None
+    previous_appMetadata = None
+    for pair in pairs:
+        apk = pair[1]
+        appname = apk.parent.name
+        
+        if appname == previous_appname:
+            if args.debug:
+                print_message(GREEN, "DEBUG", f"Re-using previous appMetadata for {appname}")
+            appMetadata = previous_appMetadata
+        else:
+            # Open Jadx GUI to make the project available to Jadx MCP
+            if args.debug:
+                print_message(BLUE, "INFO", f"Killing (if any) and re-opening Jadx GUI for {appname}")
+            kill_jadx()  # kill previous instance (if any)
+            start_jadx_gui(str(apk))
+            # Extract metadata via Jadx MCP
             
-        previous_appname = None
-        previous_appMetadata = None
-        for pair in pairs:
-            apk = pair[1]
-            appname = apk.parent.name
-            
-            if appname == previous_appname:
-                if args.debug:
-                    print_message(GREEN, "DEBUG", f"Re-using previous appMetadata for {appname}")
-                appMetadata = previous_appMetadata
-            else:
-                # Open Jadx GUI to make the project available to Jadx MCP
-                if args.debug:
-                    print_message(BLUE, "INFO", f"Killing (if any) and re-opening Jadx GUI for {appname}")
-                kill_jadx()  # kill previous instance (if any)
-                start_jadx_gui(str(apk))
-                # Extract metadata via Jadx MCP
+            try:
                 appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=args.debug))      
+            except Exception as e:
+                handle_model_errors(e)
 
-            
-            _run_single(pair, appMetadata, out_root, args, debug=args.debug)
-            previous_appname = appname
-            previous_appMetadata = appMetadata
+        
+        _run_single(pair, appMetadata, out_root, args, debug=args.debug)
+        previous_appname = appname
+        previous_appMetadata = appMetadata
+        
+    """
     else:
         if args.debug:
             print_message(GREEN, "DEBUG", f"Running multi-thread with {n_threads} threads (method: asyncio.run per job).")
@@ -358,6 +369,8 @@ def run(args):
                 if exc:
                     print_message(RED, "ERROR", f"Worker raised an exception: {exc}")
                     # Keep going; other workers may still complete.
+                    
+    """
 
 def main():
     args = parse_args()

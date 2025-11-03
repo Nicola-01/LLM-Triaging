@@ -10,7 +10,9 @@ import shutil
 import hashlib
 from pathlib import Path
 import zipfile
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+from google.genai.errors import ClientError, ServerError
 
 RED='\033[0;31m'                                                   
 YELLOW='\033[0;33m'                                                                                                                          
@@ -78,17 +80,51 @@ def extract_so_files(apk: Path, workdir: Path) -> List[Path]:
 
 def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: bool = False) -> List[Path]:
     """
-    Given a list of .so files, return those that implement JNI methods.
+    Given a list of .so files, return those that implement JNI methods,
+    preferring specific ABIs in the following order:
+        arm64-v8a > armeabi-v7a > armeabi > arm* > x86_64 > x86 > any other.
     """
     relevant_libs: List[Path] = []
-    
-    nm = shutil.which("nm") or shutil.which("llvm-nm") 
+
+    nm = shutil.which("nm") or shutil.which("llvm-nm")
     if not nm:
         print_message(RED, "ERROR", "Neither 'nm' nor 'llvm-nm' command is available in PATH.")
         print_message(YELLOW, "WARN", "Returning all .so files without filtering.")
         return so_paths
-    
+
+    # Group libs by ABI (directory name under /lib/)
+    abi_groups: Dict[str, List[Path]] = {}
     for so in so_paths:
+        abi = so.parent.name
+        abi_groups.setdefault(abi, []).append(so)
+
+    # Define ABI preference order
+    abi_preference = [
+        "arm64-v8a",
+        "armeabi-v7a",
+        "armeabi",
+        "arm",
+        "x86_64",
+        "x86"
+    ]
+
+    # Select the best available ABI group
+    selected_abi = None
+    for abi in abi_preference:
+        if abi in abi_groups:
+            selected_abi = abi
+            break
+    if not selected_abi:
+        # fallback: pick any remaining ABI folder
+        selected_abi = next(iter(abi_groups.keys()), None)
+
+    if debug:
+        print_message(YELLOW, "DEBUG", f"Selected ABI: {selected_abi}")
+
+    selected_libs = abi_groups.get(selected_abi, [])
+
+    # Filter selected libs by JNI symbol presence
+    for so in selected_libs:
         try:
             nm_out = subprocess.check_output([nm, "-D", str(so)], text=True, stderr=subprocess.DEVNULL)
             symbols = set(line.split()[-1] for line in nm_out.splitlines() if line and not line.startswith("U "))
@@ -96,5 +132,23 @@ def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: 
                 relevant_libs.append(so)
         except Exception:
             continue
-        
+
     return relevant_libs
+
+def handle_model_errors(e):
+    """Centralised error handler for model API calls."""
+    if isinstance(e, ClientError):
+        if hasattr(e, "code") and e.code == 429:
+            print_message(RED, "ClientError", f"Quota exceeded or rate limit hit.\n{e.message}\nTry again later.")
+        else:
+            print_message(RED, "ERROR", f"ClientError during model call: {e}")
+    elif isinstance(e, ServerError):
+        if hasattr(e, "code") and e.code >= 503:
+            print_message(YELLOW, "ServerError", f"Server error occurred. {e.message}")
+        else:
+            print_message(RED, "ERROR", f"ServerError during model call: {e}")
+    else:
+        print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
+
+    # keep pipeline safe
+    sys.exit(1)

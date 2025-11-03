@@ -164,11 +164,12 @@ class AnalysisResults(BaseModel):
     Returns:
         Any: Description.
     """
-    analysisResults: List[AnalysisResult]
+    analysisResults: List[AnalysisResult] = Field(default_factory=list)
     
-    def __init__(self, **data):
-        if "analysisResults" not in data:
-            data["analysisResults"] = []
+    # def __init__(self, **data):
+    #     if "analysisResults" not in data:
+    #         data["analysisResults"] = []
+    
     """
     Append.
     
@@ -178,10 +179,15 @@ class AnalysisResults(BaseModel):
     Returns:
         Any: Description.
     """
-        super().__init__(**data)
-        
     def append(self, item: AnalysisResult):
-        self.analysisResults.append(item)
+        
+        try:
+            self.analysisResults.append(item)
+        except Exception as e:
+            print_message(RED, "ERROR", f"Failed to append AnalysisResult: {e}")
+            print_message(RED, "ERROR", f"Item: {item}")
+            
+            raise e
         
     def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False) -> str:
         """
@@ -214,7 +220,7 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout)
+    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout, debug=debug, verbose=debug)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()

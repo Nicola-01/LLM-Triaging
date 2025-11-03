@@ -15,7 +15,7 @@ from .get_agent import get_agent
 from .prompts.ghidra_prompts import GHIDRA_VULN_ASSESSMENT
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
-def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 120) -> MCPServerStdio:
+def make_ghidra_server(files: List[str], debug: bool = False, verbose: bool = False, timeout: int = 120) -> MCPServerStdio:
     """
     Build a Ghidra MCP server for the given list of binaries (.so, executables).
     It uses uvx pyghidra-mcp -t stdio "<file1>" "<file2>" ...
@@ -33,6 +33,9 @@ def make_ghidra_server(files: List[str], verbose: bool = False, timeout: int = 1
     shutil.rmtree('/pyghidra_mcp_projects', ignore_errors=True)
     
     cmd = f'uvx --quiet pyghidra-mcp -t stdio {quoted} {redir}'
+    
+    if debug:
+        print_message(CYAN, "DEBUG", f"Starting Ghidra MCP server with command: {cmd}")
 
     return MCPServerStdio(
         "bash",
