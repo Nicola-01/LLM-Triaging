@@ -95,7 +95,7 @@ def parse_args():
     p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gpt-5"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
-    p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
+    # p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
     # p.add_argument("--headless", action="store_true", help="Do NOT open Jadx GUI (requires that Jadx MCP can operate headlessly)")
     p.add_argument("-d", "--debug", action="store_true", help="Enable verbose debug logs")
     p.add_argument("-v", "--verbose", action="store_true", help="Echo system/user prompts and model outputs")
@@ -167,10 +167,10 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
         
-        try:
-            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
-        except Exception as e:
-            handle_model_errors(e)
+        # try:
+        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        # except Exception as e:
+        #     handle_model_errors(e)
         
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisEnvelope(
@@ -189,6 +189,8 @@ def _normalize_name_for_filter(s: str) -> str:
     # strip trailing ".apk" if present
     if base.lower().endswith(".apk"):
         base = base[:-4]
+    if base.startswith("#"):
+        return ""
     return base
 
 def load_filter_set(apk_list_path: Optional[Path], *, debug: bool=False) -> Optional[set]:
@@ -335,7 +337,6 @@ def run(args):
                 appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=args.debug))      
             except Exception as e:
                 handle_model_errors(e)
-
         
         _run_single(pair, appMetadata, out_root, args, debug=args.debug)
         previous_appname = appname

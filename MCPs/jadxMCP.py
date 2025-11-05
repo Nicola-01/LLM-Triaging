@@ -6,11 +6,13 @@ Module overview:
 
 import json
 import os
+import re
 import sys
 from typing import Optional
 from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
+from MCPs.geminiCLI import query_gemini_cli
 from utils import *
 from .prompts.jadx_prompts import *
 from .get_agent import get_agent
@@ -77,16 +79,24 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     server = make_jadx_server()
     if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
     
-    async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
-        j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
-    app: AppMetadata = j_meta.output
-        
-    if verbose: print_message(PURPLE, "RESPONSE", str(app))
     
-    if debug:
-        print_message(GREEN, "LLM-USAGE", j_meta.usage())
+    if model_name == "gemini-cli":
+        gemini_output = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata)
+    
+        if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))
+        
+        return gemini_output
+    else:
+        async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
+            j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
+        app: AppMetadata = j_meta.output
             
-    return app
+        if verbose: print_message(PURPLE, "RESPONSE", str(app))
+        
+        if debug:
+            print_message(GREEN, "LLM-USAGE", j_meta.usage())
+                
+        return app
 
 class JNILibCandidates(BaseModel):
     # libraries (list[str]): Libraries.

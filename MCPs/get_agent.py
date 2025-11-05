@@ -19,7 +19,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.mcp import MCPServerStdio
 from utils import *
 
-def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], model_name: Optional[str]) -> Agent:
+def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], model_name: str) -> Agent:
     """
     Create and configure a Pydantic-AI `Agent` instance using a specified LLM model and MCP toolsets.
 
@@ -72,5 +72,7 @@ def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], m
         model,
         system_prompt=system_prompt,
         output_type=output_type,
+        retries=4,                 # retry per tool & output validation
+        output_retries=4,          # esplicito (altrimenti = retries)
         toolsets=toolsets,
     )

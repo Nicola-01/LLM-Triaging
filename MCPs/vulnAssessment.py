@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from CrashSummary import CrashSummary, Crashes
+from MCPs.geminiCLI import query_gemini_cli
 from MCPs.ghidraMCP import make_ghidra_server
 from MCPs.jadxMCP import make_jadx_server
 from utils import *
@@ -220,22 +221,17 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout, debug=debug, verbose=debug)
+    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout) # debug=debug, verbose=debug)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
 
-    if verbose:
-        print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
+    if verbose: print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
 
     # Build agent with BOTH toolsets
-    async with get_agent(
-        ASSESSMENT_SYSTEM_PROMPT,
-        VulnAssessment,
-        [jadx_server, ghidra_server],
-        model_name=model_name
-    ) as agent:
-
+    
+    if model_name == "gemini-cli":
+        
         for i, crash in enumerate(crashes, start=1):
             payload = str(crash)
             
@@ -244,15 +240,47 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List
             if verbose:
                 print_message(CYAN, "REQUEST", payload)
 
-            resp = await agent.run(payload)
-            vuln: VulnAssessment = resp.output
+
+            gemini_output = query_gemini_cli(
+                ASSESSMENT_SYSTEM_PROMPT,
+                f"Assess the following crash and provide a vulnerability assessment in the specified format.\n{payload}",
+                VulnAssessment
+            )
+            
+            if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))
+            vuln: VulnAssessment = gemini_output
+            
             results.append(AnalysisResult(crash=crash, assessment=vuln))
 
             if verbose:
-                print_message(PURPLE, "RESPONSE", vuln)
+                print_message(PURPLE, "RESPONSE", vuln)   
+                         
+    else:
+        async with get_agent(
+            ASSESSMENT_SYSTEM_PROMPT,
+            VulnAssessment,
+            [jadx_server, ghidra_server],
+            model_name=model_name
+        ) as agent:
+
+            for i, crash in enumerate(crashes, start=1):
+                payload = str(crash)
                 
-            if debug:
-                print_message(GREEN, "LLM-USAGE", resp.usage())
+                print_message(BLUE, "INFO", f"Assessing crash #{i}")
+
+                if verbose:
+                    print_message(CYAN, "REQUEST", payload)
+
+                resp = await agent.run(payload)
+                vuln: VulnAssessment = resp.output
+                results.append(AnalysisResult(crash=crash, assessment=vuln))
+
+                if verbose:
+                    print_message(PURPLE, "RESPONSE", vuln)
+                    
+                if debug:
+                    print_message(GREEN, "LLM-USAGE", resp.usage())
+                
 
     return results
         
