@@ -66,19 +66,24 @@ class AnalysisBlock(BaseModel):
     """Holds the full analysis block, including tool info, app metadata, and results."""
     tool: Optional[ToolInfo] = None
     app: Optional[AppMetadata] = None
-    relevant_libs: List[Path] = Field(default_factory=list)
+    relevant_libs_map: Dict[Path, List[str]] = Field(default_factory=dict, alias="libs")
     analysisResults: AnalysisResults = Field(default_factory=AnalysisResults)
-    
-    @field_serializer("relevant_libs")
-    def serialize_paths(self, libs: List[Path], _info):
-        return [re.sub(r'/tmp/apk_so_[^/]*/', '', str(p)) for p in libs]
-    
+
+    @field_serializer("relevant_libs_map")
+    def serialize_paths(self, libs: Dict[Path, List[str]], _info):
+        # return just sanitized paths
+        return [re.sub(r'/tmp/apk_so_[^/]*/', '', str(p)) for p in libs.keys()]
+
     @field_serializer("analysisResults")
     def serialize_results(self, results: AnalysisResults, _info):
         # Flatten the nested structure
         if hasattr(results, "analysisResults"):
             return results.analysisResults
         return results
+
+    class Config:
+        populate_by_name = True
+        allow_population_by_field_name = True
     
 class AnalysisEnvelope(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""
@@ -87,7 +92,7 @@ class AnalysisEnvelope(BaseModel):
 
     def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False,) -> str:
         """Serialize the whole envelope to JSON."""
-        data = self.model_dump(mode="python", exclude_none=exclude_none)
+        data = self.model_dump(mode="python", exclude_none=exclude_none, by_alias=True)
         return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
 
     def to_json_file(self, path: Path, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False, encoding: str = "utf-8",) -> None:
@@ -168,26 +173,31 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
         # if args.debug:
         #     for pth in so_paths:
         #         print_message(GREEN, "SO", f"found {pth}")
-        relevant_libs = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug)
-        if not relevant_libs:
-            print_message(YELLOW, "WARN", "No relevant libs identified; proceeding with all .so files.")
-            relevant_libs = so_paths
+        relevant_libs_map = find_relevant_libs(so_paths, crashes=crashes, debug=args.debug)
+        if not relevant_libs_map:
+            print_message(YELLOW, "WARN", "No relevant libs identified; Returning empty assessment.")
+            analysisResults = AnalysisResults()
+            tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
+            envelope = AnalysisEnvelope(
+                analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=[] )
+            )
+            return envelope
+        
         if args.debug:
-            for pth in relevant_libs:
-                print_message(GREEN, "SELECTED", f"{pth}")
-                
+            for lib, methods in relevant_libs_map.items():
+                print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")                
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
         
         try:
-            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs=relevant_libs, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
         except Exception as e:
             handle_model_errors(e)
         
-    tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
-    envelope = AnalysisEnvelope(
-        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=relevant_libs)
-    )
+        tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
+        envelope = AnalysisEnvelope(
+            analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
+        )
     print_message(BLUE, "INFO", f"Assessment completed. Summary:")
     return envelope
     

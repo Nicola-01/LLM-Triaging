@@ -10,6 +10,7 @@ from typing import List
 from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils import *
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"

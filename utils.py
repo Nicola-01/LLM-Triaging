@@ -11,6 +11,7 @@ import hashlib
 from pathlib import Path
 import zipfile
 from typing import Dict, List, Optional
+from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
 
@@ -78,13 +79,13 @@ def extract_so_files(apk: Path, workdir: Path) -> List[Path]:
     return so_paths
 
 
-def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: bool = False) -> List[Path]:
+def find_relevant_libs(so_paths: List[Path], crashes: Crashes, debug: bool = False) -> Dict[Path, List[str]]:
     """
     Given a list of .so files, return those that implement JNI methods,
     preferring specific ABIs in the following order:
         arm64-v8a > armeabi-v7a > armeabi > arm* > x86_64 > x86 > any other.
     """
-    relevant_libs: List[Path] = []
+    relevant_libs_map: Dict[Path, List[str]] = {}
 
     nm = shutil.which("nm") or shutil.which("llvm-nm")
     if not nm:
@@ -119,21 +120,39 @@ def find_relevant_libs(so_paths: List[Path], jniBridgeMethod: List[str], debug: 
         selected_abi = next(iter(abi_groups.keys()), None)
 
     if debug:
-        print_message(YELLOW, "DEBUG", f"Selected ABI: {selected_abi}")
+        print_message(CYAN, "DEBUG", f"Selected ABI: {selected_abi}")
 
     selected_libs = abi_groups.get(selected_abi, [])
+    
+    JNI_List = [entry.JNIBridgeMethod for entry in crashes if entry.JNIBridgeMethod]
+    stackTracesList = [entry.StackTrace for entry in crashes]
+    
+    # Join JNI_List and stackTracesList into a single list of unique method names
+    methodList = set()
+    for jni in JNI_List:
+        methodList.add(jni)
+    for stack in stackTracesList:
+        for line in stack:
+            methodList.add(line)
 
     # Filter selected libs by JNI symbol presence
     for so in selected_libs:
         try:
             nm_out = subprocess.check_output([nm, "-D", str(so)], text=True, stderr=subprocess.DEVNULL)
             symbols = set(line.split()[-1] for line in nm_out.splitlines() if line and not line.startswith("U "))
-            if any(jni in symbols for jni in jniBridgeMethod):
-                relevant_libs.append(so)
+            
+            matched = [m for m in methodList if any(m in s for s in symbols)]
+            if matched:
+                relevant_libs_map.setdefault(so, []).extend(matched)
+                
         except Exception:
             continue
+        
+    # if debug:
+    #     for lib, methods in relevant_libs_map.items():
+    #         print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")
 
-    return relevant_libs
+    return relevant_libs_map
 
 def handle_model_errors(e):
     """Centralised error handler for model API calls."""

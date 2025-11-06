@@ -6,6 +6,7 @@ Module overview:
 
 from dataclasses import asdict, dataclass, is_dataclass
 import json
+import re
 import textwrap
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
@@ -216,72 +217,65 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
-async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs: List[Path], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
+async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_map: Dict[Path, List[str]], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant_libs], timeout=timeout) # debug=debug, verbose=debug)
+    
+    if debug:
+        print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(relevant_libs_map.keys())} relevant libs: {list(relevant_libs_map.keys())}")
+    ghidra_server = make_ghidra_server([str(p) for p in relevant_libs_map.keys()], timeout=timeout) # debug=debug, verbose=debug)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
 
     if verbose: print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
 
-    # Build agent with BOTH toolsets
-    
-    if model_name == "gemini-cli":
+    is_async = model_name != "gemini-cli"
         
-        for i, crash in enumerate(crashes, start=1):
-            payload = str(crash)
-            
-            print_message(BLUE, "INFO", f"Assessing crash #{i}")
+    for i, crash in enumerate(crashes, start=1):
+        crash_str = str(crash)
+        print_message(BLUE, "INFO", f"Assessing crash #{i}") 
+        
+        libs_map = ""
+        for lib in relevant_libs_map.keys():
+            libs_map += f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}\n"
 
-            if verbose:
-                print_message(CYAN, "REQUEST", payload)
+        query = (
+            f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
+            f"{crash_str}\n"
+            f"This is a map where each key is a Path to a relevant .so library, "
+            f"and the value is the list of JNI methods it implements: \n{libs_map}"
+        )
+        
+        if verbose:
+            print_message(CYAN, "QUERY", f"{query}")
 
-
-            gemini_output = query_gemini_cli(
-                ASSESSMENT_SYSTEM_PROMPT, 
-                f"Assess the following crash and provide a vulnerability assessment in the specified format.\n{payload}",
-                VulnAssessment, debug=debug
+        if is_async:
+            agent = await get_agent(
+                ASSESSMENT_SYSTEM_PROMPT,
+                VulnAssessment,
+                [jadx_server, ghidra_server],
+                model_name=model_name,
             )
-            
-            if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))
-            vuln: VulnAssessment = gemini_output
-            
-            results.append(AnalysisResult(crash=crash, assessment=vuln))
+            resp = await agent.run(query)
+            vuln = resp.output
+            if debug:
+                print_message(GREEN, "LLM-USAGE", resp.usage())
+        if model_name == "gemini-cli":
+            resp = query_gemini_cli(ASSESSMENT_SYSTEM_PROMPT, query, VulnAssessment, debug=debug) 
+            vuln = resp
 
-            if verbose:
-                print_message(PURPLE, "RESPONSE", vuln)   
-                         
-    else:
-        async with get_agent(
-            ASSESSMENT_SYSTEM_PROMPT,
-            VulnAssessment,
-            [jadx_server, ghidra_server],
-            model_name=model_name
-        ) as agent:
+        results.append(AnalysisResult(crash=crash, assessment=vuln))
 
-            for i, crash in enumerate(crashes, start=1):
-                payload = str(crash)
-                
-                print_message(BLUE, "INFO", f"Assessing crash #{i}")
+        if verbose:
+            print_message(PURPLE, "RESPONSE", vuln)
 
-                if verbose:
-                    print_message(CYAN, "REQUEST", payload)
+    if is_async:
+        await agent.__aexit__(None, None, None)  # clean close
 
-                resp = await agent.run(payload)
-                vuln: VulnAssessment = resp.output
-                results.append(AnalysisResult(crash=crash, assessment=vuln))
-
-                if verbose:
-                    print_message(PURPLE, "RESPONSE", vuln)
-                    
-                if debug:
-                    print_message(GREEN, "LLM-USAGE", resp.usage())
-                
 
     return results
         

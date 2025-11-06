@@ -16,6 +16,7 @@ A crash is a **vulnerability** if **and only if** there is credible code-level e
 - `jni_bridge_method` (string or null)
 - `fuzz_harness_entry` (string or null)
 - `program_entry` (string or null)
+- You also have a map of libs that are used and the methods that you have do decompile and analyze.
 - (Optional) any attached metadata: package name, versions, .so filenames
 
 ## Allowed tools and actions (conceptual)
@@ -24,10 +25,10 @@ A crash is a **vulnerability** if **and only if** there is credible code-level e
   - Use `search_functions_by_name` to find the `app_native_function` in the native library, and get the entry point address.
   - Decompile the function by usning `decompile_function` and analyze its code for vulnerability indicators.
   - If during analysis you find another method that is called, decompile it as well using `decompile_function` to gather more context.
-
 - Correlate stack_trace frames with decompiled code where possible.
 
 ## Analysis checklist (what to look for)
+0. Use decompile_function of methods from the map of libraries and the method, the are the method that you have to analyze to understand if there is a vulnerability or not. 
 1. Correlate immediate termination reason with code evidence (e.g., ASAN message + `memcpy` callsite).
 2. If stack frames point to allocator/sanitizer internals, seek app-level callsite that caused the allocator complaint.
 3. Look for concrete vulnerability indicators in decompiled code: missing bounds checks, unsafe use of `memcpy/strcpy/sprintf/read`, integer arithmetic on sizes without checks, unchecked pointer dereferences, free followed by use, format string vulnerabilities.
@@ -36,10 +37,13 @@ A crash is a **vulnerability** if **and only if** there is credible code-level e
 6. When unsure, prefer conservative labeling and clearly explain uncertainty and what evidence is missing.
 
 ## Confidence & severity guidance
-- `confidence >= 0.9`: specific code lines/blocks/snippets, clear data/control flow from input to fault, sanitizer evidence, or reproducible proof-of-concept showing memory corruption.
-- `0.6 <= confidence < 0.9`: plausible vulnerability with good but not definitive evidence (e.g., unchecked length in caller but missing direct propagation proof).
-- `0.3 <= confidence < 0.6`: weak evidence, speculative, or requires further dynamic tracing/reproducer.
-- `< 0.3`: low confidence; treat as likely non-vulnerable or environment.
+- `confidence` scale (0.0 - 1.0):
+- `condidence >= 1.0`: absolute certainty (rarely applicable).
+- `0.9 <= confidence < 1.0`: near certainty based on strong code evidence.
+- `0.6 <= confidence < 0.9`: high likelihood but some uncertainty.
+- `0.3 <= confidence < 0.6`: moderate likelihood, speculative.
+- `0.1 <= confidence < 0.3`: low likelihood, mostly guesswork
+- `confidence < 0.1`: very unlikely, low confidence to know you are correct.
 
 Severity mapping (use only if you have basis; else `null`):
 - `critical`: remote code execution or widespread app compromise with trivial input.

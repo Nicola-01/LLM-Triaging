@@ -144,13 +144,14 @@ class Crashes:
                     continue
                 elif i == n - 3:
                     JNIBridgeMethod = line
+                    StackTrace.append(line)
                 elif i == n - 2:
                     FuzzHarnessEntry = line
                 elif i == n - 1:
                     ProgramEntry = line
                 else:
                     StackTrace.append(line)
-
+            
             results.append(
                 CrashSummary(
                     ProcessTermination=ProcessTermination,
