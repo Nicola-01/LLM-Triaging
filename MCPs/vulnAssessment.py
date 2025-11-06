@@ -79,6 +79,7 @@ class VulnAssessment(BaseModel):
     affected_libraries: List[str] = Field(default_factory=list)
     evidence: List[EvidenceItem] = Field(default_factory=list)
 
+    decompiled_functions: List[str] = Field(default_factory=list, description="Functions decompiled during analysis")
     recommendations: List[str] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
@@ -215,13 +216,13 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
-async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List[Path], timeout: int = 45, verbose: bool = False, debug: bool = False) -> AnalysisResults:
+async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs: List[Path], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
     Returns a list of VulnAssessment, in the same order as 'crashes'.
     """
     # Start MCP servers once
-    ghidra_server = make_ghidra_server([str(p) for p in relevant], timeout=timeout) # debug=debug, verbose=debug)
+    ghidra_server = make_ghidra_server([str(p) for p in relevant_libs], timeout=timeout) # debug=debug, verbose=debug)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
@@ -242,9 +243,9 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant: List
 
 
             gemini_output = query_gemini_cli(
-                ASSESSMENT_SYSTEM_PROMPT,
+                ASSESSMENT_SYSTEM_PROMPT, 
                 f"Assess the following crash and provide a vulnerability assessment in the specified format.\n{payload}",
-                VulnAssessment
+                VulnAssessment, debug=debug
             )
             
             if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))

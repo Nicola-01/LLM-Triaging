@@ -144,7 +144,7 @@ def handle_model_errors(e):
             print_message(RED, "ERROR", f"ClientError during model call: {e}")
     elif isinstance(e, ServerError):
         if hasattr(e, "code") and e.code >= 503:
-            print_message(YELLOW, "ServerError", f"Server error occurred. {e.message}")
+            print_message(RED, "ServerError", f"Server error occurred. {e.message}")
         else:
             print_message(RED, "ERROR", f"ServerError during model call: {e}")
     else:

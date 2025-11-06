@@ -23,7 +23,7 @@ What it does:
 All prompts and key steps are commented in English.
 """
 
-TOOL_VERSION = "0.1"
+TOOL_VERSION = "1.0"
 
 
 import argparse
@@ -37,7 +37,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
@@ -66,7 +66,19 @@ class AnalysisBlock(BaseModel):
     """Holds the full analysis block, including tool info, app metadata, and results."""
     tool: Optional[ToolInfo] = None
     app: Optional[AppMetadata] = None
+    relevant_libs: List[Path] = Field(default_factory=list)
     analysisResults: AnalysisResults = Field(default_factory=AnalysisResults)
+    
+    @field_serializer("relevant_libs")
+    def serialize_paths(self, libs: List[Path], _info):
+        return [re.sub(r'/tmp/apk_so_[^/]*/', '', str(p)) for p in libs]
+    
+    @field_serializer("analysisResults")
+    def serialize_results(self, results: AnalysisResults, _info):
+        # Flatten the nested structure
+        if hasattr(results, "analysisResults"):
+            return results.analysisResults
+        return results
     
 class AnalysisEnvelope(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""
@@ -156,25 +168,25 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
         # if args.debug:
         #     for pth in so_paths:
         #         print_message(GREEN, "SO", f"found {pth}")
-        relevant = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug)
-        if not relevant:
+        relevant_libs = find_relevant_libs(so_paths, jniBridgeMethod=crashes.get_JNIBridgeMethods(), debug=args.debug)
+        if not relevant_libs:
             print_message(YELLOW, "WARN", "No relevant libs identified; proceeding with all .so files.")
-            relevant = so_paths
+            relevant_libs = so_paths
         if args.debug:
-            for pth in relevant:
+            for pth in relevant_libs:
                 print_message(GREEN, "SELECTED", f"{pth}")
                 
                     
         print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
         
-        # try:
-        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant=relevant, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
-        # except Exception as e:
-        #     handle_model_errors(e)
+        try:
+            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs=relevant_libs, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        except Exception as e:
+            handle_model_errors(e)
         
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisEnvelope(
-        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool)
+        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=relevant_libs)
     )
     print_message(BLUE, "INFO", f"Assessment completed. Summary:")
     return envelope

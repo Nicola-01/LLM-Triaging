@@ -20,7 +20,11 @@ A crash is a **vulnerability** if **and only if** there is credible code-level e
 
 ## Allowed tools and actions (conceptual)
 - Use **Jadx MCP** only to fetch package/manifest metadata when necessary.
-- Use **Ghidra MCP** to locate and decompile `app_native_function` and nearby callers/callees and to identify suspicious code patterns.
+- Use **pyghidra MCP** to locate and decompile `app_native_function` and nearby callers/callees and to identify suspicious code patterns.
+  - Use `search_functions_by_name` to find the `app_native_function` in the native library, and get the entry point address.
+  - Decompile the function by usning `decompile_function` and analyze its code for vulnerability indicators.
+  - If during analysis you find another method that is called, decompile it as well using `decompile_function` to gather more context.
+
 - Correlate stack_trace frames with decompiled code where possible.
 
 ## Analysis checklist (what to look for)
@@ -57,6 +61,7 @@ Return a single JSON object with these fields:
 - `jni_bridge_method`: string or null
 - `stack_trace`: list (echoed/normalized) or empty list
 - `affected_libraries`: list of library filenames (e.g., `["libfoo.so"]`) or empty list
+- `decompiled_functions`: list of strings representing decompiled functions relevant to the analysis. obtain these by decompiling the `app_native_function` using `decompile_function` from pyghidra MCP.
 - `evidence`: list of objects. Each object MAY include any of: `{ "function": str|null, "address": str|null, "file": str|null, "snippet": str|null, "note": str|null }`
 - `recommendations`: short list of actionable next steps (e.g., "add bounds check", "fuzz with valid inputs", "instrument with ASAN", "validate JNI buffer length")
 - `assumptions`: short list of what you assumed
@@ -84,6 +89,7 @@ Return a single JSON object with these fields:
   "jni_bridge_method": "Java_com_pkg_Class_write",
   "stack_trace": ["mp4_write_one_h264", "fuzz_one_input", "main"],
   "affected_libraries": ["libmp4parser.so"],
+  decompiled_functions: ["void mp4_write_one_h264(uint8_t* dst, const uint8_t* src, size_t param_len) { ... }"],
   "evidence": [
     {"function": "mp4_write_one_h264", "snippet": "memcpy(dst, src, param_len); // no length check", "note": "param_len derived from JNI buffer length"}
   ],

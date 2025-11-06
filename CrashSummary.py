@@ -20,8 +20,7 @@ class CrashSummary:
 
     Fields:
         ProcessTermination: The first line in the section, describing how the process died.
-        StackTrace:         Middle lines (except the last 4), preserved order.
-        AppNativeFunction:  The line at position (len(section) - 4).
+        StackTrace:         Middle lines (except the last 3), preserved order.
         JNIBridgeMethod:    The line at position (len(section) - 3).
         FuzzHarnessEntry:   The line at position (len(section) - 2).
         ProgramEntry:       The last line in the section (typically 'main').
@@ -30,13 +29,11 @@ class CrashSummary:
     # Fields
     # - **ProcessTermination** (str): Process termination.
     # - **StackTrace** (List[str]): Stack trace.
-    # - **AppNativeFunction** (str): App native function.
     # - **JNIBridgeMethod** (str): J n i bridge method.
     # - **FuzzHarnessEntry** (str): Fuzz harness entry.
     # - **ProgramEntry** (str): Program entry.
     ProcessTermination: str
     StackTrace: List[str]
-    AppNativeFunction: str
     JNIBridgeMethod: str
     FuzzHarnessEntry: str
     ProgramEntry: str
@@ -55,7 +52,6 @@ class CrashSummary:
             "CrashEntry:\n"
             f"  Process Termination : {self.ProcessTermination}\n"
             f"  Stack Trace         : {stack_str}\n"
-            f"  App Native Function : {self.AppNativeFunction}\n"
             f"  JNI Bridge Method   : {self.JNIBridgeMethod}\n"
             f"  Fuzz Harness Entry  : {self.FuzzHarnessEntry}\n"
             f"  Program Entry       : {self.ProgramEntry}"
@@ -84,8 +80,8 @@ class Crashes:
             <frames...>
             ###################################################
         - Within each section, the first line is treated as 'ProcessTermination',
-          the last four lines map to (AppNativeFunction, JNIBridgeMethod,
-          FuzzHarnessEntry, ProgramEntry), and the remaining middle lines form the stack.
+          the last three lines map to (JNIBridgeMethod, FuzzHarnessEntry, ProgramEntry), 
+          and the remaining middle lines form the stack.
         - If a section has < 5 lines, the role mapping will still proceed; missing
           fields will remain empty strings.
     """
@@ -135,7 +131,6 @@ class Crashes:
 
             # Initialize defaults to keep behavior predictable even with short sections
             ProcessTermination = cur[0] if len(cur) >= 1 else ""
-            AppNativeFunction = ""
             JNIBridgeMethod = ""
             FuzzHarnessEntry = ""
             ProgramEntry = ""
@@ -147,8 +142,6 @@ class Crashes:
                 if i == 0:
                     # First line already captured as ProcessTermination
                     continue
-                elif i == n - 4:
-                    AppNativeFunction = line
                 elif i == n - 3:
                     JNIBridgeMethod = line
                 elif i == n - 2:
@@ -162,7 +155,6 @@ class Crashes:
                 CrashSummary(
                     ProcessTermination=ProcessTermination,
                     StackTrace=StackTrace,
-                    AppNativeFunction=AppNativeFunction,
                     JNIBridgeMethod=JNIBridgeMethod,
                     FuzzHarnessEntry=FuzzHarnessEntry,
                     ProgramEntry=ProgramEntry,
@@ -223,7 +215,6 @@ class Crashes:
             lines.append(
                 f"- Crash #{i}: [process_termination='{e.ProcessTermination}', "
                 f"stack_len={len(e.StackTrace)}, "
-                f"app_native_function='{e.AppNativeFunction}', "
                 f"jni_bridge_method='{e.JNIBridgeMethod}', "
                 f"fuzz_harness_entry='{e.FuzzHarnessEntry}', "
                 f"program_entry='{e.ProgramEntry}']"
