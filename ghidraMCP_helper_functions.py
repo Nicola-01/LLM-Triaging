@@ -3,10 +3,12 @@ import time
 import pyautogui
 import os
 import shlex
-from utils import print_message, RED, GREEN, YELLOW, CYAN
+from utils import *
 
-# TODO require_executable(~/Downloads/ghidra-cli, "ghidra-cli")
-# TODO require_executable(wmctrl, "wmctrl")
+
+
+ghidraCLI_cmd = require_executable("ghidra-cli", "ghidra-cli")
+wmctrl_cmd = require_executable("wmctrl", "wmctrl")
 
 def _run_cmd(cmd: str, shell: bool = False, debug: bool = False, timeout_s: float = None) -> subprocess.CompletedProcess:
     """
@@ -37,7 +39,7 @@ def _list_windows() -> str:
     """
     Returns the output of `wmctrl -l` as a string.
     """
-    cp = _run_cmd("wmctrl -l", shell=True)
+    cp = _run_cmd(f"{wmctrl_cmd} -l", shell=True)
     return cp.stdout
 
 def _find_window_line(title_substring: str, debug = False) -> str:
@@ -53,20 +55,19 @@ def _find_window_line(title_substring: str, debug = False) -> str:
             return line
     return ""
 
-def openGhidraGUI(import_files: list, ghidra_cli_path: str = "~/Downloads/ghidra-cli", timeout = 45, debug = False):
+def openGhidraGUI(import_files: list, timeout = 45, debug = False):
     """
     Launches Ghidra via ghidra-cli with the given import_files list.
     Then sends Tab, Tab, Down to the GUI.
     If an existing Ghidra window is found (title contains “Ghidra:”), exits to avoid duplicates.
     """
     # check for existing Ghidra windows
-    if _find_window_line("Ghidra:"):
-        print_message(YELLOW, "WARNING", "An existing Ghidra window was found. Exiting to avoid duplicate.")
-        return None
+    while _find_window_line("Ghidra:"):
+        print_message(YELLOW, "WARNING", "An existing Ghidra window was found. Please close it first.")
+        input("Press Enter to continue or CTRL+C to abort… ")
 
     # build command
-    expanded_path = os.path.expanduser(ghidra_cli_path)
-    cmd = f"{expanded_path} -n"
+    cmd = f"{ghidraCLI_cmd} -n"
     for f in import_files:
         cmd += f" -i {shlex.quote(f)}"
         
@@ -117,7 +118,7 @@ def openGhidraFile(import_files: list, select_file: str, debug = False):
 
     # bring to front
     print_message(GREEN, "INFO", "Bringing Ghidra GUI to foreground")
-    _run_cmd(f"wmctrl -a \"Ghidra:\"", shell=True)
+    _run_cmd(f"{wmctrl_cmd} -a \"Ghidra:\"", shell=True)
     time.sleep(1)
 
     # sort files and find position (1-based)
@@ -153,7 +154,7 @@ def closeGhidraFile(file: str, debug = False):
     win_id = target_line.split()[0]
     if debug:
         print_message(CYAN, "INFO", f"Closing window ID {win_id} for file '{file}'")
-    _run_cmd(f"wmctrl -i -c {win_id}", shell=True)
+    _run_cmd(f"{wmctrl_cmd} -i -c {win_id}", shell=True)
 
 def closeGhidraGUI(debug = False):
     """
@@ -165,21 +166,4 @@ def closeGhidraGUI(debug = False):
         return
     win_id = line.split()[0]
     print_message(GREEN, "INFO", f"Closing Ghidra GUI..")
-    _run_cmd(f"wmctrl -i -c {win_id}", shell=True)
-
-# Example usage (uncomment for actual run)
-
-if __name__ == "__main__":
-    import_files_path = ["/home/nicola/AWS/AllAPKS/br.com.pedidos10/lib/arm64-v8a/libcrashlytics.so", "/home/nicola/AWS/AllAPKS/br.com.pedidos10/lib/arm64-v8a/libtbxml.so"]
-    import_files = [os.path.basename(f) for f in import_files_path]
-    
-    debug = True
-    winid = openGhidraGUI(import_files_path, debug=debug)
-    if winid:
-        openGhidraFile(import_files, "libtbxml.so", debug=debug)
-        time.sleep(2)
-        closeGhidraFile("libtbxml.so", debug=debug)
-        time.sleep(1)
-        closeGhidraGUI(debug=debug)
-    else:
-        print_message(RED, "ERROR", "Failed to open Ghidra GUI.")
+    _run_cmd(f"{wmctrl_cmd} -i -c {win_id}", shell=True)

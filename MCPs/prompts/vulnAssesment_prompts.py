@@ -29,6 +29,7 @@ A crash is a **vulnerability** if **and only if** there is credible code-level e
 
 ## Analysis checklist (what to look for)
 0. Use decompile_function of methods from the map of libraries and the method, the are the method that you have to analyze to understand if there is a vulnerability or not. 
+   N.B: if there are more method with the same name in same library, decompile all of them, using the address by calling `decompile_function_by_address`.
 1. Correlate immediate termination reason with code evidence (e.g., ASAN message + `memcpy` callsite).
 2. If stack frames point to allocator/sanitizer internals, seek app-level callsite that caused the allocator complaint.
 3. Look for concrete vulnerability indicators in decompiled code: missing bounds checks, unsafe use of `memcpy/strcpy/sprintf/read`, integer arithmetic on sizes without checks, unchecked pointer dereferences, free followed by use, format string vulnerabilities.
@@ -65,7 +66,6 @@ Return a single JSON object with these fields:
 - `jni_bridge_method`: string or null
 - `stack_trace`: list (echoed/normalized) or empty list
 - `affected_libraries`: list of library filenames (e.g., `["libfoo.so"]`) or empty list
-- `decompiled_functions`: list of strings representing decompiled functions relevant to the analysis. obtain these by decompiling the `app_native_function` using `decompile_function` from pyghidra MCP.
 - `evidence`: list of objects. Each object MAY include any of: `{ "function": str|null, "address": str|null, "file": str|null, "snippet": str|null, "note": str|null }`
 - `recommendations`: short list of actionable next steps (e.g., "add bounds check", "fuzz with valid inputs", "instrument with ASAN", "validate JNI buffer length")
 - `assumptions`: short list of what you assumed
@@ -93,7 +93,6 @@ Return a single JSON object with these fields:
   "jni_bridge_method": "Java_com_pkg_Class_write",
   "stack_trace": ["mp4_write_one_h264", "fuzz_one_input", "main"],
   "affected_libraries": ["libmp4parser.so"],
-  decompiled_functions: ["void mp4_write_one_h264(uint8_t* dst, const uint8_t* src, size_t param_len) { ... }"],
   "evidence": [
     {"function": "mp4_write_one_h264", "snippet": "memcpy(dst, src, param_len); // no length check", "note": "param_len derived from JNI buffer length"}
   ],

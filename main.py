@@ -83,7 +83,7 @@ class AnalysisBlock(BaseModel):
 
     class Config:
         populate_by_name = True
-        allow_population_by_field_name = True
+        validate_by_name = True
     
 class AnalysisEnvelope(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""

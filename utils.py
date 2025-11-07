@@ -35,15 +35,6 @@ def require_executable(name_or_path: str, friendly: str):
         sys.exit(1)
     return exe
 
-def sha256_file(path: Path) -> str:
-    """Compute sha256 of a file."""
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1024*1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def is_valid_apk(p: Path) -> bool:
     """
     Is valid apk.
@@ -168,6 +159,7 @@ def handle_model_errors(e):
             print_message(RED, "ERROR", f"ServerError during model call: {e}")
     else:
         print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
+        raise e
 
     # keep pipeline safe
     sys.exit(1)
