@@ -15,6 +15,8 @@ from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
 
+from ghidraMCP_helper_functions import closeGhidraGUI
+
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
@@ -161,5 +163,6 @@ def handle_model_errors(e):
         print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
         raise e
 
+    closeGhidraGUI()
     # keep pipeline safe
     sys.exit(1)

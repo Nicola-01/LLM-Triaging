@@ -5,8 +5,6 @@ import os
 import shlex
 from utils import *
 
-
-
 ghidraCLI_cmd = require_executable("ghidra-cli", "ghidra-cli")
 wmctrl_cmd = require_executable("wmctrl", "wmctrl")
 

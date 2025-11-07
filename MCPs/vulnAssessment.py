@@ -265,13 +265,8 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
             print_message(CYAN, "QUERY", f"{query}")
 
         if is_async:
-            agent = await get_agent(
-                ASSESSMENT_SYSTEM_PROMPT,
-                VulnAssessment,
-                [jadx_server, ghidra_server],
-                model_name=model_name,
-            )
-            resp = await agent.run(query)
+            async with get_agent(ASSESSMENT_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=model_name,) as agent:
+                resp = await agent.run(query)
             vuln = resp.output
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
