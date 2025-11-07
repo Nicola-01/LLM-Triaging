@@ -15,13 +15,13 @@ from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
 
-RED='\033[0;31m'                                                   
-YELLOW='\033[0;33m'                                                                                                                          
-GREEN='\033[0;32m'                                                                                                                           
-NC='\033[0m'                                                                                                                                 
-BLUE='\033[0;34m'         # Blue                                      
-PURPLE='\033[0;35m'       # Purple                                                                                                           
-CYAN='\033[0;36m'         # Cyan 
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 
 def print_message(color: str, level:str, msg: str):
     """Print a colored message with a level tag."""
