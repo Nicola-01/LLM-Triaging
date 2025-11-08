@@ -22,4 +22,13 @@ sudo docker run -it \
 # run this command inside the docker container:
 # $ cp geminiConfig.json ~/.gemini/settings.json
 
-cp oauth_creds.json ~/.gemini/oauth_creds.json && cp geminiConfig.json ~/.gemini/settings.json
+# cp oauth_creds.json ~/.gemini/oauth_creds.json && cp geminiConfig.json ~/.gemini/settings.json
+
+# Ghidra MCP server setup
+# Open ghidra using this command:
+# $ GHIDRA_INSTALL_DIR="/opt/ghidra/ghidra_11.4.2_PUBLIC/" ./ghidra-cli
+# Then follow the guide at https://github.com/LaurieWired/GhidraMCP?tab=readme-ov-file#ghidra
+# The file GhidraMCP-<version>.zip is already in the docker at /MCPs/GhidraMCP/GhidraMCP-1-4.zip
+# !! In point 6. of the guide, if you dont found GhidraMCPPlugin in File -> Configure -> Developer, enable it in File -> Configure -> Experimental !!
+# Restart ghidra. If there is a section in the bottom, logs area like, close it with the X button. 
+# Try also to open a .so file, it's possible thet there is an PopUp for the new plugin.

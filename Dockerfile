@@ -1,5 +1,5 @@
 FROM ubuntu:24.04
-RUN apt update && apt install -y openjdk-17-jdk x11-apps wget unzip python3
+RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3
 
 
 # Install Ghidra
@@ -55,8 +55,10 @@ WORKDIR /
 
 RUN apt install -y python3-pip 
 RUN pip install requests mcp pyautogui --break-system-packages
-RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" --break-system-packages
+RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" "pydantic-ai-slim[openai]" --break-system-packages
 RUN apt-get -y install python3-tk python3-dev
+
+RUN apt install wmctrl -y
 
 WORKDIR /workspace
 

@@ -421,6 +421,13 @@ def main():
     if args.debug:
         print_message(GREEN, "DEBUG", f"Using Jadx MCP dir: {os.getenv('JADX_MCP_DIR')}")
         
+    # export GHIDRA_MCP_DIR="/path/to/ghidra-mcp-server"
+    if not os.getenv("GHIDRA_MCP_DIR"):
+        print_message(RED, "ERROR", "Environment variable 'GHIDRA_MCP_DIR' is not set.")
+        sys.exit(1)
+    if args.debug:
+        print_message(GREEN, "DEBUG", f"Using Jadx MCP dir: {os.getenv('JADX_MCP_DIR')}")
+        
     # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
     if not os.getenv("GHIDRA_INSTALL_DIR"):
         print_message(RED, "ERROR", "Environment variable 'GHIDRA_INSTALL_DIR' is not set.")
