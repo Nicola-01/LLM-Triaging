@@ -4,6 +4,7 @@ Module overview:
 - Important classes/functions are documented inline.
 """
 
+import asyncio
 import subprocess
 import sys
 import shutil
@@ -14,8 +15,6 @@ from typing import Dict, List, Optional
 from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
-
-from ghidraMCP_helper_functions import closeGhidraGUI
 
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
@@ -163,6 +162,18 @@ def handle_model_errors(e):
         print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
         raise e
 
-    closeGhidraGUI()
     # keep pipeline safe
     sys.exit(1)
+    
+def run_async(coro):
+    """Run an async coroutine safely even if no loop exists or was closed."""
+    try:
+        return asyncio.run(coro)
+    except RuntimeError as e:
+        if "event loop is closed" in str(e) or "no current event loop" in str(e):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(coro)
+            loop.close()
+            return result
+        raise

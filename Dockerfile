@@ -1,15 +1,15 @@
 FROM ubuntu:24.04
-RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3
+RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3 python3-pip 
 
 
 # Install Ghidra
-COPY ghidra_11.4.2_PUBLIC_20250826.zip .
-# RUN wget https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.2_build/ghidra_11.4.2_PUBLIC_20250826.zip 
+# COPY ghidra_11.4.2_PUBLIC_20250826.zip .
+RUN wget https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.2_build/ghidra_11.4.2_PUBLIC_20250826.zip 
 RUN unzip ghidra_11.4.2_PUBLIC_20250826.zip -d /opt/ghidra && rm ghidra_11.4.2_PUBLIC_20250826.zip
 
 # # Install Jadx
-COPY jadx-1.5.3.zip .
-# RUN wget https://github.com/skylot/jadx/releases/download/v1.5.3/jadx-1.5.3.zip
+# COPY jadx-1.5.3.zip .
+RUN wget https://github.com/skylot/jadx/releases/download/v1.5.3/jadx-1.5.3.zip
 RUN unzip jadx-1.5.3.zip -d /opt/jadx && rm jadx-1.5.3.zip
 RUN apt install -y libcanberra-gtk-module libcanberra-gtk3-module
 
@@ -53,7 +53,6 @@ RUN rm GhidraMCP-release-1-4.zip
 
 WORKDIR /
 
-RUN apt install -y python3-pip 
 RUN pip install requests mcp pyautogui --break-system-packages
 RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" "pydantic-ai-slim[openai]" --break-system-packages
 RUN apt-get -y install python3-tk python3-dev
@@ -61,5 +60,9 @@ RUN apt-get -y install python3-tk python3-dev
 RUN apt install wmctrl -y
 
 WORKDIR /workspace
+
+ENV JADX_MCP_DIR="/MCPs/jadx-mcp-server"
+ENV GHIDRA_MCP_DIR="/MCPs/GhidraMCP"
+ENV GHIDRA_INSTALL_DIR="/opt/ghidra/ghidra_11.4.2_PUBLIC/"
 
 CMD ["/bin/bash"]
