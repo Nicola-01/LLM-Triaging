@@ -14,7 +14,9 @@ from typing import Dict, List, Optional
 from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
+from datetime import datetime
 
+GRAY='\033[0;30m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
@@ -25,7 +27,8 @@ CYAN='\033[0;36m'
 
 def print_message(color: str, level:str, msg: str):
     """Print a colored message with a level tag."""
-    print(f'{color}[{level}]{NC} {msg}')
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f'{GRAY}[{timestamp}] {color}[{level}]{NC} {msg}')
 
 def require_executable(name_or_path: str, friendly: str):
     """Ensure that an executable exists in PATH."""

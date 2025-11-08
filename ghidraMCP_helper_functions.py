@@ -62,9 +62,9 @@ def openGhidraGUI(import_files: list, timeout = 45, debug = False):
     If an existing Ghidra window is found (title contains “Ghidra:”), exits to avoid duplicates.
     """
     # check for existing Ghidra windows
-    while _find_window_line("Ghidra:"):
-        print_message(YELLOW, "WARNING", "An existing Ghidra window was found. Please close it first.")
-        input("Press Enter to continue or CTRL+C to abort… ")
+    if _find_window_line("Ghidra:"):
+        print_message(YELLOW, "WARNING", "An existing Ghidra window was found. Closing it..")
+        closeGhidraGUI(debug=debug)
 
     # build command
     cmd = f"{ghidraCLI_cmd} -n"

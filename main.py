@@ -25,7 +25,6 @@ All prompts and key steps are commented in English.
 
 TOOL_VERSION = "1.0"
 
-
 import argparse
 import asyncio
 import json
