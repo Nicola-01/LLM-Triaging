@@ -16,7 +16,7 @@ import re
 
 JADX_PROC = None
 JADX_READY = threading.Event()
-JADX_READY_RE = re.compile(r"JADX AI MCP Plugin HTTP Serve Started", re.IGNORECASE)
+JADX_READY_RE = re.compile(r"JADX AI MCP Plugin HTTP Server Started", re.IGNORECASE)
 
 
 def _reader_thread(stream, debug: bool = False):

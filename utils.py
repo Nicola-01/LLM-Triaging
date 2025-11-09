@@ -4,6 +4,8 @@ Module overview:
 - Important classes/functions are documented inline.
 """
 
+import asyncio
+from datetime import datetime
 import subprocess
 import sys
 import shutil
@@ -14,18 +16,21 @@ from typing import Dict, List, Optional
 from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
+from datetime import datetime
 
-RED='\033[0;31m'                                                   
-YELLOW='\033[0;33m'                                                                                                                          
-GREEN='\033[0;32m'                                                                                                                           
-NC='\033[0m'                                                                                                                                 
-BLUE='\033[0;34m'         # Blue                                      
-PURPLE='\033[0;35m'       # Purple                                                                                                           
-CYAN='\033[0;36m'         # Cyan 
+GRAY='\033[0;30m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 
 def print_message(color: str, level:str, msg: str):
     """Print a colored message with a level tag."""
-    print(f'{color}[{level}]{NC} {msg}')
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f'{GRAY}[{timestamp}] {color}[{level}]{NC} {msg}')
 
 def require_executable(name_or_path: str, friendly: str):
     """Ensure that an executable exists in PATH."""
@@ -34,15 +39,6 @@ def require_executable(name_or_path: str, friendly: str):
         print_message(RED, "ERROR", f"'{friendly}' not found in PATH (command: {name_or_path}).")
         sys.exit(1)
     return exe
-
-def sha256_file(path: Path) -> str:
-    """Compute sha256 of a file."""
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(1024*1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
 
 def is_valid_apk(p: Path) -> bool:
     """
@@ -168,6 +164,20 @@ def handle_model_errors(e):
             print_message(RED, "ERROR", f"ServerError during model call: {e}")
     else:
         print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
+        raise e
 
     # keep pipeline safe
     sys.exit(1)
+    
+def run_async(coro):
+    """Run an async coroutine safely even if no loop exists or was closed."""
+    try:
+        return asyncio.run(coro)
+    except RuntimeError as e:
+        if "event loop is closed" in str(e) or "no current event loop" in str(e):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(coro)
+            loop.close()
+            return result
+        raise

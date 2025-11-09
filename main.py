@@ -25,12 +25,10 @@ All prompts and key steps are commented in English.
 
 TOOL_VERSION = "1.0"
 
-
 import argparse
 import asyncio
 import json
-import os
-import sys
+import sys, os
 import tempfile
 import re
 
@@ -47,6 +45,8 @@ from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assess
 from utils import *
 from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
+
+sys.path.append(os.path.dirname(__file__))
 
 
 # Matches case folders like: fname-signature@cs_number-io_matching_possibility
@@ -83,7 +83,7 @@ class AnalysisBlock(BaseModel):
 
     class Config:
         populate_by_name = True
-        allow_population_by_field_name = True
+        validate_by_name = True
     
 class AnalysisEnvelope(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""
@@ -416,6 +416,13 @@ def main():
     # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
     if not os.getenv("JADX_MCP_DIR"):
         print_message(RED, "ERROR", "Environment variable 'JADX_MCP_DIR' is not set.")
+        sys.exit(1)
+    if args.debug:
+        print_message(GREEN, "DEBUG", f"Using Jadx MCP dir: {os.getenv('JADX_MCP_DIR')}")
+        
+    # export GHIDRA_MCP_DIR="/path/to/ghidra-mcp-server"
+    if not os.getenv("GHIDRA_MCP_DIR"):
+        print_message(RED, "ERROR", "Environment variable 'GHIDRA_MCP_DIR' is not set.")
         sys.exit(1)
     if args.debug:
         print_message(GREEN, "DEBUG", f"Using Jadx MCP dir: {os.getenv('JADX_MCP_DIR')}")

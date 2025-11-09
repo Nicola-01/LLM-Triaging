@@ -15,6 +15,7 @@ from CrashSummary import CrashSummary, Crashes
 from MCPs.geminiCLI import query_gemini_cli
 from MCPs.ghidraMCP import make_ghidra_server
 from MCPs.jadxMCP import make_jadx_server
+from ghidraMCP_helper_functions import *
 from utils import *
 from .get_agent import get_agent
 from .prompts.vulnAssesment_prompts import ASSESSMENT_SYSTEM_PROMPT
@@ -80,7 +81,7 @@ class VulnAssessment(BaseModel):
     affected_libraries: List[str] = Field(default_factory=list)
     evidence: List[EvidenceItem] = Field(default_factory=list)
 
-    decompiled_functions: List[str] = Field(default_factory=list, description="Functions decompiled during analysis")
+    #decompiled_functions: List[str] = Field(default_factory=list, description="Functions decompiled during analysis")
     recommendations: List[str] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
@@ -226,7 +227,7 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
     
     if debug:
         print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(relevant_libs_map.keys())} relevant libs: {list(relevant_libs_map.keys())}")
-    ghidra_server = make_ghidra_server([str(p) for p in relevant_libs_map.keys()], timeout=timeout) # debug=debug, verbose=debug)
+    ghidra_server = make_ghidra_server(timeout=timeout) #[str(p) for p in relevant_libs_map.keys()],  debug=debug, verbose=debug)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
@@ -234,6 +235,16 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
     if verbose: print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
 
     is_async = model_name != "gemini-cli"
+    sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
+    
+    # TODO: Extend to multiple libraries
+    # bisogna controllare e ghiudere ed aprire le GUI di ghidra a seconda della libreria
+    if len(sorted_libs) > 1:
+        print_message(RED, "ERROR", "mcp_vuln_assessment() currently supports only one relevant .so library.\nTODO: Extend to multiple libraries.")
+        sys.exit(1)
+    
+    openGhidraGUI(sorted_libs, debug=debug)
+    openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
         
     for i, crash in enumerate(crashes, start=1):
         crash_str = str(crash)
@@ -254,13 +265,8 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
             print_message(CYAN, "QUERY", f"{query}")
 
         if is_async:
-            agent = await get_agent(
-                ASSESSMENT_SYSTEM_PROMPT,
-                VulnAssessment,
-                [jadx_server, ghidra_server],
-                model_name=model_name,
-            )
-            resp = await agent.run(query)
+            async with get_agent(ASSESSMENT_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=model_name,) as agent:
+                resp = await agent.run(query)
             vuln = resp.output
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
@@ -276,6 +282,7 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
     if is_async:
         await agent.__aexit__(None, None, None)  # clean close
 
+    closeGhidraGUI(debug=debug)
 
     return results
         
