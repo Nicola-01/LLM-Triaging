@@ -13,7 +13,7 @@ RUN wget https://github.com/skylot/jadx/releases/download/v1.5.3/jadx-1.5.3.zip
 RUN unzip jadx-1.5.3.zip -d /opt/jadx && rm jadx-1.5.3.zip
 RUN apt install -y libcanberra-gtk-module libcanberra-gtk3-module
 
-ENV PATH="/opt/ghidra:/opt/jadx/bin:${PATH}"
+ENV PATH="/opt/ghidra:/opt/jadx/bin:/workspace:${PATH}"
 
 # Install Gemini CLI
 RUN apt update && apt install -y nodejs npm

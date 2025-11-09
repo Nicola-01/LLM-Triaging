@@ -27,6 +27,12 @@ sudo docker run -it \
 
 # cp oauth_creds.json ~/.gemini/oauth_creds.json && cp geminiConfig.json ~/.gemini/settings.json
 
+
+# Jadx MCP server setup
+# Should be automatic, but in case of error, install it manualy via
+# https://github.com/zinja-coder/jadx-ai-mcp 
+
+
 # Ghidra MCP server setup
 # Open ghidra using this command:
 # $ GHIDRA_INSTALL_DIR="/opt/ghidra/ghidra_11.4.2_PUBLIC/" ./ghidra-cli

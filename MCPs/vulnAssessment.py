@@ -242,7 +242,7 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
     if len(sorted_libs) > 1:
         print_message(RED, "ERROR", "mcp_vuln_assessment() currently supports only one relevant .so library.\nTODO: Extend to multiple libraries.")
         sys.exit(1)
-        
+    
     openGhidraGUI(sorted_libs, debug=debug)
     openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
         
