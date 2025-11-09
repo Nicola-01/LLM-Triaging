@@ -21,21 +21,21 @@ def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int 
     """
     ghidra_mcp_dir = os.getenv("GHIDRA_MCP_DIR")
     ghidra_dir = os.getenv("GHIDRA_INSTALL_DIR")
-
-    # if not files:
-    #     print_message(RED, "ERROR", "make_ghidra_server() requires at least one file path.")
-    #     sys.exit(1)
         
     return MCPServerStdio(
         "python3",
         args=[
             f"{ghidra_mcp_dir}/bridge_mcp_ghidra.py",
             "--ghidra-server",
-            "http://127.0.0.1:8080/"
+            "http://127.0.0.1:8080/",
         ],
         env={"GHIDRA_INSTALL_DIR": ghidra_dir},
         timeout=timeout,
     )
+    
+    # if not files:
+    #     print_message(RED, "ERROR", "make_ghidra_server() requires at least one file path.")
+    #     sys.exit(1)
 
     # quoted = " ".join([f'"{f}"' for f in files])
     

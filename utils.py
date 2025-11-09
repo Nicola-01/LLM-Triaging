@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
+from datetime import datetime
 
 GRAY='\033[0;30m'
 RED='\033[0;31m'
