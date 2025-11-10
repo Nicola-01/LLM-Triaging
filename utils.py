@@ -60,19 +60,15 @@ def is_valid_apk(p: Path) -> bool:
     except Exception:
         return False
 
-def extract_so_files(apk: Path, workdir: Path) -> List[Path]:
-    """Extract .so files from the APK into workdir/lib/<abi>/. Return the list of paths."""
-    so_paths: List[Path] = []
-    with zipfile.ZipFile(apk, "r") as zf:
-        for name in zf.namelist():
-            if name.startswith("lib/") and name.endswith(".so"):
-                out_path = workdir / name
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(out_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                so_paths.append(out_path)
-    so_paths.sort(key=lambda p: (0 if "arm64-v8a" in str(p) else 1, str(p)))
-    return so_paths
+def extract_so_files(apk: Path) -> List[Path]:
+    """Return all .so files inside apk/lib/ and its subdirectories."""
+    lib_dir = apk.parent / "lib"
+    if not lib_dir.exists():
+        return []
+    return sorted(
+        [p for p in lib_dir.rglob("*.so") if p.is_file()],
+        key=lambda x: str(x)
+    )
 
 
 def find_relevant_libs(so_paths: List[Path], crashes: Crashes, debug: bool = False) -> Dict[Path, List[str]]:

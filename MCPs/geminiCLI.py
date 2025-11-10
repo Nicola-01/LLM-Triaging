@@ -39,7 +39,7 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
     if require_response:
         schema = require_response.model_json_schema()  # gives dict schema
         schema_str = json.dumps(schema, indent=2)
-        response_str = f"USE THIS RESPONSE TYPE:{schema_str}"
+        response_str = f"USE THIS RESPONSE TYPE, DON'T ADD ANY THINKING DATA OR OTHER; JUST HIS JSON RESPONSE:{schema_str}"
 
     # prompt = f"IMPORTANT: YOU DON'T HAVE TO MODIFY THE CODE, ONLY RESPONDS TO THE PROMPT BY USING THE MCPs, DON'T ANALYSE THE CODE.\nSYSTEM PROMPT: {system_prompt}\nUSER PROMPT: {user_prompt}{response_str}"
 
@@ -82,6 +82,9 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
             
             if debug:
                 print_message(YELLOW, "DEBUG", f"Retrying gemini-cli query ({i+1}/{retries})...")
+            if i == retries - 1:
+                print_message(RED, "ERROR", "Max retries reached. gemini-cli did not return a valid response.")
+                sys.exit(1)
             
     except FileNotFoundError:
         sys.exit("Error: gemini-cli not found.")

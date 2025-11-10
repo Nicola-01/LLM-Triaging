@@ -6,8 +6,6 @@ sudo docker run -it \
   --env="XAUTHORITY=$XAUTHORITY" \
   --volume="$XAUTHORITY:$XAUTHORITY" \
   --volume /tmp/.X11-unix:/tmp/.X11-unix \
-  --volume ~/.config/jadx:/root/.config/jadx \
-  --volume ~/.config/gemini:/root/.config/gemini \
   --volume .:/workspace \
   --volume ./APKs:/APKs \
   triage:latest

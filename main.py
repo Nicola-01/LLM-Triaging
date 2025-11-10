@@ -166,38 +166,38 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
     crashes = Crashes(backtraces)
                 
     # Prepare native libs via APK extraction
-    print_message(BLUE, "INFO", f"Extracting .so files from APK: {apk}")
-    with tempfile.TemporaryDirectory(prefix="apk_so_") as td:
-        workdir = Path(td)
-        so_paths = extract_so_files(apk, workdir)
-        # if args.debug:
-        #     for pth in so_paths:
-        #         print_message(GREEN, "SO", f"found {pth}")
-        relevant_libs_map = find_relevant_libs(so_paths, crashes=crashes, debug=args.debug)
-        if not relevant_libs_map:
-            print_message(YELLOW, "WARN", "No relevant libs identified; Returning empty assessment.")
-            analysisResults = AnalysisResults()
-            tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
-            envelope = AnalysisEnvelope(
-                analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=[] )
-            )
-            return envelope
-        
-        if args.debug:
-            for lib, methods in relevant_libs_map.items():
-                print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")                
-                    
-        print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
-        
-        try:
-            analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
-        except Exception as e:
-            handle_model_errors(e)
-        
+    print_message(BLUE, "INFO", f"Getting .so files from APK: {apk}")
+    so_paths = extract_so_files(apk)
+
+    # if args.debug:
+    #     for pth in so_paths:
+    #         print_message(GREEN, "SO", f"found {pth}")
+    
+    relevant_libs_map = find_relevant_libs(so_paths, crashes=crashes, debug=args.debug)
+    if not relevant_libs_map:
+        print_message(YELLOW, "WARN", "No relevant libs identified; Returning empty assessment.")
+        analysisResults = AnalysisResults()
         tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
         envelope = AnalysisEnvelope(
-            analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
+            analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=[] )
         )
+        return envelope
+    
+    if args.debug:
+        for lib, methods in relevant_libs_map.items():
+            print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")                
+                
+    print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
+    
+    try:
+        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+    except Exception as e:
+        handle_model_errors(e)
+    
+    tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
+    envelope = AnalysisEnvelope(
+        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
+    )
     print_message(BLUE, "INFO", f"Assessment completed. Summary:")
     return envelope
     
@@ -295,106 +295,66 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
     print_message(BLUE, "INFO", f"Found {len(results)} (folder2backtraces.txt, base.apk) pairs")
     return results
 
-    # --- Single job runner (used by workers or sequential mode) ---
-def _run_single(pair, appMetadata : AppMetadata, out_root : Path, args, debug=False) -> None:
-    """Run the assessment for a single (backtraces, apk) pair."""
-    backtraces, apk = pair
-    appname = apk.parent.name
-    case_dir_name = backtraces.parent.parent.name  # .../reproduced_crashes/.. -> case dir
-
-    # Final path: out_root/APPNAME/<case_dir>/report.json
-    final_dir = out_root / appname / case_dir_name
-    final_dir.mkdir(parents=True, exist_ok=True)
-    final_json = final_dir / "report.json"
-
-    if debug:
-        print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
-        
-    result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
-    result.to_json_file(final_json)
-    if debug:
-        print_message(GREEN, "DONE", f"Wrote {final_json}")
-
 def run(args):
     """Run the full assessment for all APKs in target_APK."""
+    
+    debug = args.debug
     
     out_root = args.out_dir
     out_root.mkdir(parents=True, exist_ok=True)
     print_message(BLUE, "INFO", f"Output root: {out_root}")
         
     # --- Optional filter set ---
-    apk_filter = load_filter_set(args.apk_list, debug=args.debug)
+    apk_filter = load_filter_set(args.apk_list, debug=debug)
 
     # --- Discover pairs (backtraces, apk) ---
-    pairs = find_backtrace_apk_pairs(args.target_APK, apk_filter=apk_filter, debug=args.debug)
+    pairs = find_backtrace_apk_pairs(args.target_APK, apk_filter=apk_filter, debug=debug)
     if not pairs:
         print_message(YELLOW, "WARN", "No pairs found. Exiting.")
         sys.exit(0)
         
-
-    # --- Execution: single or multi-thread ---
-    # n_threads = max(1, int(args.threads or 1))
-    # if n_threads == 1:
-    if args.debug:
-        print_message(GREEN, "DEBUG", "Running single-thread (method: asyncio.run per job).")
-        
     previous_appname = None
     previous_appMetadata = None
     for pair in pairs:
-        apk = pair[1]
+        backtraces, apk = pair
         appname = apk.parent.name
         
         if appname == previous_appname:
-            if args.debug:
+            if debug:
                 print_message(GREEN, "DEBUG", f"Re-using previous appMetadata for {appname}")
             appMetadata = previous_appMetadata
         else:
             # Open Jadx GUI to make the project available to Jadx MCP
-            if args.debug:
+            if debug:
                 print_message(BLUE, "INFO", f"Killing (if any) and re-opening Jadx GUI for {appname}")
             kill_jadx()  # kill previous instance (if any)
             start_jadx_gui(str(apk))
             # Extract metadata via Jadx MCP
             
             try:
-                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=args.debug))      
+                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=debug))      
             except Exception as e:
                 handle_model_errors(e)
-        
-        _run_single(pair, appMetadata, out_root, args, debug=args.debug)
+               
+        # Run the assessment for a single (backtraces, apk) pair.
+        case_dir_name = backtraces.parent.parent.name  # .../reproduced_crashes/.. -> case dir
+
+        # Final path: out_root/APPNAME/<case_dir>/report.json
+        final_dir = out_root / appname / case_dir_name
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_json = final_dir / "report.json"
+
+        if debug:
+            print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
+            
+        result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
+        result.to_json_file(final_json)
+        if debug:
+            print_message(GREEN, "DONE", f"Wrote {final_json}")
+                
         previous_appname = appname
         previous_appMetadata = appMetadata
         
-    """
-    else:
-        if args.debug:
-            print_message(GREEN, "DEBUG", f"Running multi-thread with {n_threads} threads (method: asyncio.run per job).")
-        print_message(RED, "NOT IMPLEMENTED", "Multi-threaded execution is not yet implemented.")
-        sys.exit(1)
-        # Fair split across threads
-        chunks = [[] for _ in range(n_threads)]
-        for i, pair in enumerate(pairs):
-            chunks[i % n_threads].append(pair)
-
-        if args.debug:
-            for i, ch in enumerate(chunks, start=1):
-                print_message(GREEN, "DEBUG", f"Thread {i} gets {len(ch)} items.")
-
-        def _worker(idx, chunk):
-            if args.debug:
-                print_message(BLUE, "INFO", f"Thread {idx} started (method: asyncio.run per job).")
-            for pair in chunk:
-                _run_single(pair, out_root, args, debug=args.debug)
-
-        with ThreadPoolExecutor(max_workers=n_threads) as ex:
-            futures = [ex.submit(_worker, i+1, chunks[i]) for i in range(n_threads)]
-            for fut in as_completed(futures):
-                exc = fut.exception()
-                if exc:
-                    print_message(RED, "ERROR", f"Worker raised an exception: {exc}")
-                    # Keep going; other workers may still complete.
-                    
-    """
 
 def main():
     args = parse_args()

@@ -75,8 +75,8 @@ class AppMetadata(BaseModel):
         return json.dumps(data, indent=indent, ensure_ascii=ensure_ascii)
 
 async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False, debug: bool = False) -> AppMetadata:
-    """Return an Agent configured to extract app metadata from Jadx."""
-    server = make_jadx_server()
+    """Return app metadata from Jadx."""
+    server: MCPServerStdio = make_jadx_server()
     
     
     if model_name == "gemini-cli":
@@ -89,14 +89,14 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
         if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
         async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
             j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
-        app: AppMetadata = j_meta.output
+        appMetadata: AppMetadata = j_meta.output
             
-        if verbose: print_message(PURPLE, "RESPONSE", str(app))
+        if verbose: print_message(PURPLE, "RESPONSE", str(appMetadata))
         
         if debug:
             print_message(GREEN, "LLM-USAGE", j_meta.usage())
                 
-        return app
+        return appMetadata
 
 class JNILibCandidates(BaseModel):
     # libraries (list[str]): Libraries.
