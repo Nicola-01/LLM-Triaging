@@ -77,16 +77,16 @@ class AppMetadata(BaseModel):
 async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = False, debug: bool = False) -> AppMetadata:
     """Return an Agent configured to extract app metadata from Jadx."""
     server = make_jadx_server()
-    if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
     
     
     if model_name == "gemini-cli":
-        gemini_output = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, debug=debug)
+        gemini_output = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
     
         if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))
         
         return gemini_output
     else:
+        if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
         async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
             j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
         app: AppMetadata = j_meta.output

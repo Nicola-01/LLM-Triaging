@@ -309,6 +309,7 @@ def _run_single(pair, appMetadata : AppMetadata, out_root : Path, args, debug=Fa
 
     if debug:
         print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
+        
     result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
     result.to_json_file(final_json)
     if debug:

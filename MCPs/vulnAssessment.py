@@ -270,8 +270,8 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
             vuln = resp.output
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
-        if model_name == "gemini-cli":
-            resp = query_gemini_cli(ASSESSMENT_SYSTEM_PROMPT, query, VulnAssessment, debug=debug) 
+        else: # model_name == "gemini-cli"
+            resp = query_gemini_cli(ASSESSMENT_SYSTEM_PROMPT, query, VulnAssessment, verbose=verbose, debug=debug) 
             vuln = resp
 
         results.append(AnalysisResult(crash=crash, assessment=vuln))

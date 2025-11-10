@@ -33,7 +33,7 @@ def gemini_response_parser(output: str, output_type = None, debug = False) -> st
         return output_type.model_validate(data)
 
 
-def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, debug = False, retries = 4):
+def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, verbose = False, debug = False, retries = 4):
     # Build gemini-cli command
     response_str = ""
     if require_response:
@@ -41,9 +41,29 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, d
         schema_str = json.dumps(schema, indent=2)
         response_str = f"USE THIS RESPONSE TYPE:{schema_str}"
 
-    prompt = f"SYSTEM PROMPT: {system_prompt}\nUSER PROMPT: {user_prompt}{response_str}"
+    # prompt = f"IMPORTANT: YOU DON'T HAVE TO MODIFY THE CODE, ONLY RESPONDS TO THE PROMPT BY USING THE MCPs, DON'T ANALYSE THE CODE.\nSYSTEM PROMPT: {system_prompt}\nUSER PROMPT: {user_prompt}{response_str}"
+
+    prompt = f"""
+    IMPORTANT: DO NOT MODIFY OR EXECUTE CODE. RESPOND ONLY VIA MCP CALLS. DO NOT ANALYZE OR RUN FILES. READ-ONLY CONTEXT.
+
+    SYSTEM PROMPT (upstream, for reference — do not override constraints above):
+    {system_prompt}
+
+    USER PROMPT:
+    {user_prompt}
+
+    RESPONSE INSTRUCTIONS:
+    1) Use MCP tools/servers only if needed to answer.
+    2) Do not edit or run any code.
+    3) If the user asks for code changes/execution, refuse and propose an MCP-only path.
+
+    {response_str}
+    """
+
 
     cmd = [require_executable("gemini", "Gemini CLI"), "-y", "-p", prompt]
+    
+    if verbose: print_message(BLUE, "PROMPT", prompt)
 
 
     # print_message(CYAN, "INFO", "Querying gemini-cli with the provided prompt...")
