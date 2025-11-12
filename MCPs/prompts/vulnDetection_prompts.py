@@ -13,7 +13,7 @@ Return **ONLY** a single JSON object that strictly follows the schema below.
 
 ## 1. Definition of a *vulnerability*
 A crash is a **vulnerability** if, and only if, there is clear code-level evidence that program state or control flow can be influenced—directly or indirectly—by data that an attacker can realistically affect, and that this influence can lead to unsafe behaviour such as memory corruption, information leakage, control-flow hijacking, or a meaningful denial-of-service under realistic conditions. 
-Note: the attacker rarely has *complete* control of every value. Therefore the assessor MUST reason backward from the crash site through the calling chain to determine whether the values involved (parameters, lengths, indexes, flags) originate from attacker-influenced inputs or from fixed/validated assignments earlier in the call path. If an intermediate function performs validation, transformation, or enforces fixed values, that reduces (or removes) attacker control and must be noted. When the call chain crosses the JNI boundary, the assessor SHOULD inspect the Java-side code (via Jadx) to check how the native arguments are constructed and whether they are tainted by untrusted sources.
+The attacker rarely has *complete* control of every value. Therefore the assessor MUST reason backward from the crash site through the calling chain to determine whether the values involved (parameters, lengths, indexes, flags) originate from attacker-influenced inputs or from fixed/validated assignments earlier in the call path. If an intermediate function performs validation, transformation, or enforces fixed values, that reduces (or removes) attacker control and must be noted. When the call chain crosses the JNI boundary, the assessor SHOULD inspect the Java-side code (via Jadx) to check how the native arguments are constructed and whether they are tainted by untrusted sources.
 
 Concrete examples that qualify as *vulnerable*:  
 - Out-of-bounds read/write  
@@ -69,8 +69,8 @@ You may use **Jadx MCP** and **Ghidra MCP** through the Model Context Protocol (
 ---
 
 ## 5. Confidence & severity guidance
-- **confidence** ∈ [0.0, 1.0]
-  - ≥ 0.9 → clear code-level proof of vulnerability  
+- **confidence** in [0.0, 1.0]
+  - >= 0.9 → clear code-level proof of vulnerability  
   - 0.6-0.8 → likely, but not fully confirmed  
   - 0.3-0.5 → unclear or speculative  
   - < 0.3 → unlikely or unsupported  
@@ -106,8 +106,6 @@ Rules:
 - Confidence must reflect actual certainty.  
 - Keep all text concise (max 1-3 short items per list).  
 """
-
-
 
 
 
@@ -211,7 +209,7 @@ Return a single JSON object with these fields:
 }
 """
 
-ASSESSMENT_SYSTEM_PROMPT2 = """
+DETECTION_SYSTEM_PROMPT2 = """
 You are a senior mobile reverse-engineering and security engineer. You can use two MCP toolsets:
 - Jadx MCP: Android manifest/resources/class exploration.
 - Ghidra MCP: native ELF (.so) analysis and decompilation.

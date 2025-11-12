@@ -15,7 +15,7 @@ Module overview:
 - Important classes/functions are documented inline.
 """
 
-GHIDRA_VULN_ASSESSMENT = """
+GHIDRA_VULN_DETECTION = """
 You are a native code vulnerability assessor using Ghidra. You will be given:
 - A list of target function names 
 - A JNI entrypoint name (e.g., Java_com_pkg_Class_method)

@@ -57,7 +57,7 @@ class EvidenceItem(BaseModel):
         )
 
 @dataclass
-class VulnAssessment(BaseModel):
+class VulnDetection(BaseModel):
     """
     Result of a vulnerability assessment for a single crash."""
     # is_vulnerability (bool): Is vulnerability.
@@ -71,20 +71,20 @@ class VulnAssessment(BaseModel):
     # - **evidence** (List[EvidenceItem]): Evidence.
     # - **recommendations** (List[str]): Recommendations.
     # - **assumptions** (List[str]): Assumptions.
-    # - **limitations** (List[str]): Limitations.
-    is_vulnerability: bool = Field(..., description="True if likely a genuine vulnerability")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0,1]")
-    reasons: List[str] = Field(default_factory=list, description="Bullet points supporting the decision")
-    cwe_ids: List[str] = Field(default_factory=list, description="Relevant CWE identifiers, e.g., ['CWE-787']")
-    severity: Optional[str] = Field(default=None, description="One of: low/medium/high/critical")
-
-    affected_libraries: List[str] = Field(default_factory=list)
-    evidence: List[EvidenceItem] = Field(default_factory=list)
-
-    #decompiled_functions: List[str] = Field(default_factory=list, description="Functions decompiled during analysis")
-    recommendations: List[str] = Field(default_factory=list)
-    assumptions: List[str] = Field(default_factory=list)
-    limitations: List[str] = Field(default_factory=list)
+    # - **limitations** (List[str]): Limitations.   
+    is_vulnerability: bool = Field(..., description="True if the crash likely reflects a real code vulnerability.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0-1]; >=0.9 confirmed, <0.3 unlikely.")
+    reasons: List[str] = Field(default_factory=list, description="Key bullet points supporting the decision.")
+    cwe_ids: List[str] = Field(default_factory=list, description="Relevant CWE IDs, e.g. ['CWE-787'].")
+    severity: Optional[str] = Field(default=None, description="Impact level: low, medium, high, or critical.")
+    
+    affected_libraries: List[str] = Field(default_factory=list, description="Libraries (.so) involved in the crash.")
+    evidence: List[EvidenceItem] = Field(default_factory=list, description="Supporting code evidence or snippets.")
+    
+    recommendations: List[str] = Field(default_factory=list, description="Actionable next steps or fixes.")
+    assumptions: List[str] = Field(default_factory=list, description="Assumptions made during reasoning.")
+    limitations: List[str] = Field(default_factory=list, description="Missing info or analysis uncertainties.")
+    
     
     def __str__(self) -> str:
         """
@@ -110,7 +110,7 @@ class VulnAssessment(BaseModel):
         lim_block = " (none)" if not self.limitations else "\n" + textwrap.indent("\n".join(f"- {l}" for l in self.limitations), "        ")
 
         return (
-            "VulnAssessment:\n"
+            "VulnDetection:\n"
             f"  Verdict           : {verdict}\n"
             f"  Confidence        : {self.confidence:.2f}\n"
             f"  Severity          : {self.severity or '(unknown)'}\n"
@@ -124,13 +124,13 @@ class VulnAssessment(BaseModel):
 
 class AnalysisResult(BaseModel):
     """
-    Combines a CrashSummary with its corresponding VulnAssessment."""
+    Combines a CrashSummary with its corresponding VulnDetection."""
     # crash (CrashSummary): Crash.
     # Fields
     # - **crash** (CrashSummary): Crash.
-    # - **assessment** (VulnAssessment): Assessment.
+    # - **assessment** (VulnDetection): Detection.
     crash: CrashSummary
-    assessment: VulnAssessment
+    assessment: VulnDetection
     
     # model_config = ConfigDict(arbitrary_types_allowed=True, ser_json_inf_nan=False)
 
@@ -218,10 +218,10 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
-async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_map: Dict[Path, List[str]], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
+async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_map: Dict[Path, List[str]], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
-    Returns a list of VulnAssessment, in the same order as 'crashes'.
+    Returns a list of VulnDetection, in the same order as 'crashes'.
     """
     # Start MCP servers once
     
@@ -265,13 +265,13 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
             print_message(CYAN, "QUERY", f"{query}")
 
         if is_async:
-            async with get_agent(DETECTION_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=model_name,) as agent:
+            async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name,) as agent:
                 resp = await agent.run(query)
             vuln = resp.output
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
         else: # model_name == "gemini-cli"
-            resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnAssessment, verbose=verbose, debug=debug, realTimeOutput=True) 
+            resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True) 
             vuln = resp
 
         results.append(AnalysisResult(crash=crash, assessment=vuln))

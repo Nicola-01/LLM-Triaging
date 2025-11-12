@@ -159,7 +159,7 @@ def handle_model_errors(e):
         else:
             print_message(RED, "ERROR", f"ServerError during model call: {e}")
     else:
-        print_message(RED, "ERROR", f"Unexpected error during assessment: {e}")
+        print_message(RED, "ERROR", f"Unexpected error during vuln detection: {e}")
         raise e
 
     # keep pipeline safe

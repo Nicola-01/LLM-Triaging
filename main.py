@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Nicola MCP Orchestrator - Crash to Vulnerability Assessment
+Nicola MCP Orchestrator - Crash to Vulnerability Detection
 
 Usage:
   python3 main.py APP.apk crash.txt [-m MODEL] [-o report.json] [-d] [--verbose] [--headless]
@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 from CrashSummary import Crashes
-from MCPs.vulnAssessment import AnalysisResult, AnalysisResults, mcp_vuln_assessment
+from MCPs.vulnDetection import AnalysisResult, AnalysisResults, mcp_vuln_detection
 from utils import *
 from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
@@ -54,7 +54,7 @@ _CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
 
 # ---------- Data models for JSON output ----------
 class ToolInfo(BaseModel):
-    """Information about the tool and environment used for the assessment."""
+    """Information about the tool and environment used for the detection."""
     model_name: Optional[str] = None
     # timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z")
     apk_path: Optional[str] = None
@@ -120,7 +120,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisEnvelope:
+async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisEnvelope:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -133,7 +133,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
          against the tokens seen in the crash (JNI/native symbols).
       6) Start Ghidra MCP for the selected native libraries and Jadx MCP for the Java side.
       7) Ask the LLM (via a joint Agent using both MCP toolsets) to decide whether the crash is likely
-         caused by a real vulnerability; collect a structured JSON (VulnAssessment).
+         caused by a real vulnerability; collect a structured JSON (VulnDetection).
       8) Enrich the result with APK path/sha256, JNI/native lists, and app metadata fields.
 
     Parameters
@@ -146,7 +146,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
 
     Returns
     -------
-    VulnAssessment
+    VulnDetection
         Structured decision:
           - is_vulnerability (bool)
           - confidence (float in [0, 1])
@@ -190,7 +190,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
     print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
     
     try:
-        analysisResults : AnalysisResults = await mcp_vuln_assessment(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        analysisResults : AnalysisResults = await mcp_vuln_detection(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
     except Exception as e:
         handle_model_errors(e)
     
@@ -198,7 +198,7 @@ async def run_assessment(apk: Path, appMetadata: AppMetadata, backtraces: Path, 
     envelope = AnalysisEnvelope(
         analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
     )
-    print_message(BLUE, "INFO", f"Assessment completed. Summary:")
+    print_message(BLUE, "INFO", f"vulnerability detection completed. Summary:")
     return envelope
     
     
@@ -347,7 +347,7 @@ def run(args):
         if debug:
             print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
             
-        result = asyncio.run(run_assessment(apk, appMetadata, backtraces, args))
+        result = asyncio.run(run_detection(apk, appMetadata, backtraces, args))
         result.to_json_file(final_json)
         if debug:
             print_message(GREEN, "DONE", f"Wrote {final_json}")
