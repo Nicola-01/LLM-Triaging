@@ -42,13 +42,8 @@ Crashes that **should NOT** be labeled as vulnerable include:
 
 ---
 
-## 3. Tools and allowed actions
+## 3. Tools and some actions
 You may use **Jadx MCP** and **Ghidra MCP** through the Model Context Protocol (MCP):
-- Use **Jadx** only for package or manifest metadata if context is missing.
-- Use **Ghidra** to decompile functions named in the crash or JNI map.
-  - Locate the function with `search_functions_by_name`.
-  - Use `decompile_function` for at most the top 2 relevant occurrences.
-  - Inspect nearby code for memory-safety or logic issues.
 
 ---
 

@@ -19,7 +19,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.mcp import MCPServerStdio
 from utils import *
 
-def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], model_name: str) -> Agent:
+def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], model_name: str, debug = True) -> Agent:
     """
     Create and configure a Pydantic-AI `Agent` instance using a specified LLM model and MCP toolsets.
 
@@ -62,10 +62,10 @@ def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], m
         model = OpenAIChatModel(model_name, provider=OpenAIProvider(api_key=os.getenv("LLM_API_KEY")))
     elif model_name.startswith("gemini-"):
         model = GoogleModel(model_name, provider=GoogleProvider(api_key=os.getenv("LLM_API_KEY")))
-    else:
+    else:   
         model = OpenAIChatModel(
             model_name=model_name,
-            provider=OllamaProvider(base_url='http://localhost:11434/v1'),
+            provider=OllamaProvider(base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")),
         )
 
     return Agent(

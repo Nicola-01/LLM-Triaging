@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from CrashSummary import CrashSummary, Crashes
-from MCPs.geminiCLI import query_gemini_cli
+from MCPs.geminiCLI import GeminiCliMaxRetry, query_gemini_cli
 from MCPs.ghidraMCP import make_ghidra_server
 from MCPs.jadxMCP import make_jadx_server
 from ghidraMCP_helper_functions import *
@@ -59,7 +59,8 @@ class EvidenceItem(BaseModel):
 @dataclass
 class VulnDetection(BaseModel):
     """
-    Result of a vulnerability assessment for a single crash."""
+    Result of a vulnerability assessment for a single crash.
+    """
     # is_vulnerability (bool): Is vulnerability.
     # Fields
     # - **is_vulnerability** (bool): Is vulnerability.
@@ -72,6 +73,7 @@ class VulnDetection(BaseModel):
     # - **recommendations** (List[str]): Recommendations.
     # - **assumptions** (List[str]): Assumptions.
     # - **limitations** (List[str]): Limitations.   
+    
     is_vulnerability: bool = Field(..., description="True if the crash likely reflects a real code vulnerability.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0-1]; >=0.9 confirmed, <0.3 unlikely.")
     reasons: List[str] = Field(default_factory=list, description="Key bullet points supporting the decision.")
@@ -124,7 +126,8 @@ class VulnDetection(BaseModel):
 
 class AnalysisResult(BaseModel):
     """
-    Combines a CrashSummary with its corresponding VulnDetection."""
+    Combines a CrashSummary with its corresponding VulnDetection.
+    """
     # crash (CrashSummary): Crash.
     # Fields
     # - **crash** (CrashSummary): Crash.
@@ -232,19 +235,14 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
 
     results = AnalysisResults()
 
-    if verbose: print_message(BLUE, "SYSTEM_PROMPT", DETECTION_SYSTEM_PROMPT)
+    # if verbose: print_message(BLUE, "SYSTEM_PROMPT", DETECTION_SYSTEM_PROMPT)
 
     is_async = model_name != "gemini-cli"
     sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
-    
-    # TODO: Extend to multiple libraries
-    # bisogna controllare e ghiudere ed aprire le GUI di ghidra a seconda della libreria
-    if len(sorted_libs) > 1:
-        print_message(RED, "ERROR", "mcp_vuln_assessment() currently supports only one relevant .so library.\nTODO: Extend to multiple libraries.")
-        sys.exit(1)
-    
-    openGhidraGUI(sorted_libs, debug=debug)
-    openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
+        
+    openGhidraGUI(sorted_libs, timeout=45*(len(sorted_libs)+1), debug=debug)
+    for lib in sorted_libs:
+        openGhidraFile(sorted_libs, lib, debug=debug)
         
     for i, crash in enumerate(crashes, start=1):
         crash_str = str(crash)
@@ -271,8 +269,11 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
         else: # model_name == "gemini-cli"
-            resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True) 
-            vuln = resp
+            try:
+                resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True) 
+                vuln = resp
+            except GeminiCliMaxRetry:
+                continue
 
         results.append(AnalysisResult(crash=crash, assessment=vuln))
 

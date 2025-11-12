@@ -7,6 +7,9 @@ import re
 from utils import *
 import textwrap
 
+class GeminiCliMaxRetry(Exception):
+    pass
+
 def gemini_response_parser(output: str, output_type = None, debug = False) -> str:
     """Clean gemini-cli output and return only the relevant response."""
     lines = output.splitlines()
@@ -76,7 +79,7 @@ def realtime(cmd, debug = True, require_response = None):
                 elif _type == "message" and data.get("role") == "assistant":
                     content = data.get("content")
                     allContent += content
-                else:
+                elif not (_type == "message" and data.get("role") == "user"):
                     print_message(GREEN, "IDK", data)
                             
             
@@ -91,7 +94,7 @@ def realtime(cmd, debug = True, require_response = None):
     # Wait for process to finish (in case not done yet)
     return_code = process.wait()
     
-    print_message(PURPLE, "CONTENT", allContent)
+    # print_message(PURPLE, "CONTENT", allContent)
     
     return allContent
     
@@ -138,7 +141,7 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
 
     cmd = [require_executable("gemini", "Gemini CLI"), "-y", "-p", prompt]
     
-    if verbose: print_message(BLUE, "PROMPT", prompt)
+    # if verbose: print_message(BLUE, "PROMPT", f"USER PROMPT:\n{user_prompt}")
     
     if debug:
         print_message(CYAN, "DEBUG", f"Waiting response from gemini-cli...")
@@ -169,7 +172,8 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
                 print_message(YELLOW, "DEBUG", f"Retrying gemini-cli query ({i+1}/{retries})...")
             if i == retries - 1:
                 print_message(RED, "ERROR", "Max retries reached. gemini-cli did not return a valid response.")
-                sys.exit(1)
+                sys.exit(1)     
+                raise GeminiCliMaxRetry()
         
     except FileNotFoundError:
         sys.exit("Error: gemini-cli not found.")

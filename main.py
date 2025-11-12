@@ -85,7 +85,7 @@ class AnalysisBlock(BaseModel):
         populate_by_name = True
         validate_by_name = True
     
-class AnalysisEnvelope(BaseModel):
+class AnalysisContainer(BaseModel):
     """Top-level wrapper to nest results under 'analysis' and attach metadata."""
     analysis: AnalysisBlock
 
@@ -110,6 +110,7 @@ def parse_args():
 
     p.add_argument("--apk-list", type=Path, default=None, help="Path to a .txt file containing the list of APKs/APPNAMEs to be included (one per line)." )
     p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gpt-5"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
+    p.add_argument("-s", "--ollama-url", type=str, default="http://localhost:11434/v1", help="The base url for the Ollama requests.")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
     # p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
@@ -120,7 +121,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisEnvelope:
+async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisContainer:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -178,7 +179,7 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
         print_message(YELLOW, "WARN", "No relevant libs identified; Returning empty assessment.")
         analysisResults = AnalysisResults()
         tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
-        envelope = AnalysisEnvelope(
+        envelope = AnalysisContainer(
             analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=[] )
         )
         return envelope
@@ -195,7 +196,7 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
         handle_model_errors(e)
     
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
-    envelope = AnalysisEnvelope(
+    envelope = AnalysisContainer(
         analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
     )
     print_message(BLUE, "INFO", f"vulnerability detection completed. Summary:")
@@ -394,6 +395,8 @@ def main():
         sys.exit(1)
     if args.debug:
         print_message(GREEN, "DEBUG", f"Using Ghidra install dir: {os.getenv('GHIDRA_INSTALL_DIR')}")
+        
+    os.environ['OLLAMA_BASE_URL'] = args.ollama_url
         
     # --- Run the assessment ---
     

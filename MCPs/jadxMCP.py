@@ -41,12 +41,6 @@ class AppMetadata(BaseModel):
     # - **target_sdk** (Optional[int]): Target sdk.
     # - **version_name** (Optional[str]): Version name.
     # - **version_code** (Optional[str]): Version code.
-    """
-    Str.
-    
-    Returns:
-        Any: Description.
-    """
     app_name: str
     package: str
     min_sdk: Optional[int] = None
@@ -58,10 +52,10 @@ class AppMetadata(BaseModel):
         fields = [
             f"App Name     : {self.app_name}",
             f"Package      : {self.package}",
-            f"Min SDK      : {self.min_sdk}" if self.min_sdk is not None else "Min SDK: N/A",
-            f"Target SDK   : {self.target_sdk}" if self.target_sdk is not None else "Target SDK: N/A",
-            f"Version Name : {self.version_name}" if self.version_name is not None else "Version Name: N/A",
-            f"Version Code : {self.version_code}" if self.version_code is not None else "Version Code: N/A",
+            f"Min SDK      : {self.min_sdk or 'N/A'}",
+            f"Target SDK   : {self.target_sdk or 'N/A'}",
+            f"Version Name : {self.version_name or 'N/A'}",
+            f"Version Code : {self.version_code or 'N/A'}"
         ]
         return "AppMetadata : \n" + "\n".join(fields)
     
