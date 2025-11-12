@@ -221,6 +221,7 @@ class AnalysisResults(BaseModel):
         path.write_text(s, encoding="utf-8")
     
 
+
 async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_map: Dict[Path, List[str]], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
     Run the assessment agent once, then feed it each CrashEntry (one by one).
@@ -237,51 +238,73 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
 
     # if verbose: print_message(BLUE, "SYSTEM_PROMPT", DETECTION_SYSTEM_PROMPT)
 
-    is_async = model_name != "gemini-cli"
     sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
         
     openGhidraGUI(sorted_libs, timeout=45*(len(sorted_libs)+1), debug=debug)
     for lib in sorted_libs:
         openGhidraFile(sorted_libs, lib, debug=debug)
         
-    for i, crash in enumerate(crashes, start=1):
-        crash_str = str(crash)
-        print_message(BLUE, "INFO", f"Assessing crash #{i}") 
-        
-        libs_map = ""
-        for lib in relevant_libs_map.keys():
-            libs_map += f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}\n"
+    if model_name != "gemini-cli":
+        async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
+            for i, crash in enumerate(crashes, start=1):
+                crash_str = str(crash)
+                print_message(BLUE, "INFO", f"Assessing crash #{i}") 
 
-        query = (
-            f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
-            f"{crash_str}\n"
-            f"This is a map where each key is a Path to a relevant .so library, "
-            f"and the value is the list of JNI methods it implements: \n{libs_map}"
-        )
-        
-        if verbose:
-            print_message(CYAN, "QUERY", f"{query}")
+                libs_map = "\n".join([f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}" 
+                                    for lib in relevant_libs_map.keys()])
 
-        if is_async:
-            async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name,) as agent:
-                resp = await agent.run(query)
-            vuln = resp.output
-            if debug:
-                print_message(GREEN, "LLM-USAGE", resp.usage())
-        else: # model_name == "gemini-cli"
+                query = (
+                    f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
+                    f"{crash_str}\n"
+                    f"This is a map where each key is a Path to a relevant .so library, "
+                    f"and the value is the list of JNI methods it implements: \n{libs_map}"
+                )
+
+                if verbose:
+                    print_message(CYAN, "QUERY", f"{query}")
+
+                try:
+                    resp = await agent.run(query)
+                    vuln = resp.output
+                    if debug:
+                        print_message(GREEN, "LLM-USAGE", resp.usage())
+                except Exception as e:
+                    if debug:
+                        print_message(RED, "ERROR", str(e))
+                    continue
+
+                results.append(AnalysisResult(crash=crash, assessment=vuln))
+
+                if verbose:
+                    print_message(PURPLE, "RESPONSE", vuln)
+    else:  # Non-async case for gemini-cli
+        for i, crash in enumerate(crashes, start=1):
+            crash_str = str(crash)
+            print_message(BLUE, "INFO", f"Assessing crash #{i}") 
+
+            libs_map = "\n".join([f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}" 
+                                for lib in relevant_libs_map.keys()])
+
+            query = (
+                f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
+                f"{crash_str}\n"
+                f"This is a map where each key is a Path to a relevant .so library, "
+                f"and the value is the list of JNI methods it implements: \n{libs_map}"
+            )
+
+            if verbose:
+                print_message(CYAN, "QUERY", f"{query}")
+
             try:
-                resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True) 
+                resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
                 vuln = resp
             except GeminiCliMaxRetry:
                 continue
 
-        results.append(AnalysisResult(crash=crash, assessment=vuln))
+            results.append(AnalysisResult(crash=crash, assessment=vuln))
 
-        if verbose:
-            print_message(PURPLE, "RESPONSE", vuln)
-
-    if is_async:
-        await agent.__aexit__(None, None, None)  # clean close
+            if verbose:
+                print_message(PURPLE, "RESPONSE", vuln)
 
     closeGhidraGUI(debug=debug)
 
