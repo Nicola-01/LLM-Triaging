@@ -18,7 +18,7 @@ from MCPs.jadxMCP import make_jadx_server
 from ghidraMCP_helper_functions import *
 from utils import *
 from .get_agent import get_agent
-from .prompts.vulnAssesment_prompts import ASSESSMENT_SYSTEM_PROMPT
+from .prompts.vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
 
 @dataclass
 class EvidenceItem(BaseModel):
@@ -232,7 +232,7 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
 
     results = AnalysisResults()
 
-    if verbose: print_message(BLUE, "SYSTEM_PROMPT", ASSESSMENT_SYSTEM_PROMPT)
+    if verbose: print_message(BLUE, "SYSTEM_PROMPT", DETECTION_SYSTEM_PROMPT)
 
     is_async = model_name != "gemini-cli"
     sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
@@ -265,13 +265,13 @@ async def mcp_vuln_assessment(model_name: str, crashes : Crashes, relevant_libs_
             print_message(CYAN, "QUERY", f"{query}")
 
         if is_async:
-            async with get_agent(ASSESSMENT_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=model_name,) as agent:
+            async with get_agent(DETECTION_SYSTEM_PROMPT, VulnAssessment, [jadx_server, ghidra_server], model_name=model_name,) as agent:
                 resp = await agent.run(query)
             vuln = resp.output
             if debug:
                 print_message(GREEN, "LLM-USAGE", resp.usage())
         else: # model_name == "gemini-cli"
-            resp = query_gemini_cli(ASSESSMENT_SYSTEM_PROMPT, query, VulnAssessment, verbose=verbose, debug=debug) 
+            resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnAssessment, verbose=verbose, debug=debug, realTimeOutput=True) 
             vuln = resp
 
         results.append(AnalysisResult(crash=crash, assessment=vuln))

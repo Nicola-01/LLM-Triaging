@@ -3,11 +3,37 @@ import time
 import pyautogui
 import os
 import shlex
+import atexit
+import signal
 from utils import *
 
 
 ghidraCLI_cmd = require_executable("ghidra-cli", "ghidra-cli")
 wmctrl_cmd = require_executable("wmctrl", "wmctrl")
+
+def _cleanup():
+    """Cleanup routine called on normal program exit."""
+    try:
+        # if you stored the window ID, use it here (otherwise closeGhidraGUI searches for the window)
+        closeGhidraGUI()
+    except Exception as e:
+        # do not interrupt the exit if cleanup fails
+        print(f"Warning: failed to close Ghidra cleanly: {e}", file=sys.stderr)
+
+def _signal_handler(signum, frame):
+    """Handles SIGINT, SIGTERM, etc., and triggers cleanup."""
+    _cleanup()
+    # re-send the signal to the process to terminate with the same exit code (optional)
+    sys.exit(128 + (signum if isinstance(signum, int) else 0))
+
+    
+# register cleanup function to be executed on normal program exit
+atexit.register(_cleanup)
+
+# catch common termination signals and trigger the cleanup
+for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(s, _signal_handler)
+
 
 def _run_cmd(cmd: str, shell: bool = False, debug: bool = False, timeout_s: float = None) -> subprocess.CompletedProcess:
     """
