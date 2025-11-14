@@ -44,6 +44,7 @@ Crashes that **should NOT** be labeled as vulnerable include:
 
 ## 3. Tools and some actions
 You may use **Jadx MCP** and **Ghidra MCP** through the Model Context Protocol (MCP):
+If you use `search_functions_by_name` form the Ghidra MCP, that retunr `<function> @ <addr>`, you have to use exact that address in `decompile_function_by_address <addr>`
 
 ---
 

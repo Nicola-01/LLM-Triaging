@@ -195,7 +195,6 @@ def closeGhidraGUI(debug = False):
     """
     line = _find_window_line("Ghidra:")
     if not line:
-        print_message(YELLOW, "WARNING", "No Ghidra GUI window found to close.")
         return
     win_id = line.split()[0]
     print_message(GREEN, "INFO", f"Closing Ghidra GUI..")

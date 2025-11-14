@@ -73,9 +73,9 @@ def realtime(cmd, debug = True, require_response = None):
                 _type      = data.get("type")
                 
                 if _type == "tool_result":
-                    print_message(CYAN, data.get("tool_id"), f"Status: {data.get('status')} - Output: {data.get('output')!r}")
+                    print_message(CYAN, re.sub(r'-.*','',str(data.get("tool_id"))), f"Status: {data.get('status')} - Output: {data.get('output')!r}")
                 elif _type == "tool_use":
-                    print_message(YELLOW, data.get("tool_name"), f"{data.get('tool_id')}({data.get('parameters')})")
+                    print_message(YELLOW, data.get("tool_name"), f"{re.sub(r'-.*','',data.get("tool_id"))}:({data.get('parameters')})")
                 elif _type == "message" and data.get("role") == "assistant":
                     content = data.get("content")
                     allContent += content

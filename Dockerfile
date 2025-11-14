@@ -53,7 +53,7 @@ RUN rm GhidraMCP-release-1-4.zip
 
 WORKDIR /
 
-RUN pip install requests mcp pyautogui --break-system-packages
+RUN pip install requests mcp pyautogui llama-index-tools-mcp openai --break-system-packages
 RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" "pydantic-ai-slim[openai]" --break-system-packages
 RUN apt-get -y install python3-tk python3-dev
 

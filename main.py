@@ -258,6 +258,7 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
         return results
 
     for app_dir in sorted(target_apk_dir.iterdir()):
+        app_dir = Path(re.sub(r'\s*#.*', '', str(app_dir)))
         if not app_dir.is_dir():
             continue
         appname = app_dir.name
