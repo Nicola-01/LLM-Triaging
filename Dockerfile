@@ -1,5 +1,5 @@
 FROM ubuntu:24.04
-RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3 python3-pip 
+RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3 python3-pip maven
 
 
 # Install Ghidra
@@ -58,6 +58,9 @@ RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" "pydantic-ai-
 RUN apt-get -y install python3-tk python3-dev
 
 RUN apt install wmctrl -y
+
+WORKDIR /workspace/flowdroid_gen/flowdroid-cg
+RUN mvn clean package
 
 WORKDIR /workspace
 
