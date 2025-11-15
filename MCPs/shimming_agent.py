@@ -17,7 +17,6 @@ sys.path.append(os.path.dirname(__file__))
 
 from shimming_promptC import *
 
-
 GRAY='\033[0;30m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
@@ -27,41 +26,19 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 
-
-
 def print_message(color: str, level:str, msg: str):
     """Print a colored message with a level tag."""
     print(f'{color}[{level}]{NC} {msg}')
 
 
 def extract_first_json(s: str):
-    # json_pattern = re.compile(r'\{(?:[^{}]|(?R))*\}', re.DOTALL)
-
     finds = regex.search("{(?:[^{}]|(?R))*}", s)
  
-    # match = json_pattern.search(s)
     if not finds:
         # print_message(RED, "ERROR", f"string s: {s}")
         raise ValueError("No JSON object found in LLM reply")
 
-    # json_str = match.group(0)
-
     return finds.group()
-    # return json.loads(json_str)
-
-    
-# def parse_first_json_obj(s: str):
-#     s = s.lstrip()
-#     decoder = json.JSONDecoder()
-#     obj, end = decoder.raw_decode(s) 
-#     return obj
-
-# def extract_json(reply):
-#     reply = re.sub(r'^[^{]+','',reply)
-#     reply = re.sub(r'[^}]*$','',reply)
-#     reply = parse_first_json_obj(reply)
-
-#     return str(reply)
 
 def response_parser(output_type: Any, data: Any) -> bool:
     try:
@@ -71,12 +48,9 @@ def response_parser(output_type: Any, data: Any) -> bool:
         return None
 
 async def mcpRequest(mcp_client, data, MAX_ERRORS = 5, error_calls = None):
-    # print(">>> SENT:", data)
-
     response = await mcp_client.call_tool(data["action"], data["args"])
     response = response.content
     
-    # print(f"\nRESPONSE {response}")
     print_message(GREEN, "SHIMMING_TOOL", response)
     
     tool_call = [data["action"], data["args"]]
@@ -103,13 +77,7 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
     
     client = OpenAI(base_url=model_ulr, api_key='ollama', )
     
-    
-    messages = [
-        {
-            "role": "system",
-            "content": SHIMMING_SYSTEM_PROMPT,
-        }
-    ]
+    messages = [ {"role": "system", "content": SHIMMING_SYSTEM_PROMPT} ]
 
     completion = client.chat.completions.create(
         model=model_name,
@@ -143,7 +111,6 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
             except ValueError:
                 prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
                 continue
-                
             
         messages.append({"role": "assistant", "content": reply})
             
@@ -187,28 +154,10 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
             + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
             continue
 
-        # response = await mcp_client.call_tool(data["action"], data["args"])
-        # response = response.structuredContent
-        # tool_call = [data["action"], data["args"]]
-        # if not response:
-        #     if tool_call not in error_calls:
-        #         response = "Response is empty, call is malformed."
-        #         error_calls.append(tool_call)
-        #     else:
-        #         response = "Tool call failed more than once with an empty response, try a different tool."
-        # else:
-        #     error_calls = []
-        # if len(error_calls) > MAX_ERRORS:
-        #     prompt = 'Answer with a writeup that explains how the binary works and how the challenge could be solved. Use the following format: {"action" : "final", "result": <writeup>}'
-        # else:
-        #     prompt = f"Tool Reponse: {response}"
-        # prompt = await mcpRequest(mcp_client, data, error_calls = error_calls)
-        
         tool_called = True
 
     return result
 
-#asyncio.run(oss_model("hello"))
 # python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
 
 prompt = """
