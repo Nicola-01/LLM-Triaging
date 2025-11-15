@@ -1,5 +1,5 @@
 FROM ubuntu:24.04
-RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3 python3-pip maven
+RUN apt update && apt install -y openjdk-17-jdk openjdk-21-jdk x11-apps wget unzip python3 python3-pip maven android-sdk
 
 
 # Install Ghidra
@@ -61,6 +61,8 @@ RUN apt install wmctrl -y
 
 WORKDIR /workspace/flowdroid_gen/flowdroid-cg
 RUN mvn clean package
+
+RUN sdkmanager "platforms;android-34"
 
 WORKDIR /workspace
 

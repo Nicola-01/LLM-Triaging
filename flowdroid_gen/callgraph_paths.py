@@ -153,7 +153,20 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def getFlowGraf(app_path: Path, start_method: str, depth = 3, force: bool = False, debug: bool = False) -> list:
+def getFlowGraf(app_path: Path, start_method: str, depth = 3, force: bool = False, debug: bool = False) -> List[List[str]]:
+    """
+    Generates a call graph and finds call paths backward from the start_method.
+
+    Args:
+        app_path (Path): Path to the APK/directory.
+        start_method (str): Target method (e.g., 'jniParse').
+        depth (int): Max backward search depth.
+        force (bool): Force call graph regeneration.
+        debug (bool): Print debug path info.
+
+    Returns:
+        List[List[str]]: Found call paths ([Root → ... → Target]) or None.
+    """
     app_path = Path(app_path)
     directory = "callGraph"
     if not os.path.exists(directory):
@@ -167,21 +180,18 @@ def getFlowGraf(app_path: Path, start_method: str, depth = 3, force: bool = Fals
     else:
         package_name = app_path.parent.name
         
-        
-    
     output_dir = f"{directory}/{package_name}"
     
     # print(f"app path: {app_path}\noutput: {output_dir}")
     callgraph_file = f"{output_dir}/callgraph.json"
     
-    
     if not os.path.exists(callgraph_file) or force:
+        # Note: $HOME/Android/Sdk/platforms is used as the Android platform path
         subprocess.run(
             f"flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms {app_path} {output_dir}",
             shell=True
         )
         
-    
     start_src, target_dst = find_start_dst(start_method, callgraph_file)
 
     if not start_src:
