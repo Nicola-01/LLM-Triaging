@@ -74,6 +74,8 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     
     
     if model_name == "gemini-cli":
+        if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
+        
         gemini_output = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
     
         if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))

@@ -1,130 +1,84 @@
 import asyncio
 import json
+import os
 import re
+import sys
+from typing import Any
 from llama_index.tools.mcp import BasicMCPClient
 from openai import OpenAI
 
-from MCPs.prompts.shimming_prompt import SYSTEM_PROMPT
+from pydantic import ValidationError
+from pydantic_ai import Agent
+from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.models.openai import OpenAIChatModel
+import regex
 
-def RawJSONDecoder(index):
-    class _RawJSONDecoder(json.JSONDecoder):
-        end = None
+sys.path.append(os.path.dirname(__file__))
 
-        def decode(self, s, *_):
-            data, self.__class__.end = self.raw_decode(s, index)
-            return data
-    return _RawJSONDecoder
+from shimming_promptC import *
 
-def extract_json(s, index=0):
-    while (index := s.find('{', index)) != -1:
-        try:
-            yield json.loads(s, cls=(decoder := RawJSONDecoder(index)))
-            index = decoder.end
-        except json.JSONDecodeError:
-            index += 1
 
-async def oss_model(prompt, mcp_url, model_ulr, model):
-    mcp_client = BasicMCPClient(mcp_url)
+GRAY='\033[0;30m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 
-    result = "None"
-    tool_called = False
+
+
+def print_message(color: str, level:str, msg: str):
+    """Print a colored message with a level tag."""
+    print(f'{color}[{level}]{NC} {msg}')
+
+
+def extract_first_json(s: str):
+    # json_pattern = re.compile(r'\{(?:[^{}]|(?R))*\}', re.DOTALL)
+
+    finds = regex.search("{(?:[^{}]|(?R))*}", s)
+ 
+    # match = json_pattern.search(s)
+    if not finds:
+        # print_message(RED, "ERROR", f"string s: {s}")
+        raise ValueError("No JSON object found in LLM reply")
+
+    # json_str = match.group(0)
+
+    return finds.group()
+    # return json.loads(json_str)
+
     
-    agent = OpenAI(base_url = model_ulr, api_key='ollama', )
-    
-    messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        }
-    ]
+# def parse_first_json_obj(s: str):
+#     s = s.lstrip()
+#     decoder = json.JSONDecoder()
+#     obj, end = decoder.raw_decode(s) 
+#     return obj
 
-    completion = agent.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0,  ## però potrebbe essere un problema temperature 0 per la classificazione?
-    )
-    
-    error_calls = []
-    MAX_ERRORS = 5
-    while True:
-        print(f"[+] {prompt}")
-        new_message = {"role": "user", "content": prompt}
-        messages.append(new_message)
-        
-        completion = agent.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0,
-        )
-        try:
-            reply = completion.choices[0].message.content
-        except ValueError:
-            continue
-        
-        reply = re.sub(r'^[^{]+','',reply)
-        reply = re.sub(r'[^}]*$','',reply)
+# def extract_json(reply):
+#     reply = re.sub(r'^[^{]+','',reply)
+#     reply = re.sub(r'[^}]*$','',reply)
+#     reply = parse_first_json_obj(reply)
 
-        reply = str(reply)
-        print(f"[?] {reply}")
+#     return str(reply)
 
-        messages.append({"role": "assistant", "content": reply})
-
-        try:
-            data = json.loads(reply)
-        except Exception as e:
-            reply = extract_json(reply)
-            print(reply)
-        try:
-            data = json.loads(reply)
-        except:
-            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
-            continue
-
-        if ("action" not in data and "args" not in data) or (
-            "action" not in data and "result" not in data
-        ):
-            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
-            continue
-        
-        prompt = mcpRequest()
-
-        if data["action"] == "final":
-            if not tool_called:
-                prompt = 'You must call at least one tool before finalizing. Reply only with a JSON with the following schema: {"action": <tool_function>, "args": <args_if_needed>}'
-                continue
-            return data["result"]
-
-        # response = await mcp_client.call_tool(data["action"], data["args"])
-        # response = response.structuredContent
-        # tool_call = [data["action"], data["args"]]
-        # if not response:
-        #     if tool_call not in error_calls:
-        #         response = "Response is empty, call is malformed."
-        #         error_calls.append(tool_call)
-        #     else:
-        #         response = "Tool call failed more than once with an empty response, try a different tool."
-        # else:
-        #     error_calls = []
-        # if len(error_calls) > MAX_ERRORS:
-        #     prompt = 'Answer with a writeup that explains how the binary works and how the challenge could be solved. Use the following format: {"action" : "final", "result": <writeup>}'
-        # else:
-        #     prompt = f"Tool Reponse: {response}"
-        prompt = mcpRequest(mcp_client, data, error_calls = error_calls)
-        
-        tool_called = True
-
-    return result
-
-#asyncio.run(oss_model("hello"))
-# python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
-# asyncio.run(oss_model("Find the function `NI_PublicKeyDecode`, using `search_functions_by_name`"))
+def response_parser(output_type: Any, data: Any) -> bool:
+    try:
+        ret = output_type.model_validate(data)
+        return ret
+    except ValidationError:
+        return None
 
 async def mcpRequest(mcp_client, data, MAX_ERRORS = 5, error_calls = None):
-    print(">>> SENT:", data)
+    # print(">>> SENT:", data)
 
     response = await mcp_client.call_tool(data["action"], data["args"])
     response = response.content
-    print(f"\nRESPONSE {response}")
+    
+    # print(f"\nRESPONSE {response}")
+    print_message(GREEN, "SHIMMING_TOOL", response)
+    
     tool_call = [data["action"], data["args"]]
     if error_calls and not response:
         if tool_call not in error_calls:
@@ -141,93 +95,139 @@ async def mcpRequest(mcp_client, data, MAX_ERRORS = 5, error_calls = None):
         
     return prompt
 
-async def myTest():
-    # mcp_client = BasicMCPClient("http://127.0.0.1:8080")
-    mcp_client = BasicMCPClient("http://127.0.0.1:8082/sse")
-    
-    # print(await mcp_client.list_tools())
+async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug = False):
+    mcp_client = BasicMCPClient(mcp_url)
 
+    result = "None"
+    tool_called = False
+    
+    client = OpenAI(base_url=model_ulr, api_key='ollama', )
     
     
-    methodName = "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo"
-    
+    messages = [
+        {
+            "role": "system",
+            "content": SHIMMING_SYSTEM_PROMPT,
+        }
+    ]
 
-    print("===\n\n search_functions_by_name")
-    data = {
-        "action": "search_functions_by_name",
-        "args": {
-            "query": methodName
-        }
-    }
-    await mcpRequest(mcp_client, data)
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0,
+    )
     
-    print("\n===\n\n decompile_function")
-    data = {
-        "action": "decompile_function",
-        "args": {
-            "name": methodName
-        }
-    }
-    await mcpRequest(mcp_client, data)
-    
-    
-    
-    
-    print("\n===\n\n get_function_by_address")
-    data = {
-        "action": "get_function_by_address",
-        "args": {
-            "address": "0x00140204"
-        }
-    }
-    await mcpRequest(mcp_client, data)
-    
-    print("\n===\n\n list_methods")
-    data = {
-        "action": "list_methods",
-        "args": {}
-    }
-    await mcpRequest(mcp_client, data)
-    
-    
-    print("\n===\n\n decompile_function_by_address")
-    data = {
-        "action": "decompile_function_by_address",
-        "args": {
-            "address": "0x00140204"
-        }
-    }
-    await mcpRequest(mcp_client, data)
-    print("\n===")
-    
-    
-    
-    return
-    
+    error_calls = []
+    MAX_ERRORS = 5
+    while True:
+        if not prompt.startswith("Tool Response: "):
+            print_message(PURPLE, "SHIMMING_PROMPT", prompt)
+        new_message = {"role": "user", "content": prompt}
+        messages.append(new_message)
+        
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0,
+        )
+        try:
+            reply = completion.choices[0].message.content
+        except ValueError:
+            continue
+        
+        try:
+            data = json.loads(reply)
+        except Exception:
+            try:
+                reply = extract_first_json(reply)
+            except ValueError:
+                prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+                continue
+                
+            
+        messages.append({"role": "assistant", "content": reply})
+            
+        # print(f"[?] {reply}")
+        print_message(CYAN, "SHIMMING_REPLY_CLEANED", reply)
+        
+        try:
+            data = json.loads(reply)
+        except:
+            print_message(YELLOW, "WARNING", "INVALID JSON")
+            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+            continue
+        
+        response = response_parser(output_type, data)
+        if response:
+            return response
+        
+        if not ("action" in data and ("args" in data or "result" in data)):
+            print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+            prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
+            + 'There the <writeup> is this JSON schmea:\n'
+            + json.dumps(VulnDetection.model_json_schema(), indent=2)
+            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
+            continue
+        
+        prompt = await mcpRequest(mcp_client, data, error_calls = error_calls)
 
-    
-    print("\n===\n\n get_function_by_address")
-    data = {
-        "action": "get_function_by_address",
-        "args": {
-            "address": "0x0014020400"
-        }
-    }
-    await mcpRequest(mcp_client, data)
-    
-    print("\n===\n\n decompile_function")
-    data = {
-        "action": "decompile_function",
-        "args": {
-            "name": methodName
-        }
-    }
-    await mcpRequest(mcp_client, data)
-    
+        if data["action"] == "final":
+            if not tool_called:
+                prompt = 'You must call at least one tool before finalizing. Reply only with a JSON with the following schema: {"action": <tool_function>, "args": <args_if_needed>}'
+                continue
+            
+            response = response_parser(output_type, data["result"])
+            if response:
+                return response
+            
+            print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
+            + 'There the <writeup> is this JSON schmea:\n'
+            + json.dumps(VulnDetection.model_json_schema(), indent=2)
+            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+            continue
 
-# Run the test function using asyncio
-asyncio.run(myTest())
+        # response = await mcp_client.call_tool(data["action"], data["args"])
+        # response = response.structuredContent
+        # tool_call = [data["action"], data["args"]]
+        # if not response:
+        #     if tool_call not in error_calls:
+        #         response = "Response is empty, call is malformed."
+        #         error_calls.append(tool_call)
+        #     else:
+        #         response = "Tool call failed more than once with an empty response, try a different tool."
+        # else:
+        #     error_calls = []
+        # if len(error_calls) > MAX_ERRORS:
+        #     prompt = 'Answer with a writeup that explains how the binary works and how the challenge could be solved. Use the following format: {"action" : "final", "result": <writeup>}'
+        # else:
+        #     prompt = f"Tool Reponse: {response}"
+        # prompt = await mcpRequest(mcp_client, data, error_calls = error_calls)
+        
+        tool_called = True
 
-# ./ghidra-cli -n -i APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so
+    return result
 
-# clear && python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
+#asyncio.run(oss_model("hello"))
+# python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
+
+prompt = """
+CrashEntry:
+  Process Termination : abort
+  Stack Trace         : 
+        scudo::die
+        scudo::ScopedErrorReport::~ScopedErrorReport
+        scudo::reportInvalidChunkState
+        scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate
+        mp4_write_one_h264
+        Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
+  JNI Bridge Method   : Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
+  Fuzz Harness Entry  : fuzz_one_input
+  Program Entry       : main
+This is a map where each key is a Path to a relevant .so library, and the value is the list of JNI methods it implements: 
+- APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so: ['Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo', 'mp4_write_one_h264', 'mp4_write_one_jpeg']
+
+"""
+
+asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
+                      model_name="gpt-oss:120b", model_ulr="http://localhost:11435/v1"))

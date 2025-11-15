@@ -153,7 +153,7 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def getFlowGraf(app_path: Path, start_method: str, depth = 3, force: bool = False, debug: bool = False) -> List[List[str]]:
+def getFlowGraph(app_path: Path, start_method: str, depth = 3, force: bool = False, debug: bool = False) -> List[List[str]]:
     """
     Generates a call graph and finds call paths backward from the start_method.
 
