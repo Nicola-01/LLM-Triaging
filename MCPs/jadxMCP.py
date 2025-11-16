@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
 
 from MCPs.geminiCLI import query_gemini_cli
+from MCPs.shimming_agent import oss_model
 from utils import *
 from .prompts.jadx_prompts import *
 from .get_agent import get_agent
@@ -73,16 +74,14 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     server: MCPServerStdio = make_jadx_server()
     
     
-    if model_name == "gemini-cli":
-        if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
-        
+    if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
+    if model_name == "gemini-cli":        
         gemini_output = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
     
         if verbose: print_message(PURPLE, "RESPONSE", str(gemini_output))
         
         return gemini_output
-    else:
-        if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
+    elif (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-")):
         async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
             j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
         appMetadata: AppMetadata = j_meta.output
@@ -93,6 +92,11 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
             print_message(GREEN, "LLM-USAGE", j_meta.usage())
                 
         return appMetadata
+    else: #Open model -> need shimming agent
+        mcp = [('JADX_MCP','')]
+        appMetadata: AppMetadata = oss_model(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", 
+                                             AppMetadata, onlyJadx=True, model_ulr=os.getenv(), model_name=model_name, debug=debug)
+        
 
 class JNILibCandidates(BaseModel):
     # libraries (list[str]): Libraries.

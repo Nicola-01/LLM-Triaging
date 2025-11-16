@@ -1,8 +1,11 @@
 import json
+from MCPs.jadxMCP import AppMetadata
+from MCPs.prompts.jadx_prompts import JADX_APP_METADATA
 from MCPs.vulnDetection import VulnDetection
 from vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
 
-SHIMMING_SYSTEM_PROMPT_TEMPLATE = """
+
+GHIDRA_MCP_TOOLS = """
 You are a tool-using assistant that can use tools to reverse engineer a binary using Ghidra to understand how it works. 
 You can ONLY communicate in JSON.
 
@@ -568,6 +571,319 @@ Available functionalities:
         "title": "set_local_variable_typeArguments"
       }
 
+"""
+
+JADX_MCP_TOOLS = """
+You are a Jadx MCP assistant. 
+You can ONLY communicate in JSON.
+
+Available functionalities:
+
+- fetch_current_class
+  Fetch the currently selected class and its code from the JADX-GUI plugin.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- get_all_classes
+  Returns a list of all classes in the project.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      }
+    }
+- get_all_resource_file_names
+  Retrieve all resource files names that exists in application.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- get_android_manifest
+  Retrieve and return the AndroidManifest.xml content.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- get_class_sources
+  Fetch the Java source of a specific class.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_name"
+      ]
+    }
+- get_fields_of_class
+  List all field names in a class.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class_name"
+      ]
+    }
+- get_main_activity_class
+  Fetch the main activity class as defined in the AndroidManifest.xml.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- get_main_application_classes_code
+  Fetch all the main application classes' code based on the package name defined in the AndroidManifest.xml.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      }
+    }
+- get_main_application_classes_names
+  Fetch all the main application classes' names based on the package name defined in the AndroidManifest.xml.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      }
+    }
+- get_method_by_name
+  Fetch the source code of a method from a specific class.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        },
+        "method_name": {
+          "title": "Method Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_name",
+        "method_name"
+      ]
+    }
+- get_methods_of_class
+  List all method names in a class.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "class_name"
+      ]
+    }
+- get_resource_file
+  Retrieve resource file content.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "resource_name": {
+          "title": "Resource Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource_name"
+      ]
+    }
+- get_selected_text
+  Returns the currently selected text in the decompiled code view.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- get_smali_of_class
+  Fetch the smali representation of a class.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_name"
+      ]
+    }
+- get_strings
+  Retrieve contents of strings.xml files that exists in application.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {}
+    }
+- rename_class
+  rename specific class name to one better understanding name,input class name must contain package name
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        },
+        "new_name": {
+          "title": "New Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_name",
+        "new_name"
+      ]
+    }
+- rename_field
+  rename specific field name to one better understanding name,must input full class name and field name
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "title": "Class Name",
+          "type": "string"
+        },
+        "field_name": {
+          "title": "Field Name",
+          "type": "string"
+        },
+        "new_name": {
+          "title": "New Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class_name",
+        "field_name",
+        "new_name"
+      ]
+    }
+- rename_method
+  rename specific method name to one better understanding name,input method name must contain package name and class name
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "method_name": {
+          "title": "Method Name",
+          "type": "string"
+        },
+        "new_name": {
+          "title": "New Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method_name",
+        "new_name"
+      ]
+    }
+- search_method_by_name
+  Search for a method name across all classes.
+    Parameters:
+    {
+      "type": "object",
+      "properties": {
+        "method_name": {
+          "title": "Method Name",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "method_name"
+      ]
+    }
+"""
+
+SHIMMING_SYSTEM_PROMPT_TEMPLATE = """
+{SHIMMING_SCOPE}
 
 # IMPORTANT:
 
@@ -641,7 +957,7 @@ Only then, output JSON ("action":"final","result":(...)) using the vulnerability
 YOU HAVE TO USE THE TOOLS PORVIDED TO RECOVER ANY IMPORTANT INFORMATIONS THAT YOU NEED FOR THE SECOND PHASE
 you have to performe a vulnerability detection, i.e. the second part of the system prompt
 
-{DETECTION_SYSTEM_PROMPT}
+{SHIMMING_SYSTEM_PROMPT}
 
 **After receiving the tool results, and you have the valid response**, you will be asked again.
 Only when explicitly instructed with "final" may you return a VulnDetection object:
@@ -655,4 +971,6 @@ Rules:
 - Your job is to call a tool on every turn until told otherwise.
 """
 
-SHIMMING_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{DETECTION_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnDetection.model_json_schema(), indent=2))
+
+SHIMMING_METADATA_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_SYSTEM_PROMPT}", JADX_APP_METADATA).replace("{OUTPUT_SCHEMA}", json.dumps(AppMetadata.model_json_schema(), indent=2))
+SHIMMING_VULNDECT_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnDetection.model_json_schema(), indent=2))

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from typing import Any
 from llama_index.tools.mcp import BasicMCPClient
@@ -9,24 +10,15 @@ from openai import OpenAI
 from pydantic import ValidationError
 import regex
 
-from MCPs.prompts.shimming_prompt import SHIMMING_SYSTEM_PROMPT
+from MCPs.prompts.shimming_prompt import GHIDRA_MCP_TOOLS, JADX_MCP_TOOLS, SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.vulnDetection import VulnDetection
+from utils import *
 
 sys.path.append(os.path.dirname(__file__))
 
-GRAY='\033[0;30m'
-RED='\033[0;31m'
-YELLOW='\033[0;33m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
 
-def print_message(color: str, level:str, msg: str):
-    """Print a colored message with a level tag."""
-    print(f'{color}[{level}]{NC} {msg}')
-
+JADX_MCP = "JADX_MCP"
+GHIDRA_MCP = "GHIDRA_MCP"
 
 def extract_first_json(s: str):
     finds = regex.search("{(?:[^{}]|(?R))*}", s)
@@ -44,8 +36,17 @@ def response_parser(output_type: Any, data: Any) -> bool:
     except ValidationError:
         return None
 
-async def mcpRequest(mcp_client, data, MAX_ERRORS = 5, error_calls = None):
-    response = await mcp_client.call_tool(data["action"], data["args"])
+async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None):
+    
+    if data["action"] in JADX_MCP_TOOLS:
+        response = await mcp_clients[JADX_MCP].call_tool(data["action"], data["args"])
+        pass
+    elif data["action"] in GHIDRA_MCP_TOOLS:
+        response = await mcp_clients[GHIDRA_MCP].call_tool(data["action"], data["args"])
+        pass
+    else:
+        return f"The tool doesn't exists, use a valid one from JADX MCP AND GHIDRA MCP"
+    
     response = response.content
     
     print_message(GREEN, "SHIMMING_TOOL", response)
@@ -66,15 +67,29 @@ async def mcpRequest(mcp_client, data, MAX_ERRORS = 5, error_calls = None):
         
     return prompt
 
-async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug = False):
-    mcp_client = BasicMCPClient(mcp_url)
+
+async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:bool, model_ulr:str, model_name:str, debug:bool = False) -> object:
+    mcp_clients = []
+    mcp_clients.append(JADX_MCP,BasicMCPClient("TODO")) # TODO
+    if not onlyJadx:
+        mcp_clients.append(GHIDRA_MCP,BasicMCPClient("http://127.0.0.1:8081/sse"))
+
+    jadx_mcp_process = subprocess.Popen(
+        "uv run $JADX_MCP_DIR/jadx_mcp_server.py --http --port 9999",
+        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
+    )
+
+    ghidra_mcp_process = subprocess.Popen(
+        "python3 $GHIDRA_MCP_DIR/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/",
+        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
+    )
 
     result = "None"
     tool_called = False
     
     client = OpenAI(base_url=model_ulr, api_key='ollama', )
     
-    messages = [ {"role": "system", "content": SHIMMING_SYSTEM_PROMPT} ]
+    messages = [ {"role": "system", "content": system_prompt} ] # SHIMMING_VULNDECT_SYSTEM_PROMPT
 
     completion = client.chat.completions.create(
         model=model_name,
@@ -123,6 +138,8 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
         
         response = response_parser(output_type, data)
         if response:
+            ghidra_mcp_process.kill()
+            jadx_mcp_process.kill()
             return response
         
         if not ("action" in data and ("args" in data or "result" in data)):
@@ -133,7 +150,7 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
             + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
             continue
         
-        prompt = await mcpRequest(mcp_client, data, error_calls = error_calls)
+        prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls)
 
         if data["action"] == "final":
             if not tool_called:
@@ -142,6 +159,8 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
             
             response = response_parser(output_type, data["result"])
             if response:
+                jadx_mcp_process.kill()
+                ghidra_mcp_process.kill()
                 return response
             
             print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
