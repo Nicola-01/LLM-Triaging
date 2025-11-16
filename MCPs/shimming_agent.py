@@ -1,21 +1,18 @@
 import asyncio
 import json
 import os
-import re
 import sys
 from typing import Any
 from llama_index.tools.mcp import BasicMCPClient
 from openai import OpenAI
 
 from pydantic import ValidationError
-from pydantic_ai import Agent
-from pydantic_ai.providers.ollama import OllamaProvider
-from pydantic_ai.models.openai import OpenAIChatModel
 import regex
 
-sys.path.append(os.path.dirname(__file__))
+from MCPs.prompts.shimming_prompt import SHIMMING_SYSTEM_PROMPT
+from MCPs.vulnDetection import VulnDetection
 
-from shimming_promptC import *
+sys.path.append(os.path.dirname(__file__))
 
 GRAY='\033[0;30m'
 RED='\033[0;31m'
@@ -160,25 +157,25 @@ async def oss_model(prompt, output_type, mcp_url, model_ulr, model_name, debug =
 
 # python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
 
-prompt = """
-CrashEntry:
-  Process Termination : abort
-  Stack Trace         : 
-        scudo::die
-        scudo::ScopedErrorReport::~ScopedErrorReport
-        scudo::reportInvalidChunkState
-        scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate
-        mp4_write_one_h264
-        Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
-  JNI Bridge Method   : Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
-  Fuzz Harness Entry  : fuzz_one_input
-  Program Entry       : main
-This is a map where each key is a Path to a relevant .so library, and the value is the list of JNI methods it implements: 
-- APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so: ['Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo', 'mp4_write_one_h264', 'mp4_write_one_jpeg']
+# prompt = """
+# CrashEntry:
+#   Process Termination : abort
+#   Stack Trace         : 
+#         scudo::die
+#         scudo::ScopedErrorReport::~ScopedErrorReport
+#         scudo::reportInvalidChunkState
+#         scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate
+#         mp4_write_one_h264
+#         Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
+#   JNI Bridge Method   : Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
+#   Fuzz Harness Entry  : fuzz_one_input
+#   Program Entry       : main
+# This is a map where each key is a Path to a relevant .so library, and the value is the list of JNI methods it implements: 
+# - APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so: ['Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo', 'mp4_write_one_h264', 'mp4_write_one_jpeg']
 
-"""
+# """
 
-response = asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
-                      model_name="gpt-oss:120b", model_ulr="http://localhost:11435/v1"))
+# response = asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
+#                       model_name="gpt-oss:120b", model_ulr="http://localhost:11435/v1"))
 
-print_message(PURPLE,"OUTPUT",response)
+# print_message(PURPLE,"OUTPUT",response)
