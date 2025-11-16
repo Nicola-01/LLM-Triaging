@@ -37,14 +37,15 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_serializer
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 from CrashSummary import Crashes
-from MCPs.vulnDetection import AnalysisResult, AnalysisResults, mcp_vuln_detection
+from MCPs.ghidraMCP import mcp_vuln_detection
+from MCPs.vulnDetection import AnalysisResults
 from utils import *
 from jadx_helper_functions import kill_jadx, start_jadx_gui
-from MCPs.jadxMCP import AppMetadata, get_jadx_metadata
+from MCPs.AppMetadata import AppMetadata
+from MCPs.jadxMCP import get_jadx_metadata
 
 sys.path.append(os.path.dirname(__file__))
 

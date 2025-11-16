@@ -1,9 +1,8 @@
 import json
-from MCPs.jadxMCP import AppMetadata
+from MCPs.AppMetadata import AppMetadata
 from MCPs.prompts.jadx_prompts import JADX_APP_METADATA
+from MCPs.prompts.vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
 from MCPs.vulnDetection import VulnDetection
-from vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
-
 
 GHIDRA_MCP_TOOLS = """
 You are a tool-using assistant that can use tools to reverse engineer a binary using Ghidra to understand how it works. 

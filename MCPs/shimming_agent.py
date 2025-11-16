@@ -70,12 +70,12 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None)
 
 async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:bool, model_ulr:str, model_name:str, debug:bool = False) -> object:
     mcp_clients = []
-    mcp_clients.append(JADX_MCP,BasicMCPClient("TODO")) # TODO
+    mcp_clients.append(JADX_MCP,BasicMCPClient("http://127.0.0.1:8651/sse"))
     if not onlyJadx:
         mcp_clients.append(GHIDRA_MCP,BasicMCPClient("http://127.0.0.1:8081/sse"))
 
     jadx_mcp_process = subprocess.Popen(
-        "uv run $JADX_MCP_DIR/jadx_mcp_server.py --http --port 9999",
+        "uv run $JADX_MCP_DIR/jadx_mcp_server.py --sse",
         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
     )
 
