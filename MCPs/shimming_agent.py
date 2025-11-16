@@ -178,5 +178,7 @@ This is a map where each key is a Path to a relevant .so library, and the value 
 
 """
 
-asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
+response = asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
                       model_name="gpt-oss:120b", model_ulr="http://localhost:11435/v1"))
+
+print_message(PURPLE,"OUTPUT",response)

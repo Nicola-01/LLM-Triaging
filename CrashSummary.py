@@ -9,6 +9,9 @@ from typing import List, Iterable, Union, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from flowdroid_gen.callgraph_paths import getFlowGraph
+from utils import print_message, YELLOW
+
 # ----------------------------
 # Data model
 # ----------------------------
@@ -34,6 +37,7 @@ class CrashSummary:
     # - **ProgramEntry** (str): Program entry.
     ProcessTermination: str
     StackTrace: List[str]
+    JavaCallGraph: List[str]
     JNIBridgeMethod: str
     FuzzHarnessEntry: str
     ProgramEntry: str
@@ -48,11 +52,19 @@ class CrashSummary:
             if not self.StackTrace
             else "\n" + textwrap.indent("\n".join(self.StackTrace), "        ")
         )
+        javaCallGraph_str = (
+            "(empty)"
+            if not self.JavaCallGraph
+            else "\n" + textwrap.indent("\n".join(self.StackTrace), "        ")
+        )
+        
+        
         return (
             "CrashEntry:\n"
             f"  Process Termination : {self.ProcessTermination}\n"
-            f"  Stack Trace         : {stack_str}\n"
             f"  JNI Bridge Method   : {self.JNIBridgeMethod}\n"
+            f"  Native Stack Trace  : {stack_str}\n"
+            f"  Java Call Graph     : {javaCallGraph_str}\n"
             f"  Fuzz Harness Entry  : {self.FuzzHarnessEntry}\n"
             f"  Program Entry       : {self.ProgramEntry}"
         )
@@ -86,14 +98,11 @@ class Crashes:
           fields will remain empty strings.
     """
 
-    # Class-level constants to recognize section boundaries
-    _SECTION_START_TOKEN = "CRASH NR"
-
-    def __init__(self, crash_report_path: Path):
+    def __init__(self, apk: Path, crash_report_path: Path, debug = False):
         """
         Parse the given crash report file immediately and store results internally.
         """
-        self.__entries: List[CrashSummary] = self.__parse_crash_report(crash_report_path)
+        self.__entries: List[CrashSummary] = self.__parse_crash_report(apk, crash_report_path, debug)
 
     # ---- Read-only access to entries ----
     @property
@@ -102,7 +111,7 @@ class Crashes:
         return tuple(self.__entries)
 
     # ---- Core parsing ----
-    def __parse_crash_report(self, path: Path) -> List[CrashSummary]:
+    def __parse_crash_report(self, apk: Path, path: Path, debug) -> List[CrashSummary]:
         """
         Parse the crash report format produced by your tool.
 
@@ -151,12 +160,27 @@ class Crashes:
                     ProgramEntry = line
                 else:
                     StackTrace.append(line)
+                    
+            depth = 1
+            callGraph = None
+            while True:
+                new_callGraph = getFlowGraph(apk, JNIBridgeMethod, depth, debug=True)
+                if not new_callGraph:
+                    if debug:
+                        print_message(YELLOW, "DEBUG", "Call Graph is null")
+                    break
+                if len(new_callGraph) < 20:
+                    callGraph = new_callGraph
+                else:
+                    break
+                depth += 1
             
             results.append(
                 CrashSummary(
                     ProcessTermination=ProcessTermination,
                     StackTrace=StackTrace,
                     JNIBridgeMethod=JNIBridgeMethod,
+                    JavaCallGraph=callGraph,
                     FuzzHarnessEntry=FuzzHarnessEntry,
                     ProgramEntry=ProgramEntry,
                 )
@@ -165,16 +189,9 @@ class Crashes:
 
         in_section = False
         for line in lines:
-            # Start of section: a hashes-line containing "CRASH NR"
-            if line.startswith("#") and self._SECTION_START_TOKEN in line:
+            if line.startswith("#"):
                 flush()            # close any previously open section
-                in_section = True
-                continue
-
-            # End of section: a hashes-line without "CRASH NR"
-            if line.startswith("#") and self._SECTION_START_TOKEN not in line:
-                flush()
-                in_section = False
+                in_section = "CRASH NR" in line
                 continue
 
             # Inside a section, collect frames

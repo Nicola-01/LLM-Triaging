@@ -33,6 +33,7 @@ Crashes that **should NOT** be labeled as vulnerable include:
 ## 2. Input fields you will receive
 - `process_termination`: e.g., "SIGSEGV", "abort", "ASAN: heap-use-after-free"
 - `stack_trace`: list of frames or raw text
+- `java_callgraph`: list of Java→JNI call-path strings showing how Java execution reaches the JNI method that calls the native function involved in the crash; each element is formatted as "<caller> -> <callee>" and ordered from Java entrypoint to the JNI call.
 - `app_native_function`: string or null
 - `jni_bridge_method`: string or null
 - `fuzz_harness_entry`: string or null
@@ -55,7 +56,7 @@ If you use `search_functions_by_name` form the Ghidra MCP, that retunr `<functio
 - Start from the crashing instruction / top native frame (e.g., `byte_array_to_bson_string`). Trace backward through callers (decompile each caller up to a reasonable depth, e.g., 3 levels) to find where the relevant variable(s) are assigned. Start from the last stack trace element, and go up following the stack trace list.
 - At each step, record whether the value is: (A) directly taken from fuzzer/JNI input, (B) derived from input but transformed/checked (describe transformation), (C) set to a fixed/constant value, or (D) obtained from an environment/resource not attacker-controlled.
 - If any function on the backward path performs validation (bounds checks, length checks, canonicalisation, ownership checks), note it and reduce confidence accordingly.
-- When the backward path reaches a JNI bridge, query Jadx to inspect the Java code that constructs the native call arguments and determine whether those arguments can be influenced by untrusted sources (e.g., network input, user-supplied file, IPC payload). Record findings in `evidence` with precise snippets or references.
+- When the backward path reaches a JNI bridge, query Jadx, using `java_callgraph` to orientate and inspect the Java code that constructs the native call arguments and determine whether those arguments can be influenced by untrusted sources (e.g., network input, user-supplied file, IPC payload). Record findings in `evidence` with precise snippets or references.
 - If no realistic taint path from attacker-controlled sources exists, classify as non-vulnerability (Env/Harness) or at most low-confidence vulnerability and explain which assignments prevented exploitability.
 3. Evaluate reachability: could untrusted input trigger this path under real app use?
 4. Mark **"Env/Harness"** when crash originates from unrealistic or harness-only behavior.

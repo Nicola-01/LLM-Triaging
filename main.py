@@ -121,7 +121,7 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
-async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args) -> AnalysisContainer:
+async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args, debug=False) -> AnalysisContainer:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
 
@@ -164,7 +164,7 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
         sys.exit(1)
 
     # Parse crash report
-    crashes = Crashes(backtraces)
+    crashes = Crashes(apk, backtraces, debug=debug)
                 
     # Prepare native libs via APK extraction
     print_message(BLUE, "INFO", f"Getting .so files from APK: {apk}")
@@ -349,7 +349,7 @@ def run(args):
         if debug:
             print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
             
-        result = asyncio.run(run_detection(apk, appMetadata, backtraces, args))
+        result = asyncio.run(run_detection(apk, appMetadata, backtraces, args, debug=debug))
         result.to_json_file(final_json)
         if debug:
             print_message(GREEN, "DONE", f"Wrote {final_json}")

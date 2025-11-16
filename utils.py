@@ -13,7 +13,6 @@ import hashlib
 from pathlib import Path
 import zipfile
 from typing import Dict, List, Optional
-from CrashSummary import Crashes
 
 from google.genai.errors import ClientError, ServerError
 from datetime import datetime
@@ -71,7 +70,8 @@ def extract_so_files(apk: Path) -> List[Path]:
     )
 
 
-def find_relevant_libs(so_paths: List[Path], crashes: Crashes, debug: bool = False) -> Dict[Path, List[str]]:
+def find_relevant_libs(so_paths: List[Path], crashes: 'Crashes', debug: bool = False) -> Dict[Path, List[str]]:
+    from CrashSummary import Crashes
     """
     Given a list of .so files, return those that implement JNI methods,
     preferring specific ABIs in the following order:

@@ -153,13 +153,13 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def getFlowGraph(app_path: Path, start_method: str, depth = 3, force: bool = False, debug: bool = False) -> List[List[str]]:
+def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, force: bool = False, debug: bool = False) -> List[str]:
     """
     Generates a call graph and finds call paths backward from the start_method.
 
     Args:
         app_path (Path): Path to the APK/directory.
-        start_method (str): Target method (e.g., 'jniParse').
+        JNIBridgeMethod (str): Target method (e.g., 'jniParse').
         depth (int): Max backward search depth.
         force (bool): Force call graph regeneration.
         debug (bool): Print debug path info.
@@ -187,10 +187,27 @@ def getFlowGraph(app_path: Path, start_method: str, depth = 3, force: bool = Fal
     
     if not os.path.exists(callgraph_file) or force:
         # Note: $HOME/Android/Sdk/platforms is used as the Android platform path
+        print_message(BLUE, "INFO", f"Extracting flow graph from {package_name}")
         subprocess.run(
-            f"flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms {app_path} {output_dir}",
-            shell=True
+            f"java -jar flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms {app_path} {output_dir}",
+            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
         )
+       
+    bridgeMethod = JNIBridgeMethod.split("_") 
+    start_method = None 
+    for i in range(1,len(bridgeMethod)):
+        test_method = "_".join(bridgeMethod[-i:])
+        ret = rg(test_method, callgraph_file)
+        if debug:
+            print_message(CYAN, "DEBUG", f"Search for {test_method} in {callgraph_file}")
+        if (len(ret) > 0):
+            start_method = test_method
+        else:
+            break
+        
+    if not start_method:
+        print_message(YELLOW, "WARNING", f"The method {JNIBridgeMethod} is not present in {callgraph_file}")
+        return None
         
     start_src, target_dst = find_start_dst(start_method, callgraph_file)
 
@@ -200,11 +217,14 @@ def getFlowGraph(app_path: Path, start_method: str, depth = 3, force: bool = Fal
     
     paths = dfs_paths(start_src, callgraph_file, depth, target_dst) 
     
+    ret: list[str] = []
+    
     if not paths:
         print_message(YELLOW, "WARNING", "No paths found within the specified depth.")
         return None
     elif debug:
         print_message(GREEN, "INFO", f"Found {len(paths)} paths:")
         for p in paths:
-            print_message(CYAN, "DEBUG", " -> ".join(p))
-    return paths
+            ret.append(" -> ".join(p))
+            # print_message(CYAN, "DEBUG", " -> ".join(p))
+    return ret
