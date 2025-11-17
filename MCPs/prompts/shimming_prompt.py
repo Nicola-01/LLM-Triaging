@@ -886,7 +886,7 @@ SHIMMING_SYSTEM_PROMPT_TEMPLATE = """
 
 # IMPORTANT:
 
-For each step, reply ONLY with a SINGLE JSON with the proposed schema.
+For each step, *reply ONLY with a SINGLE JSON with the proposed schema*.
 (
   "action": <tool_name>,
   "args": ( ... ),

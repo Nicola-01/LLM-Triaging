@@ -338,7 +338,7 @@ def run(args):
                 appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=debug))      
             except Exception as e:
                 handle_model_errors(e)
-               
+   
         # Run the assessment for a single (backtraces, apk) pair.
         case_dir_name = backtraces.parent.parent.name  # .../reproduced_crashes/.. -> case dir
 

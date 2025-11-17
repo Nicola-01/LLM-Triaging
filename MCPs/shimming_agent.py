@@ -10,8 +10,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 import regex
 
-from MCPs.prompts.shimming_prompt import GHIDRA_MCP_TOOLS, JADX_MCP_TOOLS, SHIMMING_VULNDECT_SYSTEM_PROMPT
-from MCPs.vulnDetection import VulnDetection
+from MCPs.prompts.shimming_prompt import GHIDRA_MCP_TOOLS, JADX_MCP_TOOLS
 from utils import *
 
 sys.path.append(os.path.dirname(__file__))
@@ -49,7 +48,10 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None)
     
     response = response.content
     
-    print_message(GREEN, "SHIMMING_TOOL", response)
+    if len((str(response))) > 200:
+        print_message(GREEN, "SHIMMING_TOOL", f"{str(response)[:200]}...")
+    else: 
+        print_message(GREEN, "SHIMMING_TOOL", response)
     
     tool_call = [data["action"], data["args"]]
     if error_calls and not response:
@@ -69,10 +71,10 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None)
 
 
 async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:bool, model_ulr:str, model_name:str, debug:bool = False) -> object:
-    mcp_clients = []
-    mcp_clients.append(JADX_MCP,BasicMCPClient("http://127.0.0.1:8651/sse"))
+    mcp_clients = {}
+    mcp_clients[JADX_MCP] = BasicMCPClient("http://127.0.0.1:8651/sse")
     if not onlyJadx:
-        mcp_clients.append(GHIDRA_MCP,BasicMCPClient("http://127.0.0.1:8081/sse"))
+        mcp_clients[JADX_MCP] = BasicMCPClient("http://127.0.0.1:8081/sse")
 
     jadx_mcp_process = subprocess.Popen(
         "uv run $JADX_MCP_DIR/jadx_mcp_server.py --sse",
@@ -89,18 +91,18 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
     
     client = OpenAI(base_url=model_ulr, api_key='ollama', )
     
-    messages = [ {"role": "system", "content": system_prompt} ] # SHIMMING_VULNDECT_SYSTEM_PROMPT
+    messages = [ {"role": "system", "content": system_prompt} ]
 
-    completion = client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        temperature=0,
-    )
+    # completion = client.chat.completions.create(
+    #     model=model_name,
+    #     messages=messages,
+    #     temperature=0,
+    # )
     
     error_calls = []
     MAX_ERRORS = 5
     while True:
-        if not prompt.startswith("Tool Response: "):
+        if not (prompt.startswith("Tool Response: ") or prompt.startswith("Invalid JSON. Reply ONLY with a single JSON object of the form")):
             print_message(PURPLE, "SHIMMING_PROMPT", prompt)
         new_message = {"role": "user", "content": prompt}
         messages.append(new_message)
@@ -121,7 +123,10 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
             try:
                 reply = extract_first_json(reply)
             except ValueError:
-                prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+                
+                prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
+                # Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+                print_message(YELLOW,"INVALID LLM RESPONSE", reply)
                 continue
             
         messages.append({"role": "assistant", "content": reply})
@@ -133,7 +138,8 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
             data = json.loads(reply)
         except:
             print_message(YELLOW, "WARNING", "INVALID JSON")
-            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+            prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
+            # prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
             continue
         
         response = response_parser(output_type, data)
@@ -144,13 +150,11 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
         
         if not ("action" in data and ("args" in data or "result" in data)):
             print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
-            prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
+            prompt = ('Invalid JSON.  Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.' 
             + 'There the <writeup> is this JSON schmea:\n'
-            + json.dumps(VulnDetection.model_json_schema(), indent=2)
+            + json.dumps(output_type.model_json_schema(), indent=2)
             + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
             continue
-        
-        prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls)
 
         if data["action"] == "final":
             if not tool_called:
@@ -164,37 +168,14 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
                 return response
             
             print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
-            prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
+            prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
             + 'There the <writeup> is this JSON schmea:\n'
-            + json.dumps(VulnDetection.model_json_schema(), indent=2)
-            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
+            + json.dumps(output_type.model_json_schema(), indent=2)
+            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
             continue
+        else:
+            prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls)
 
         tool_called = True
 
     return result
-
-# python3 /home/nicola/Desktop/Tesi/GhidraMCP/GhidraMCP-release-1-4/bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
-
-# prompt = """
-# CrashEntry:
-#   Process Termination : abort
-#   Stack Trace         : 
-#         scudo::die
-#         scudo::ScopedErrorReport::~ScopedErrorReport
-#         scudo::reportInvalidChunkState
-#         scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate
-#         mp4_write_one_h264
-#         Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
-#   JNI Bridge Method   : Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo
-#   Fuzz Harness Entry  : fuzz_one_input
-#   Program Entry       : main
-# This is a map where each key is a Path to a relevant .so library, and the value is the list of JNI methods it implements: 
-# - APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so: ['Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo', 'mp4_write_one_h264', 'mp4_write_one_jpeg']
-
-# """
-
-# response = asyncio.run(oss_model(prompt, output_type=VulnDetection, mcp_url="http://127.0.0.1:8081/sse", 
-#                       model_name="gpt-oss:120b", model_ulr="http://localhost:11435/v1"))
-
-# print_message(PURPLE,"OUTPUT",response)
