@@ -14,7 +14,7 @@ if [ ! -d "$output_dir" ]; then
     mkdir -p "$output_dir"
 fi
 
-cd flowdroid-cg
+cd flowdroid_gen/flowdroid-cg
 app_name=$(basename $app_path .apk)
 
 # Measure execution time and RAM usage
@@ -23,7 +23,7 @@ max_ram_kb=0
 
 # Run the process in the background
 # mvn exec:java -Dexec.mainClass="FlowDroidCG" -Dexec.args="$HOME/Android/Sdk/platforms $app_path $output_dir/$app_name" &
-java -jar flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $app_path $output_dir
+java -jar flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms $app_path $output_dir
 pid=$!
 
 # Monitor RAM usage while the process is running
@@ -42,8 +42,8 @@ execution_time=$( echo "$end_time - $start_time" | bc -l )
 max_ram_mb=$((max_ram_kb / 1024)) # Convert to MB
 
 # Save app name, execution time, and RAM usage to stats.csv
-stats_file="$output_dir/stats.csv"
-if [ ! -f "$stats_file" ]; then
-    echo "App Name,Analysis Time (s),Max RAM Usage (MB)" > "$stats_file"
-fi
-echo "$app_name,$execution_time,$max_ram_mb" >> "$stats_file"
+# stats_file="$output_dir/stats.csv"
+# if [ ! -f "$stats_file" ]; then
+#     echo "App Name,Analysis Time (s),Max RAM Usage (MB)" > "$stats_file"
+# fi
+# echo "$app_name,$execution_time,$max_ram_mb" >> "$stats_file"

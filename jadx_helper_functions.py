@@ -100,7 +100,7 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str = "jadx-gui", timeout_sec: int =
             print_message(
                 RED,
                 "ERROR",
-                f"JADX did not report MCP server startup within {timeout_sec}s.",
+                f"JADX did not report MCP server startup within {timeout_sec}s. Make sure no instances of JADX are open.",
             )
             kill_jadx()
             sys.exit(1)

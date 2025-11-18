@@ -1,5 +1,8 @@
 import sys
 import os
+from typing import Any
+
+from pydantic import ValidationError
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
@@ -10,7 +13,8 @@ import textwrap
 class GeminiCliMaxRetry(Exception):
     pass
 
-def gemini_response_parser(output: str, output_type = None, debug = False) -> str:
+
+def gemini_response_parser(output: str, output_type: Any = None, debug = False) -> str:
     """Clean gemini-cli output and return only the relevant response."""
     lines = output.splitlines()
     cleaned = []
@@ -35,9 +39,13 @@ def gemini_response_parser(output: str, output_type = None, debug = False) -> st
     except Exception as e:
         print_message(YELLOW, "ERROR", f"Failed to parse gemini-cli output as JSON: {e}")
         if debug:
-            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output}")
+            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output[:200]}...")
         return None
-    return output_type.model_validate(data)
+    
+    try:
+        return output_type.model_validate(data)
+    except ValidationError:
+        return None
 
 
 
@@ -79,7 +87,9 @@ def realtime(cmd, debug = True, require_response = None):
                 elif _type == "message" and data.get("role") == "assistant":
                     content = data.get("content")
                     allContent += content
-                elif not (_type == "message" and data.get("role") == "user"):
+                elif _type == "result":
+                    print_message(BLUE, "INFO", f"Tokens: {data.get("status")}")
+                elif not (_type == "message" and data.get("role") == "user" or _type == "init"):
                     print_message(GREEN, "IDK", data)
                             
             

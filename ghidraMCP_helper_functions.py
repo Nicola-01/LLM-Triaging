@@ -1,6 +1,7 @@
 import subprocess
 import time
 import pyautogui
+pyautogui.FAILSAFE= True
 import os
 import shlex
 import atexit

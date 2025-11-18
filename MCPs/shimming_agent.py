@@ -35,7 +35,7 @@ def response_parser(output_type: Any, data: Any) -> bool:
     except ValidationError:
         return None
 
-async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None):
+async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None, debug:bool = False):
     
     if data["action"] in JADX_MCP_TOOLS:
         response = await mcp_clients[JADX_MCP].call_tool(data["action"], data["args"])
@@ -48,10 +48,11 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None)
     
     response = response.content
     
-    if len((str(response))) > 200:
-        print_message(GREEN, "SHIMMING_TOOL", f"{str(response)[:200]}...")
-    else: 
-        print_message(GREEN, "SHIMMING_TOOL", response)
+    if debug:
+        if len((str(response))) > 200:
+            print_message(GREEN, "SHIMMING_TOOL", f"{str(response)[:200]}...")
+        else: 
+            print_message(GREEN, "SHIMMING_TOOL", response)
     
     tool_call = [data["action"], data["args"]]
     if error_calls and not response:
@@ -70,11 +71,11 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None)
     return prompt
 
 
-async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:bool, model_ulr:str, model_name:str, debug:bool = False) -> object:
+async def oss_model(system_prompt:str, prompt:str, output_type:object, model_ulr:str, model_name:str, onlyJadx:bool = False, debug:bool = False) -> object:
     mcp_clients = {}
     mcp_clients[JADX_MCP] = BasicMCPClient("http://127.0.0.1:8651/sse")
     if not onlyJadx:
-        mcp_clients[JADX_MCP] = BasicMCPClient("http://127.0.0.1:8081/sse")
+        mcp_clients[GHIDRA_MCP] = BasicMCPClient("http://127.0.0.1:8081/sse")
 
     jadx_mcp_process = subprocess.Popen(
         "uv run $JADX_MCP_DIR/jadx_mcp_server.py --sse",
@@ -102,16 +103,18 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
     error_calls = []
     MAX_ERRORS = 5
     while True:
-        if not (prompt.startswith("Tool Response: ") or prompt.startswith("Invalid JSON. Reply ONLY with a single JSON object of the form")):
+        if debug and not (prompt.startswith("Tool Response: ") or prompt.startswith("Invalid JSON. Reply ONLY with a single JSON object of the form")):
             print_message(PURPLE, "SHIMMING_PROMPT", prompt)
         new_message = {"role": "user", "content": prompt}
         messages.append(new_message)
         
+        print("ASKING")
         completion = client.chat.completions.create(
             model=model_name,
             messages=messages,
             temperature=0,
         )
+        print("RESPONDED")
         try:
             reply = completion.choices[0].message.content
         except ValueError:
@@ -126,18 +129,18 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
                 
                 prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
                 # Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
-                print_message(YELLOW,"INVALID LLM RESPONSE", reply)
+                if debug: print_message(YELLOW,"INVALID LLM RESPONSE", reply)
                 continue
             
         messages.append({"role": "assistant", "content": reply})
             
         # print(f"[?] {reply}")
-        print_message(CYAN, "SHIMMING_REPLY_CLEANED", reply)
+        if debug: print_message(CYAN, "SHIMMING_REPLY_CLEANED", reply)
         
         try:
             data = json.loads(reply)
         except:
-            print_message(YELLOW, "WARNING", "INVALID JSON")
+            if debug: print_message(YELLOW, "WARNING", "INVALID JSON")
             prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
             # prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
             continue
@@ -149,7 +152,7 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
             return response
         
         if not ("action" in data and ("args" in data or "result" in data)):
-            print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+            if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
             prompt = ('Invalid JSON.  Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.' 
             + 'There the <writeup> is this JSON schmea:\n'
             + json.dumps(output_type.model_json_schema(), indent=2)
@@ -167,14 +170,14 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, onlyJadx:
                 ghidra_mcp_process.kill()
                 return response
             
-            print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+            if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
             prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
             + 'There the <writeup> is this JSON schmea:\n'
             + json.dumps(output_type.model_json_schema(), indent=2)
             + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
             continue
         else:
-            prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls)
+            prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls, debug=debug)
 
         tool_called = True
 

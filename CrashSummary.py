@@ -9,7 +9,7 @@ from typing import List, Iterable, Union, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from flowdroid_gen.callgraph_paths import getFlowGraph
+from flowdroid_gen.callgraph_paths import generateCallGraph, getFlowGraph
 from utils import print_message, YELLOW
 
 # ----------------------------
@@ -128,6 +128,8 @@ class Crashes:
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         cur: List[str] = []
         results: List[CrashSummary] = []
+        
+        haveCallGraph = generateCallGraph(apk)
 
         def flush() -> None:
             """
@@ -161,19 +163,20 @@ class Crashes:
                 else:
                     StackTrace.append(line)
                     
-            depth = 1
             callGraph = None
-            while True:
-                new_callGraph = getFlowGraph(apk, JNIBridgeMethod, depth, debug=True)
-                if not new_callGraph:
-                    if debug:
-                        print_message(YELLOW, "DEBUG", "Call Graph is null")
-                    break
-                if len(new_callGraph) < 20:
-                    callGraph = new_callGraph
-                else:
-                    break
-                depth += 1
+            if haveCallGraph:
+                depth = 1
+                while True:
+                    new_callGraph = getFlowGraph(apk, JNIBridgeMethod, depth, debug=True)
+                    if not new_callGraph:
+                        if debug:
+                            print_message(YELLOW, "DEBUG", "Call Graph is null")
+                        break
+                    if len(new_callGraph) < 20:
+                        callGraph = new_callGraph
+                    else:
+                        break
+                    depth += 1
             
             results.append(
                 CrashSummary(

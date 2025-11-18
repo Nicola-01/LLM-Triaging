@@ -73,7 +73,7 @@ class AnalysisBlock(BaseModel):
     @field_serializer("relevant_libs_map")
     def serialize_paths(self, libs: Dict[Path, List[str]], _info):
         # return just sanitized paths
-        return [re.sub(r'/tmp/apk_so_[^/]*/', '', str(p)) for p in libs.keys()]
+        return [re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(p)) for p in libs.keys()]
 
     @field_serializer("analysisResults")
     def serialize_results(self, results: AnalysisResults, _info):

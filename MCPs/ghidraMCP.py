@@ -13,7 +13,9 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from MCPs.geminiCLI import GeminiCliMaxRetry, query_gemini_cli
 from MCPs.jadxMCP import make_jadx_server
+from MCPs.prompts.shimming_prompt import SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.prompts.vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
+from MCPs.shimming_agent import oss_model
 from MCPs.vulnDetection import AnalysisResult, AnalysisResults, VulnDetection
 from ghidraMCP_helper_functions import *
 from .get_agent import get_agent
@@ -64,14 +66,14 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     for lib in sorted_libs:
         openGhidraFile(sorted_libs, lib, debug=debug)
         
-    if model_name != "gemini-cli":
+    libs_map = "\n".join([f"- {re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {relevant_libs_map[lib]}" 
+                    for lib in relevant_libs_map.keys()])
+                
+    if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
         async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
             for i, crash in enumerate(crashes, start=1):
                 crash_str = str(crash)
                 print_message(BLUE, "INFO", f"Assessing crash #{i}") 
-
-                libs_map = "\n".join([f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}" 
-                                    for lib in relevant_libs_map.keys()])
 
                 query = (
                     f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
@@ -97,13 +99,11 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
 
                 if verbose:
                     print_message(PURPLE, "RESPONSE", vuln)
-    else:  # Non-async case for gemini-cli
+                          
+    else: # Ollama model or gemini-cli     
         for i, crash in enumerate(crashes, start=1):
             crash_str = str(crash)
             print_message(BLUE, "INFO", f"Assessing crash #{i}") 
-
-            libs_map = "\n".join([f"- {re.sub(r'/tmp/apk_so_.*/', '', str(lib))}: {relevant_libs_map[lib]}" 
-                                for lib in relevant_libs_map.keys()])
 
             query = (
                 f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
@@ -115,11 +115,16 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
             if verbose:
                 print_message(CYAN, "QUERY", f"{query}")
 
-            try:
-                resp = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
-                vuln = resp
-            except GeminiCliMaxRetry:
-                continue
+            if model_name == "gemini-cli":
+                try:
+                    vuln: VulnDetection = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
+                except GeminiCliMaxRetry:
+                    continue
+            else:
+                    vuln: VulnDetection = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
+                                             output_type=VulnDetection, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
+    
+            
 
             results.append(AnalysisResult(crash=crash, assessment=vuln))
 

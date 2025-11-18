@@ -8,7 +8,7 @@ GHIDRA_MCP_TOOLS = """
 You are a tool-using assistant that can use tools to reverse engineer a binary using Ghidra to understand how it works. 
 You can ONLY communicate in JSON.
 
-Available functionalities:
+Available functionalities in GHIDRA-MCP:
 
 - decompile_function
     Decompile a specific function by name and return the decompiled C code.
@@ -576,7 +576,7 @@ JADX_MCP_TOOLS = """
 You are a Jadx MCP assistant. 
 You can ONLY communicate in JSON.
 
-Available functionalities:
+Available functionalities in JADX-MCP:
 
 - fetch_current_class
   Fetch the currently selected class and its code from the JADX-GUI plugin.
@@ -882,7 +882,7 @@ Available functionalities:
 """
 
 SHIMMING_SYSTEM_PROMPT_TEMPLATE = """
-{SHIMMING_SCOPE}
+{SHIMMING_MCP}
 
 # IMPORTANT:
 
@@ -971,5 +971,6 @@ Rules:
 """
 
 
-SHIMMING_METADATA_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_SYSTEM_PROMPT}", JADX_APP_METADATA).replace("{OUTPUT_SCHEMA}", json.dumps(AppMetadata.model_json_schema(), indent=2))
-SHIMMING_VULNDECT_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnDetection.model_json_schema(), indent=2))
+SHIMMING_METADATA_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", JADX_MCP_TOOLS).replace("{SHIMMING_SYSTEM_PROMPT}", JADX_APP_METADATA).replace("{OUTPUT_SCHEMA}", json.dumps(AppMetadata.model_json_schema(), indent=2))
+
+SHIMMING_VULNDECT_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", f"{JADX_MCP_TOOLS}\n{GHIDRA_MCP_TOOLS}").replace("{SHIMMING_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnDetection.model_json_schema(), indent=2))

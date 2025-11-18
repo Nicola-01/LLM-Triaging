@@ -23,7 +23,7 @@ class AppMetadata(BaseModel):
     
     def __str__(self) -> str:
         fields = [
-            f"App Name     : {self.app_name}",
+            f"App Name     : {self.app_name or 'N/A'}",
             f"Package      : {self.package}",
             f"Min SDK      : {self.min_sdk or 'N/A'}",
             f"Target SDK   : {self.target_sdk or 'N/A'}",

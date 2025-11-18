@@ -12,6 +12,7 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from MCPs.AppMetadata import AppMetadata
 from MCPs.geminiCLI import query_gemini_cli
+from MCPs.prompts.shimming_prompt import SHIMMING_METADATA_SYSTEM_PROMPT
 from MCPs.shimming_agent import oss_model
 from utils import *
 from .prompts.jadx_prompts import *
@@ -45,7 +46,7 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
             print_message(GREEN, "LLM-USAGE", j_meta.usage())
             
     else: #Open model -> need shimming agent
-        appMetadata: AppMetadata = await oss_model(system_prompt=JADX_APP_METADATA, prompt="Extract app metadata from the currently open Jadx project.", 
+        appMetadata: AppMetadata = await oss_model(system_prompt=SHIMMING_METADATA_SYSTEM_PROMPT, prompt="Extract app metadata from the currently open Jadx project.", 
                                              output_type=AppMetadata, onlyJadx=True, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
     
     if verbose: print_message(PURPLE, "RESPONSE", str(appMetadata))

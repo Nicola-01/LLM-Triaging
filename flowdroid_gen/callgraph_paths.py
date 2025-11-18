@@ -153,20 +153,19 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, force: bool = False, debug: bool = False) -> List[str]:
-    """
-    Generates a call graph and finds call paths backward from the start_method.
-
+def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, debug: bool = False) -> bool:
+    """Generate a call graph `callgraph.json`
+    
     Args:
         app_path (Path): Path to the APK/directory.
-        JNIBridgeMethod (str): Target method (e.g., 'jniParse').
-        depth (int): Max backward search depth.
-        force (bool): Force call graph regeneration.
+        timeout (int): Time to generate the call graph.
+        overwrite (bool): Overwrite call graph regeneration.
         debug (bool): Print debug path info.
-
+        
     Returns:
-        List[List[str]]: Found call paths ([Root → ... → Target]) or None.
+        bool: `True` if the callgraph was generate, `False` otherwise.
     """
+    
     app_path = Path(app_path)
     directory = "callGraph"
     if not os.path.exists(directory):
@@ -185,13 +184,49 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, force: bool = 
     # print(f"app path: {app_path}\noutput: {output_dir}")
     callgraph_file = f"{output_dir}/callgraph.json"
     
-    if not os.path.exists(callgraph_file) or force:
-        # Note: $HOME/Android/Sdk/platforms is used as the Android platform path
-        print_message(BLUE, "INFO", f"Extracting flow graph from {package_name}")
-        subprocess.run(
-            f"java -jar flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms {app_path} {output_dir}",
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
-        )
+    try:
+        if not os.path.exists(callgraph_file) or overwrite:
+            # Note: $HOME/Android/Sdk/platforms is used as the Android platform path
+            print_message(BLUE, "INFO", f"Extracting flow graph from {package_name}")
+            subprocess.run(
+                f"java -jar flowdroid_gen/flowdroid-cg/target/flowdroid-cg-1.0-SNAPSHOT.jar $HOME/Android/Sdk/platforms {app_path} {output_dir}",
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                timeout=timeout 
+            )
+            return True
+    except subprocess.TimeoutExpired:
+        print_message(YELLOW, "WARNING", f"FlowDroid call timed out after {timeout} seconds. The call graph was not generated.")
+        return False
+    
+
+def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, debug: bool = False) -> List[str]:
+    """
+    Finds call paths backward from the start_method in the call graph.
+
+    Args:
+        app_path (Path): Path to the APK/directory.
+        JNIBridgeMethod (str): Target method (e.g., 'jniParse').
+        depth (int): Max backward search depth.
+        debug (bool): Print debug path info.
+
+    Returns:
+        List[List[str]]: Found call paths ([Root → ... → Target]) or None.
+    """
+    app_path = Path(app_path)
+    
+    app_name = app_path.name
+    package_name = app_name
+    if not app_name.endswith(".apk"):
+        app_name = "base.apk"
+        app_path = app_path / app_name
+    else:
+        package_name = app_path.parent.name
+            
+    # print(f"app path: {app_path}\noutput: {output_dir}")
+    callgraph_file = f"callGraph/{package_name}/callgraph.json"
+    
+    if not os.path.exists(callgraph_file):
+        return []
        
     bridgeMethod = JNIBridgeMethod.split("_") 
     start_method = None 
