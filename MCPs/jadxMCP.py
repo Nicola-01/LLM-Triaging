@@ -23,10 +23,9 @@ def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
     """
     Start the Jadx MCP server using uv, assuming the environment variable JADX_MCP_DIR is set.
     """
-    jadx_dir = os.getenv("JADX_MCP_DIR")
     return MCPServerStdio(
-        "uv",
-        args=["--directory", jadx_dir, "run", "jadx_mcp_server.py"],
+        "python3",
+        args=[f"{os.getenv("JADX_MCP_DIR")}/jadx_mcp_server.py"],
         timeout=timeout,
     )
 

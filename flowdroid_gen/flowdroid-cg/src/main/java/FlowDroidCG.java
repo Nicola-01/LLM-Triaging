@@ -1,21 +1,22 @@
-import org.xmlpull.v1.XmlPullParserException;
-import soot.Scene;
-import soot.SootMethod;
-import soot.jimple.infoflow.android.InfoflowAndroidConfiguration;
-import soot.jimple.infoflow.android.SetupApplication;
-import soot.jimple.toolkits.callgraph.Edge;
-import soot.jimple.infoflow.InfoflowConfiguration;
 
 import java.io.FileWriter;
 import java.io.IOException;
+import static java.lang.System.exit;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Iterator;
 
-import static java.lang.System.exit;
+import org.xmlpull.v1.XmlPullParserException;
+
+import soot.Scene;
+import soot.SootMethod;
+import soot.jimple.infoflow.android.InfoflowAndroidConfiguration;
+import soot.jimple.infoflow.android.SetupApplication;
+import soot.jimple.toolkits.callgraph.Edge;
 
 public class FlowDroidCG {
+
     public static void main(String[] args) throws IOException, XmlPullParserException {
         if (args.length < 3) {
             System.err.println("Usage: java FlowDroidCG <platforms_dir> <apk_path> <output_dir>");
@@ -36,32 +37,35 @@ public class FlowDroidCG {
         config.getAnalysisFileConfig().setAndroidPlatformDir(platforms_dir);
         config.getAnalysisFileConfig().setTargetAPKFile(apk_path);
         config.setMergeDexFiles(true);
-	config.getCallbackConfig().setEnableCallbacks(true);
-	config.setCodeEliminationMode(InfoflowConfiguration.CodeEliminationMode.NoCodeElimination);
-	config.getPathConfiguration().setPathReconstructionMode(InfoflowConfiguration.PathReconstructionMode.Precise);	
-	        // Set the call graph algorithm to CHA
+        
+        // config.getCallbackConfig().setEnableCallbacks(true); // to del
+        // config.setCodeEliminationMode(InfoflowConfiguration.CodeEliminationMode.NoCodeElimination); // to del
+        // config.getPathConfiguration().setPathReconstructionMode(InfoflowConfiguration.PathReconstructionMode.Precise); // to del
+
+        // Set the call graph algorithm to CHA
         config.setCallgraphAlgorithm(InfoflowAndroidConfiguration.CallgraphAlgorithm.CHA);
         SetupApplication analyzer = new SetupApplication(config);
-	analyzer.getConfig().setEnableReflection(true);
+        analyzer.getConfig().setEnableReflection(true);
         analyzer.constructCallgraph();
 
         // Write the callgraph to a JSON file
         String outputFilePath = output_dir + "/callgraph.json";
         try (FileWriter writer = new FileWriter(outputFilePath)) {
             writer.write("{ \"edges\" : [\n");
-            for (Iterator<Edge> edgeIt = Scene.v().getCallGraph().iterator(); edgeIt.hasNext(); ) {
+            for (Iterator<Edge> edgeIt = Scene.v().getCallGraph().iterator(); edgeIt.hasNext();) {
                 Edge edge = edgeIt.next();
                 SootMethod smSrc = edge.src();
                 SootMethod smDest = edge.tgt();
-		if(smSrc != null && smDest != null){
-			writer.write(
-				"    { \"src\": \"" + smSrc.getBytecodeSignature() + "\", " +
-				      "\"dst\": \"" + smDest.getBytecodeSignature() + "\" }");
-		}
-		if (edgeIt.hasNext())
+                if (smSrc != null && smDest != null) {
+                    writer.write(
+                            "    { \"src\": \"" + smSrc.getBytecodeSignature() + "\", "
+                            + "\"dst\": \"" + smDest.getBytecodeSignature() + "\" }");
+                }
+                if (edgeIt.hasNext()) {
                     writer.write(",\n");
-                else
+                } else {
                     writer.write("\n");
+                }
             }
             writer.write("  ]\n}");
         }

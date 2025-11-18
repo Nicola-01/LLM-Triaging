@@ -53,7 +53,7 @@ RUN rm GhidraMCP-release-1-4.zip
 
 WORKDIR /
 
-RUN pip install requests mcp pyautogui llama-index-tools-mcp openai --break-system-packages
+RUN pip install requests mcp pyautogui llama-index-tools-mcp openai xmltodict --break-system-packages
 RUN pip install "pydantic-ai-slim[mcp]" "pydantic-ai-slim[google]" "pydantic-ai-slim[openai]" --break-system-packages
 RUN apt-get -y install python3-tk python3-dev
 
@@ -66,8 +66,10 @@ RUN sdkmanager "platforms;android-34"
 
 WORKDIR /workspace
 
-ENV JADX_MCP_DIR="/MCPs/jadx-mcp-server"
-ENV GHIDRA_MCP_DIR="/MCPs/GhidraMCP"
+# ENV JADX_MCP_DIR="/MCPs/jadx-mcp-server"
+# ENV GHIDRA_MCP_DIR="/MCPs/GhidraMCP"
+ENV JADX_MCP_DIR="/workspace/MCP_servers/jadx-mcp-server"
+ENV GHIDRA_MCP_DIR="/workspace/MCP_servers/GhidraMCP"
 ENV GHIDRA_INSTALL_DIR="/opt/ghidra/ghidra_11.4.2_PUBLIC/"
 
 CMD ["/bin/bash"]
