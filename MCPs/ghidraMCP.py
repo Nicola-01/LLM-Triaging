@@ -69,22 +69,44 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     libs_map = "\n".join([f"- {re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {relevant_libs_map[lib]}" 
                     for lib in relevant_libs_map.keys()])
                 
-    if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
-        async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
-            for i, crash in enumerate(crashes, start=1):
-                crash_str = str(crash)
-                print_message(BLUE, "INFO", f"Assessing crash #{i}") 
+    # if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
+    # async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
+    agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name)
+    for i, crash in enumerate(crashes, start=1):
+        print_message(RED, f"test: {crash.JavaCallGraph}", f"agent:{agent}")
+        if not crash.JavaCallGraph:
+            print_message(RED, f"INSIDE", f"IS NULL")
+            vuln = VulnDetection(
+                is_vulnerability = 0,
+                confidence = 1,
+                reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
+                cwe_ids = [],
+                severity = None,
+                affected_libraries = sorted_libs,
+                evidence = [],
+                recommendations = [],
+                assumptions = [],
+                limitations = []
+            )
+            results.append(AnalysisResult(crash=crash, assessment=vuln))
+            continue
+        
+        crash_str = str(crash)
+        print_message(BLUE, "INFO", f"Assessing crash #{i}") 
 
-                query = (
-                    f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
-                    f"{crash_str}\n"
-                    f"This is a map where each key is a Path to a relevant .so library, "
-                    f"and the value is the list of JNI methods it implements: \n{libs_map}"
-                )
+        query = (
+            f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
+            f"{crash_str}\n"
+            f"This is a map where each key is a Path to a relevant .so library, "
+            f"and the value is the list of JNI methods it implements: \n{libs_map}"
+        )
 
-                if verbose:
-                    print_message(CYAN, "QUERY", f"{query}")
+        if verbose:
+            print_message(CYAN, "QUERY", f"{query}")
 
+        if agent:
+            async with agent:
+                print_message(RED,"AGENT","AGENT")
                 try:
                     resp = await agent.run(query)
                     vuln = resp.output
@@ -94,43 +116,23 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                     if debug:
                         print_message(RED, "ERROR", str(e))
                     continue
+        elif model_name == "gemini-cli":
+            print_message(RED,"gemini-cli","gemini-cli")
+            try:
+                vuln: VulnDetection = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
+            except GeminiCliMaxRetry:
+                continue
+        else:
+            print_message(RED,"oss",model_name)
+            vuln: VulnDetection = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
+                                        output_type=VulnDetection, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
 
-                results.append(AnalysisResult(crash=crash, assessment=vuln))
+        
+        results.append(AnalysisResult(crash=crash, assessment=vuln))
 
-                if verbose:
-                    print_message(PURPLE, "RESPONSE", vuln)
-                          
-    else: # Ollama model or gemini-cli     
-        for i, crash in enumerate(crashes, start=1):
-            crash_str = str(crash)
-            print_message(BLUE, "INFO", f"Assessing crash #{i}") 
-
-            query = (
-                f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
-                f"{crash_str}\n"
-                f"This is a map where each key is a Path to a relevant .so library, "
-                f"and the value is the list of JNI methods it implements: \n{libs_map}"
-            )
-
-            if verbose:
-                print_message(CYAN, "QUERY", f"{query}")
-
-            if model_name == "gemini-cli":
-                try:
-                    vuln: VulnDetection = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
-                except GeminiCliMaxRetry:
-                    continue
-            else:
-                    vuln: VulnDetection = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
-                                             output_type=VulnDetection, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
-    
-            
-
-            results.append(AnalysisResult(crash=crash, assessment=vuln))
-
-            if verbose:
-                print_message(PURPLE, "RESPONSE", vuln)
-
+        if verbose:
+            print_message(PURPLE, "RESPONSE", vuln)
+        
     closeGhidraGUI(debug=debug)
 
     return results

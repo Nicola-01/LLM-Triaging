@@ -879,7 +879,6 @@ Available functionalities in JADX-MCP:
         "method_name"
       ]
     }
-    
   - search_string                                                                                                                                                                             
   Retrieve contents of strings.xml files and search the required string                                                                                                                     
                                                                                                                                                                                               

@@ -60,13 +60,14 @@ def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], m
 
     if model_name.startswith("gpt-") and not model_name.startswith("gpt-oss"):
         model = OpenAIChatModel(model_name, provider=OpenAIProvider(api_key=os.getenv("LLM_API_KEY")))
-    elif model_name.startswith("gemini-"):
+    elif model_name.startswith("gemini-") and not model_name=="gemini-cli":
         model = GoogleModel(model_name, provider=GoogleProvider(api_key=os.getenv("LLM_API_KEY")))
     else:   
-        model = OpenAIChatModel(
-            model_name=model_name,
-            provider=OllamaProvider(base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")),
-        )
+        return None
+        # model = OpenAIChatModel(
+        #     model_name=model_name,
+        #     provider=OllamaProvider(base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")),
+        # )
 
     return Agent(
         model,

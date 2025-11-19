@@ -16,6 +16,7 @@ Steps (use MCP tools where applicable):
 2) Extract the package name from <manifest package="...">.
 3) Extract application label:
    - If <application android:label="..."> is a literal, use it.
+   - prefer using `search_string` then `get_strings`.
 4) Extract SDK info from <uses-sdk> if present (minSdkVersion, targetSdkVersion).
 5) If versionName or versionCode are available (manifest or packageInfo), include them.
 N.B: there is no need to use other toots, `get_android_manifest` will provide you all the necessary informations to fill the scheme.

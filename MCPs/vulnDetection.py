@@ -15,7 +15,6 @@ from CrashSummary import CrashSummary
 from ghidraMCP_helper_functions import *
 from utils import *
 
-@dataclass
 class EvidenceItem(BaseModel):
     """
     A single piece of evidence supporting a vulnerability assessment.
@@ -51,7 +50,6 @@ class EvidenceItem(BaseModel):
             f"  Snippet  :{snippet_block}"
         )
 
-@dataclass
 class VulnDetection(BaseModel):
     """
     Result of a vulnerability assessment for a single crash.
