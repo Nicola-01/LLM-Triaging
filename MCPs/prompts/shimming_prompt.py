@@ -879,6 +879,32 @@ Available functionalities in JADX-MCP:
         "method_name"
       ]
     }
+    
+  - search_string                                                                                                                                                                             
+  Retrieve contents of strings.xml files and search the required string                                                                                                                     
+                                                                                                                                                                                              
+    Args:                                                                                                                                                                                     
+        string_name: Name of the string to be returned                                                                                                                                        
+        contains: `False`: equals elements, `True`: elements that contains <string_name>                                                                                                      
+                                                                                                                                                                                             ▄
+    Returns:                                                                                                                                                                                 █
+        Dictionary containing contents of strings.xml file, filtered by string_name.                                                                                                          
+      Parameters:                                                                                                                                                                             
+      {                                                                                                                                                                                       
+        "type": "object",                                                                                                                                                                     
+        "properties": {                                                                                                                                                                       
+          "string_name": {                                                                                                                                                                    
+            "type": "string"                                                                                                                                                                  
+          },                                                                                                                                                                                  
+          "contains": {                                                                                                                                                                       
+            "default": false,                                                                                                                                                                 
+            "type": "boolean"                                                                                                                                                                 
+          }                                                                                                                                                                                   
+        },                                                                                                                                                                                    
+        "required": [                                                                                                                                                                         
+          "string_name"                                                                                                                                                                       
+        ]                                                                                                                                                                                     
+      }
 """
 
 SHIMMING_SYSTEM_PROMPT_TEMPLATE = """
