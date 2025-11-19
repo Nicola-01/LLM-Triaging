@@ -434,22 +434,22 @@ async def debug_get_variables() -> dict:
 
 
 def main():
-    try:
-        print(jadx_mcp_server_banner())
-    except UnicodeEncodeError:
-        print("""
-           [----------------------------------------------- JADX AI MCP -----------------------------------------------]
-            Author         -> Jafar Pathan (zinja-coder@github)
-            For Issues     -> https://github.com/zinja-coder/jadx-mcp-server
-            Server Version -> v3.3.5
-           """)
+    # try:
+    #     print(jadx_mcp_server_banner())
+    # except UnicodeEncodeError:
+    #     print("""
+    #        [----------------------------------------------- JADX AI MCP -----------------------------------------------]
+    #         Author         -> Jafar Pathan (zinja-coder@github)
+    #         For Issues     -> https://github.com/zinja-coder/jadx-mcp-server
+    #         Server Version -> v3.3.5
+    #        """)
 
 
-    print("[------------------------------ Stand By Checking JADX AI MCP Plugin Connectivity ------------------------------]")
-    print("Testing health check...")
-    result = health_ping()
-    print(f"Final result: {result}")
-    
+    # print("[------------------------------ Stand By Checking JADX AI MCP Plugin Connectivity ------------------------------]")
+    # print("Testing health check...")
+    # result = health_ping()
+    # print(f"Final result: {result}")
+        
     if args.http:
         port = args.port if args.port else 8651
         mcp.run(transport="streamable-http", port=port, show_banner=False)
