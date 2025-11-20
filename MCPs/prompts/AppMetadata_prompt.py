@@ -7,7 +7,7 @@ Module overview:
 - Important classes/functions are documented inline.
 """
 
-JADX_APP_METADATA = """
+APPMETADATA_METADATA = """
 You are a Jadx MCP assistant. Your goal is to extract app metadata from the
 APK currently open in Jadx.
 

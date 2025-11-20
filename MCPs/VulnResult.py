@@ -10,7 +10,7 @@ import textwrap
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-from CrashSummary import CrashSummary
+from MCPs.CrashSummary import CrashSummary
 
 from ghidraMCP_helper_functions import *
 from utils import *
@@ -50,7 +50,7 @@ class EvidenceItem(BaseModel):
             f"  Snippet  :{snippet_block}"
         )
 
-class VulnDetection(BaseModel):
+class VulnResult(BaseModel):
     """
     Result of a vulnerability assessment for a single crash.
     """
@@ -126,7 +126,7 @@ class AnalysisResult(BaseModel):
     # - **crash** (CrashSummary): Crash.
     # - **assessment** (VulnDetection): Detection.
     crash: CrashSummary
-    assessment: VulnDetection
+    assessment: VulnResult
     
     # model_config = ConfigDict(arbitrary_types_allowed=True, ser_json_inf_nan=False)
 

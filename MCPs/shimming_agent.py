@@ -10,7 +10,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 import regex
 
-from MCPs.prompts.shimming_prompt import GHIDRA_MCP_TOOLS, JADX_MCP_TOOLS
+from MCPs.prompts.Shimming_prompts import GHIDRA_MCP_TOOLS, JADX_MCP_TOOLS
 from utils import *
 
 sys.path.append(os.path.dirname(__file__))

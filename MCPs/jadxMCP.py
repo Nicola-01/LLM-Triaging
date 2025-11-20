@@ -12,10 +12,10 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from MCPs.AppMetadata import AppMetadata
 from MCPs.geminiCLI import query_gemini_cli
-from MCPs.prompts.shimming_prompt import SHIMMING_METADATA_SYSTEM_PROMPT
+from MCPs.prompts.Shimming_prompts import SHIMMING_METADATA_SYSTEM_PROMPT
 from MCPs.shimming_agent import oss_model
 from utils import *
-from .prompts.jadx_prompts import *
+from .prompts.AppMetadata_prompt import *
 from .get_agent import get_agent
 
 # export JADX_MCP_DIR="/path/to/jadx-mcp-server"
@@ -33,11 +33,11 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     """Return app metadata from Jadx."""
     server: MCPServerStdio = make_jadx_server()
     
-    if verbose: print_message(BLUE, "PROMPT", JADX_APP_METADATA)
+    if verbose: print_message(BLUE, "PROMPT", APPMETADATA_METADATA)
     if model_name == "gemini-cli":       
-        appMetadata = query_gemini_cli(JADX_APP_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
+        appMetadata = query_gemini_cli(APPMETADATA_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
     elif (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-")):
-        async with get_agent(JADX_APP_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
+        async with get_agent(APPMETADATA_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
             j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
         appMetadata: AppMetadata = j_meta.output
 

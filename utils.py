@@ -71,7 +71,7 @@ def extract_so_files(apk: Path) -> List[Path]:
 
 
 def find_relevant_libs(so_paths: List[Path], crashes: 'Crashes', debug: bool = False) -> Dict[Path, List[str]]:
-    from CrashSummary import Crashes
+    from MCPs.CrashSummary import Crashes
     """
     Given a list of .so files, return those that implement JNI methods,
     preferring specific ABIs in the following order:

@@ -13,15 +13,15 @@ from pydantic_ai.mcp import MCPServerStdio
 
 from MCPs.geminiCLI import GeminiCliMaxRetry, query_gemini_cli
 from MCPs.jadxMCP import make_jadx_server
-from MCPs.prompts.shimming_prompt import SHIMMING_VULNDECT_SYSTEM_PROMPT
-from MCPs.prompts.vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
+from MCPs.prompts.Shimming_prompts import SHIMMING_VULNDECT_SYSTEM_PROMPT
+from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
 from MCPs.shimming_agent import oss_model
-from MCPs.vulnDetection import AnalysisResult, AnalysisResults, VulnDetection
+from MCPs.VulnResult import AnalysisResult, AnalysisResults, VulnResult
 from ghidraMCP_helper_functions import *
 from .get_agent import get_agent
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from CrashSummary import Crashes
+from MCPs.CrashSummary import Crashes
 from utils import *
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
@@ -71,10 +71,10 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                 
     # if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
     # async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
-    agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name)
+    agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
         if not crash.JavaCallGraph:
-            vuln = VulnDetection(
+            vuln = VulnResult(
                 is_vulnerability = 0,
                 confidence = 1.0,
                 reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
@@ -115,13 +115,13 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                     continue
         elif model_name == "gemini-cli":
             try:
-                vuln: VulnDetection = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
+                vuln: VulnResult = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnResult, verbose=verbose, debug=debug, realTimeOutput=True)
             except GeminiCliMaxRetry:
                 continue
         else:
             print_message(RED,"oss",model_name)
-            vuln: VulnDetection = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
-                                        output_type=VulnDetection, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
+            vuln: VulnResult = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
+                                        output_type=VulnResult, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
 
         
         results.append(AnalysisResult(crash=crash, assessment=vuln))

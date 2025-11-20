@@ -1,8 +1,8 @@
 import json
 from MCPs.AppMetadata import AppMetadata
-from MCPs.prompts.jadx_prompts import JADX_APP_METADATA
-from MCPs.prompts.vulnDetection_prompts import DETECTION_SYSTEM_PROMPT
-from MCPs.vulnDetection import VulnDetection
+from MCPs.prompts.AppMetadata_prompt import APPMETADATA_METADATA
+from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
+from MCPs.VulnResult import VulnResult
 
 GHIDRA_MCP_TOOLS = """
 You are a tool-using assistant that can use tools to reverse engineer a binary using Ghidra to understand how it works. 
@@ -996,6 +996,6 @@ Rules:
 """
 
 
-SHIMMING_METADATA_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", JADX_MCP_TOOLS).replace("{SHIMMING_SYSTEM_PROMPT}", JADX_APP_METADATA).replace("{OUTPUT_SCHEMA}", json.dumps(AppMetadata.model_json_schema(), indent=2))
+SHIMMING_METADATA_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", JADX_MCP_TOOLS).replace("{SHIMMING_SYSTEM_PROMPT}", APPMETADATA_METADATA).replace("{OUTPUT_SCHEMA}", json.dumps(AppMetadata.model_json_schema(), indent=2))
 
-SHIMMING_VULNDECT_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", f"{JADX_MCP_TOOLS}\n{GHIDRA_MCP_TOOLS}").replace("{SHIMMING_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnDetection.model_json_schema(), indent=2))
+SHIMMING_VULNDECT_SYSTEM_PROMPT = SHIMMING_SYSTEM_PROMPT_TEMPLATE.replace("{SHIMMING_MCP}", f"{JADX_MCP_TOOLS}\n{GHIDRA_MCP_TOOLS}").replace("{SHIMMING_SYSTEM_PROMPT}", DETECTION_SYSTEM_PROMPT).replace("{OUTPUT_SCHEMA}", json.dumps(VulnResult.model_json_schema(), indent=2))

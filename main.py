@@ -39,9 +39,9 @@ from pydantic import BaseModel, Field, field_serializer
 from datetime import datetime, timezone
 from functools import partial
 
-from CrashSummary import Crashes
+from MCPs.CrashSummary import Crashes
 from MCPs.ghidraMCP import mcp_vuln_detection
-from MCPs.vulnDetection import AnalysisResults
+from MCPs.VulnResult import AnalysisResults
 from utils import *
 from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.AppMetadata import AppMetadata
@@ -114,8 +114,7 @@ def parse_args():
     p.add_argument("-s", "--ollama-url", type=str, default="http://localhost:11434/v1", help="The base url for the Ollama requests.")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
-    # p.add_argument("--threads", type=int, default=1, help="Number of worker threads (>=1). 1 = single execution in the current thread.")
-    # p.add_argument("--headless", action="store_true", help="Do NOT open Jadx GUI (requires that Jadx MCP can operate headlessly)")
+    
     p.add_argument("-d", "--debug", action="store_true", help="Enable verbose debug logs")
     p.add_argument("-v", "--verbose", action="store_true", help="Echo system/user prompts and model outputs")
     return p.parse_args()
