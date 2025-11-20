@@ -55,7 +55,7 @@ class CrashSummary:
         javaCallGraph_str = (
             "(empty)"
             if not self.JavaCallGraph
-            else "\n" + textwrap.indent("\n".join(self.StackTrace), "        ")
+            else "\n" + textwrap.indent("\n".join(self.JavaCallGraph), "        ")
         )
         
         
@@ -163,20 +163,7 @@ class Crashes:
                 else:
                     StackTrace.append(line)
                     
-            callGraph = None
-            if haveCallGraph:
-                depth = 1
-                while True:
-                    new_callGraph = getFlowGraph(apk, JNIBridgeMethod, depth, debug=True)
-                    if not new_callGraph:
-                        if debug:
-                            print_message(YELLOW, "DEBUG", "Call Graph is null")
-                        break
-                    if len(new_callGraph) < 20:
-                        callGraph = new_callGraph
-                    else:
-                        break
-                    depth += 1
+            callGraph = getFlowGraph(apk, JNIBridgeMethod, debug=debug)
             
             results.append(
                 CrashSummary(

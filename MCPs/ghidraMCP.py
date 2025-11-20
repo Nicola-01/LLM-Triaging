@@ -73,12 +73,10 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     # async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
     agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
-        print_message(RED, f"test: {crash.JavaCallGraph}", f"agent:{agent}")
         if not crash.JavaCallGraph:
-            print_message(RED, f"INSIDE", f"IS NULL")
             vuln = VulnDetection(
                 is_vulnerability = 0,
-                confidence = 1,
+                confidence = 1.0,
                 reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
                 cwe_ids = [],
                 severity = None,
@@ -106,7 +104,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
 
         if agent:
             async with agent:
-                print_message(RED,"AGENT","AGENT")
                 try:
                     resp = await agent.run(query)
                     vuln = resp.output
@@ -117,7 +114,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                         print_message(RED, "ERROR", str(e))
                     continue
         elif model_name == "gemini-cli":
-            print_message(RED,"gemini-cli","gemini-cli")
             try:
                 vuln: VulnDetection = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnDetection, verbose=verbose, debug=debug, realTimeOutput=True)
             except GeminiCliMaxRetry:

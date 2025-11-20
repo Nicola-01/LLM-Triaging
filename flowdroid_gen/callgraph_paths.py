@@ -199,14 +199,15 @@ def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, deb
         return False
     
 
-def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, debug: bool = False) -> List[str]:
+def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths = 25, debug: bool = False) -> List[str]:
     """
     Finds call paths backward from the start_method in the call graph.
 
     Args:
         app_path (Path): Path to the APK/directory.
         JNIBridgeMethod (str): Target method (e.g., 'jniParse').
-        depth (int): Max backward search depth.
+        max_depth (int): Max backward search depth.
+        max_paths (int): Max number of path to return.
         debug (bool): Print debug path info.
 
     Returns:
@@ -226,7 +227,8 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, debug: bool = 
     callgraph_file = f"callGraph/{package_name}/callgraph.json"
     
     if not os.path.exists(callgraph_file):
-        return []
+        print_message(YELLOW,"WARNING", f"The file {callgraph_file} doesent exists")
+        return None
        
     bridgeMethod = JNIBridgeMethod.split("_") 
     start_method = None 
@@ -240,6 +242,21 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, debug: bool = 
         else:
             break
         
+    curedJNIBridgeMethod = JNIBridgeMethod.replace("_", ";")
+    if (curedJNIBridgeMethod.count(";1")):
+        curedJNIBridgeMethod = curedJNIBridgeMethod.replace(";1","_")
+        if debug:
+            print_message(CYAN, "DEBUG", f"Replaced _, unsing {curedJNIBridgeMethod}")
+        bridgeMethod = curedJNIBridgeMethod.split(";") 
+        for i in range(1,len(bridgeMethod)):
+            test_method = "_".join(bridgeMethod[-(i):])
+            ret = rg(test_method, callgraph_file)
+            if (len(ret) == 0):
+                break
+            if (max_i >= i):
+                max_i = i
+                start_method = test_method
+        
     if not start_method:
         print_message(YELLOW, "WARNING", f"The method {JNIBridgeMethod} is not present in {callgraph_file}")
         return None
@@ -249,13 +266,28 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, depth = 3, debug: bool = 
     if not start_src:
         print_message(YELLOW, "WARNING", "Target not found or not called by any method. Check the target name and the content of callgraph.json.")
         return None
-    
-    paths = dfs_paths(start_src, callgraph_file, depth, target_dst) 
-    
+        
+    callGraph = None
+    # new_callGraph = getFlowGraph(apk, JNIBridgeMethod, max_depth, debug=True)
+    paths = []
     ret: list[str] = []
-    
-    if not paths:
-        print_message(YELLOW, "WARNING", "No paths found within the specified depth.")
+    depth = 1
+    while True:
+        new_paths = dfs_paths(start_src, callgraph_file, depth, target_dst) 
+        if not new_paths or len(new_paths) == 0:
+            if debug:
+                print_message(YELLOW, "DEBUG", "Call Graph is null")
+            break
+        if len(new_paths) < max_paths:
+            paths = new_paths
+        else:
+            break
+        depth += 1
+        if depth > max_depth:
+            break
+
+    if len(paths) == 0:
+        print_message(YELLOW, "WARNING", "No paths found.")
         return None
     elif debug:
         print_message(GREEN, "INFO", f"Found {len(paths)} paths:")

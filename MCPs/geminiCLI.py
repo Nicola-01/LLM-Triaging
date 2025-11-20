@@ -39,7 +39,7 @@ def gemini_response_parser(output: str, output_type: Any = None, debug = False) 
     except Exception as e:
         print_message(YELLOW, "ERROR", f"Failed to parse gemini-cli output as JSON: {e}")
         if debug:
-            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output[:200]}...")
+            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output}") #[:200]}...
         return None
     
     try:
@@ -148,19 +148,22 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
     {response_str}
     """
 
-
-    cmd = [require_executable("gemini", "Gemini CLI"), "-y", "-p", prompt]
-    
     # if verbose: print_message(BLUE, "PROMPT", f"USER PROMPT:\n{user_prompt}")
     
     if debug:
         print_message(CYAN, "DEBUG", f"Waiting response from gemini-cli...")
         
+    cmd = [require_executable("gemini", "Gemini CLI"), "-y", "-p", prompt]
     if realTimeOutput:
         cmd.extend(["--output-format", "stream-json"])
 
     try:
         for i in range(retries):  # Retry up to n times
+            
+            if i > 0:
+                cmd = [require_executable("gemini", "Gemini CLI"), "-y", "-p", f"{prompt}\n\nYOU HAVE NOT COMPLIED WITH THE REQUIRED FORMAT. You must return: {schema_str}"]
+                if realTimeOutput:
+                    cmd.extend(["--output-format", "stream-json"])
             
             if realTimeOutput:
                 stdout = realtime(cmd, require_response=require_response)
