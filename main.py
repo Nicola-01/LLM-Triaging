@@ -57,9 +57,7 @@ _CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
 class ToolInfo(BaseModel):
     """Information about the tool and environment used for the detection."""
     model_name: Optional[str] = None
-    # timestamp_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z")
     apk_path: Optional[str] = None
-    # apk_sha256: Optional[str] = None
     version: Optional[str] = None          
     notes: Optional[str] = None
 
@@ -170,10 +168,6 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
     # Prepare native libs via APK extraction
     print_message(BLUE, "INFO", f"Getting .so files from APK: {apk}")
     so_paths = extract_so_files(apk)
-
-    # if args.debug:
-    #     for pth in so_paths:
-    #         print_message(GREEN, "SO", f"found {pth}")
     
     relevant_libs_map = find_relevant_libs(so_paths, crashes=crashes, debug=args.debug)
     if not relevant_libs_map:
@@ -278,8 +272,6 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
 
         fuzz_dir = app_dir / "fuzzing_output"
         if not fuzz_dir.is_dir():
-            # if debug:
-            #     print_message(YELLOW, "WARN", f"fuzzing_output not found for {appname}")
             continue
 
         for case_dir in sorted(fuzz_dir.iterdir()):
@@ -405,7 +397,6 @@ def main():
     
     run(args)
     
-    #cleanup_temp_dirs()
     shutil.rmtree('/pyghidra_mcp_projects', ignore_errors=True)
 
 

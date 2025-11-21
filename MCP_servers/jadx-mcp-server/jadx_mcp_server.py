@@ -36,9 +36,6 @@ logger.addHandler(console_handler)
 # Initialize the MCP server
 mcp = FastMCP("JADX-AI-MCP Plugin Reverse Engineering Server")
 
-# fastmcp logs
-#mcp.add_middleware(StructuredLoggingMiddleware(include_payloads=True)) # Commented out as not required in release build
-
 # Parse the arguments
 parser = argparse.ArgumentParser("MCP Server for Jadx")
 parser.add_argument("--http", help="Serve MCP Server over HTTP stream.", action="store_true", default=False)
@@ -434,21 +431,6 @@ async def debug_get_variables() -> dict:
 
 
 def main():
-    # try:
-    #     print(jadx_mcp_server_banner())
-    # except UnicodeEncodeError:
-    #     print("""
-    #        [----------------------------------------------- JADX AI MCP -----------------------------------------------]
-    #         Author         -> Jafar Pathan (zinja-coder@github)
-    #         For Issues     -> https://github.com/zinja-coder/jadx-mcp-server
-    #         Server Version -> v3.3.5
-    #        """)
-
-
-    # print("[------------------------------ Stand By Checking JADX AI MCP Plugin Connectivity ------------------------------]")
-    # print("Testing health check...")
-    # result = health_ping()
-    # print(f"Final result: {result}")
         
     if args.http:
         port = args.port if args.port else 8651

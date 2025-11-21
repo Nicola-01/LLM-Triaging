@@ -23,8 +23,6 @@ def _reader_thread(stream, debug: bool = False):
     """Read Jadx output line by line and set the readiness event when the server is started."""
     try:
         for line in iter(stream.readline, ""):
-            # Optional: forward logs to your console
-            # print(line, end='', flush=True)
             if debug:
                 print_message(GREEN, "DEBUG-JADX", line.strip())
             if JADX_READY_RE.search(line):

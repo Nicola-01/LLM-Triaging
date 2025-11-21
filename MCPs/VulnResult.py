@@ -19,13 +19,6 @@ class EvidenceItem(BaseModel):
     """
     A single piece of evidence supporting a vulnerability assessment.
     """
-    # function (Optional[str]): Function.
-    # Fields
-    # - **function** (Optional[str]): Function.
-    # - **address** (Optional[str]): Address.
-    # - **file** (Optional[str]): File.
-    # - **snippet** (Optional[str]): Snippet.
-    # - **note** (Optional[str]): Note.
     function: Optional[str] = None       # e.g., "mp4_write_one_h264"
     address: Optional[str] = None        # e.g., "0x7fa1234"
     file: Optional[str] = None           # source/path if known
@@ -54,13 +47,6 @@ class Exploit(BaseModel):
     """
     Proof-of-concept exploit information for reproducing or triggering the vulnerability.
     """
-    # Fields
-    # - **exploitability** (str): Classification of exploitability (e.g., "none", "theoretical", "practical").
-    # - **trigger_method** (str): High-level description (e.g., "malformed intent", "corrupted mp4", "race condition").
-    # - **prerequisites** (List[str]): Conditions required (specific device state, permissions, exported component, etc.).
-    # - **poc_commands** (List[str]): Concrete ADB / intent commands or scripts to reproduce the issue.
-    # - **poc_files** (List[str]): References to files needed for the exploit (e.g., crafted payload).
-    # - **notes** (Optional[str]): Additional clarifications or warnings.
 
     exploitability: str = Field(default="unknown", description="Exploitability level: none, theoretical, practical.")
     trigger_method: Optional[str] = Field(default=None, description="Mechanism that triggers the vulnerability, e.g. malformed intent.")
@@ -111,18 +97,6 @@ class VulnResult(BaseModel):
     """
     Result of a vulnerability assessment for a single crash.
     """
-    # is_vulnerability (bool): Is vulnerability.
-    # Fields
-    # - **is_vulnerability** (bool): Is vulnerability.
-    # - **confidence** (float): Confidence.
-    # - **reasons** (List[str]): Reasons.
-    # - **cwe_ids** (List[str]): Cwe ids.
-    # - **severity** (Optional[str]): Severity.
-    # - **affected_libraries** (List[str]): Affected libraries.
-    # - **evidence** (List[EvidenceItem]): Evidence.
-    # - **recommendations** (List[str]): Recommendations.
-    # - **assumptions** (List[str]): Assumptions.
-    # - **limitations** (List[str]): Limitations.   
     
     is_vulnerability: bool = Field(..., description="True if the crash likely reflects a real code vulnerability.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0-1]; >=0.9 confirmed, <0.3 unlikely.")
@@ -219,16 +193,10 @@ class AnalysisResult(BaseModel):
     """
     Combines a CrashSummary with its corresponding VulnDetection.
     """
-    # crash (CrashSummary): Crash.
-    # Fields
-    # - **crash** (CrashSummary): Crash.
-    # - **assessment** (VulnDetection): Detection.
     crash: CrashSummary
     assessment: VulnResult
     statistics: Statistics
     
-    # model_config = ConfigDict(arbitrary_types_allowed=True, ser_json_inf_nan=False)
-
     def to_json(self, *, indent: int = 2, exclude_none: bool = True, ensure_ascii: bool = False) -> str:
         """
         Serialize this AnalysisResult to a JSON string.
@@ -251,23 +219,8 @@ class AnalysisResults(BaseModel):
     """
     Collection of AnalysisResult entries.
     """
-    # analysisResults (List[AnalysisResult]): Analysis results.
-    # Fields
-    # - **analysisResults** (List[AnalysisResult]): Analysis results.
-    """
-    Init.
-    
-    Args:
-        **data: Description.
-    
-    Returns:
-        Any: Description.
-    """
+
     analysisResults: List[AnalysisResult] = Field(default_factory=list)
-    
-    # def __init__(self, **data):
-    #     if "analysisResults" not in data:
-    #         data["analysisResults"] = []
     
     """
     Append.

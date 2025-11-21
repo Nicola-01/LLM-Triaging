@@ -28,13 +28,6 @@ class CrashSummary:
         FuzzHarnessEntry:   The line at position (len(section) - 2).
         ProgramEntry:       The last line in the section (typically 'main').
     """
-    # ProcessTermination (str): Process termination.
-    # Fields
-    # - **ProcessTermination** (str): Process termination.
-    # - **StackTrace** (List[str]): Stack trace.
-    # - **JNIBridgeMethod** (str): J n i bridge method.
-    # - **FuzzHarnessEntry** (str): Fuzz harness entry.
-    # - **ProgramEntry** (str): Program entry.
     ProcessTermination: str
     StackTrace: List[str]
     JavaCallGraph: List[str]

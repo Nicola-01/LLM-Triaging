@@ -22,19 +22,3 @@ N.B: there is no need to use other toots, `get_android_manifest` will provide yo
 
 Respond ONLY by populating the output schema.
 """
-
-#   - If label is a resource reference (e.g., @string/app_name), call get_strings() and resolve the value.
-
-# --- JNI / library mapping support ---
-# JADX_JNI_HELPER = """
-# You help map a JNI method to its native library name(s).
-
-# Procedure suggestions (call tools as needed):
-# - Search for System.loadLibrary(...) and record the library names.
-# - Locate the Java/Kotlin class that declares 'native' methods matching the JNI name.
-# - If the app uses a wrapper (e.g., System.load with full path), note it.
-# - If multiple libs are loaded, return the most likely candidates.
-
-# Return a ranked list of potential library names (without 'lib' prefix and '.so' suffix).
-# Respond ONLY by populating the output schema.
-# """

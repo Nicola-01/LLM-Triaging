@@ -32,7 +32,6 @@ def extract_first_json(s: str):
     finds = regex.search("{(?:[^{}]|(?R))*}", s)
  
     if not finds:
-        # print_message(RED, "ERROR", f"string s: {s}")
         raise ValueError("No JSON object found in LLM reply")
 
     return finds.group()
@@ -109,6 +108,7 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, model_ulr
         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
     )
         
+    ghidra_mcp_process = None
     if not onlyJadx:
         mcp_clients[GHIDRA_MCP] = BasicMCPClient("http://127.0.0.1:8081/sse")
         ghidra_mcp_process = subprocess.Popen(
@@ -116,98 +116,91 @@ async def oss_model(system_prompt:str, prompt:str, output_type:object, model_ulr
         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
     )
 
-    result = "None"
-    tool_called = False
-    
-    client = OpenAI(base_url=model_ulr, api_key='ollama', )
-    
-    messages = [ {"role": "system", "content": system_prompt} ]
-
-    # completion = client.chat.completions.create(
-    #     model=model_name,
-    #     messages=messages,
-    #     temperature=0,
-    # )
-    
-    error_calls = []
-    MAX_ERRORS = 5
-    while True:
-        if debug and not (prompt.startswith("Tool Response: ") or prompt.startswith("Invalid JSON. Reply ONLY with a single JSON object of the form")):
-            print_message(PURPLE, "SHIMMING_PROMPT", prompt)
-        new_message = {"role": "user", "content": prompt}
-        messages.append(new_message)
+    try:
+        result = "None"
+        tool_called = False
         
-        print("ASKING")
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=0,
-        )
-        print("RESPONDED")
-        try:
-            reply = completion.choices[0].message.content
-        except ValueError:
-            continue
+        client = OpenAI(base_url=model_ulr, api_key='ollama', )
         
-        try:
-            data = json.loads(reply)
-        except Exception:
+        messages = [ {"role": "system", "content": system_prompt} ]
+        
+        error_calls = []
+        MAX_ERRORS = 5
+        while True:
+            if debug and not (prompt.startswith("Tool Response: ") or prompt.startswith("Invalid JSON. Reply ONLY with a single JSON object of the form")):
+                print_message(PURPLE, "SHIMMING_PROMPT", prompt)
+            new_message = {"role": "user", "content": prompt}
+            messages.append(new_message)
+            
+            print("ASKING")
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0,
+            )
+            print("RESPONDED")
             try:
-                reply = extract_first_json(reply)
+                reply = completion.choices[0].message.content
             except ValueError:
+                continue
+            
+            try:
+                data = json.loads(reply)
+            except Exception:
+                try:
+                    reply = extract_first_json(reply)
+                except ValueError:
+                    
+                    prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
+                    if debug: print_message(YELLOW,"INVALID LLM RESPONSE", reply)
+                    continue
                 
+            messages.append({"role": "assistant", "content": reply})
+                
+            if debug: print_message(CYAN, "SHIMMING_REPLY_CLEANED", reply)
+            
+            try:
+                data = json.loads(reply)
+            except:
+                if debug: print_message(YELLOW, "WARNING", "INVALID JSON")
                 prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
-                # Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
-                if debug: print_message(YELLOW,"INVALID LLM RESPONSE", reply)
                 continue
             
-        messages.append({"role": "assistant", "content": reply})
-            
-        # print(f"[?] {reply}")
-        if debug: print_message(CYAN, "SHIMMING_REPLY_CLEANED", reply)
-        
-        try:
-            data = json.loads(reply)
-        except:
-            if debug: print_message(YELLOW, "WARNING", "INVALID JSON")
-            prompt ='Invalid JSON. Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.'
-            # prompt = 'Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}. Otherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.'
-            continue
-        
-        response = response_parser(output_type, data)
-        if response:
-            ghidra_mcp_process.kill()
-            jadx_mcp_process.kill()
-            return response
-        
-        if not ("action" in data and ("args" in data or "result" in data)):
-            if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
-            prompt = ('Invalid JSON.  Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.' 
-            + 'There the <writeup> is this JSON schmea:\n'
-            + json.dumps(output_type.model_json_schema(), indent=2)
-            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
-            continue
-
-        if data["action"] == "final":
-            if not tool_called:
-                prompt = 'You must call at least one tool before finalizing. Reply only with a JSON with the following schema: {"action": <tool_function>, "args": <args_if_needed>}'
-                continue
-            
-            response = response_parser(output_type, data["result"])
+            response = response_parser(output_type, data)
             if response:
-                jadx_mcp_process.kill()
-                ghidra_mcp_process.kill()
                 return response
             
-            if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
-            prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
-            + 'There the <writeup> is this JSON schmea:\n'
-            + json.dumps(output_type.model_json_schema(), indent=2)
-            + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
-            continue
-        else:
-            prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls, debug=debug)
+            if not ("action" in data and ("args" in data or "result" in data)):
+                if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+                prompt = ('Invalid JSON.  Reply ONLY with a single JSON object of the form {"action": <tool_function or "final">, "args" OR "result": {...}}. No text outside JSON.' 
+                + 'There the <writeup> is this JSON schmea:\n'
+                + json.dumps(output_type.model_json_schema(), indent=2)
+                + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
+                continue
 
-        tool_called = True
+            if data["action"] == "final":
+                if not tool_called:
+                    prompt = 'You must call at least one tool before finalizing. Reply only with a JSON with the following schema: {"action": <tool_function>, "args": <args_if_needed>}'
+                    continue
+                
+                response = response_parser(output_type, data["result"])
+                if response:
+                    return response
+                
+                if debug: print_message(YELLOW, "WARNING", "Not action in data and no args/results in data")
+                prompt = ('Invalid JSON. Follow schema strictly and reply only with a JSON. If you have enough information, write your writeup using the following schema: {"action": "final", "result": <writeup>}.' 
+                + 'There the <writeup> is this JSON schmea:\n'
+                + json.dumps(output_type.model_json_schema(), indent=2)
+                + '\n----\nOtherwise, call a tool with {"action": <tool_function>, "args": <args_if_needed>}.')
+                continue
+            else:
+                prompt = await mcpRequest(mcp_clients, data, error_calls = error_calls, debug=debug)
 
-    return result
+            tool_called = True
+
+        return result
+    finally:
+        if jadx_mcp_process:
+            jadx_mcp_process.kill()
+        if ghidra_mcp_process:
+            ghidra_mcp_process.kill()

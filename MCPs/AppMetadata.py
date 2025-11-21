@@ -12,14 +12,6 @@ class AppMetadata(BaseModel):
     """
     Metadata about an Android app extracted from Jadx.
     """
-    # app_name (str): App name.
-    # Fields
-    # - **app_name** (str): App name.
-    # - **package** (str): Package.
-    # - **min_sdk** (Optional[int]): Min sdk.
-    # - **target_sdk** (Optional[int]): Target sdk.
-    # - **version_name** (Optional[str]): Version name.
-    # - **version_code** (Optional[str]): Version code.
     app_name: str
     package: str
     min_sdk: Optional[int] = None

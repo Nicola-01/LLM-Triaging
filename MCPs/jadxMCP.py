@@ -23,9 +23,13 @@ def make_jadx_server(timeout: int = 60) -> MCPServerStdio:
     """
     Start the Jadx MCP server using uv, assuming the environment variable JADX_MCP_DIR is set.
     """
+    jadx_mcp_dir = os.getenv("JADX_MCP_DIR")
+    if not jadx_mcp_dir:
+        raise ValueError("JADX_MCP_DIR environment variable is not set.")
+
     return MCPServerStdio(
         "python3",
-        args=[f"{os.getenv("JADX_MCP_DIR")}/jadx_mcp_server.py"],
+        args=[f"{jadx_mcp_dir}/jadx_mcp_server.py"],
         timeout=timeout,
     )
 
@@ -53,7 +57,6 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
         
 
 class JNILibCandidates(BaseModel):
-    # libraries (list[str]): Libraries.
     """
     This class encapsulates structured data and business rules.
     All attributes are validated and documented inline.

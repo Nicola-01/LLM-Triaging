@@ -46,7 +46,7 @@ def gemini_response_parser(output: str, output_type: Any = None, debug = False) 
     except Exception as e:
         print_message(YELLOW, "ERROR", f"Failed to parse gemini-cli output as JSON: {e}")
         if debug:
-            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output}") #[:200]}...
+            print_message(YELLOW, "DEBUG", f"The output was:\n{clean_output[:200]}...")
         return None
     
     try:
@@ -92,8 +92,6 @@ def realtime(cmd, debug = True, require_response = None):
             try:
                 data = json.loads(line)
             except json.JSONDecodeError as e:
-                # print(f"Failed to parse JSON: {e}")
-                # print_message(YELLOW, "DEBUG", f"Line content: {line.rstrip()}")
                 data = None
                 
             if data is not None:
@@ -116,33 +114,13 @@ def realtime(cmd, debug = True, require_response = None):
                     print_message(BLUE, "INFO", f"Stats: {stats}")
                 elif not (_type == "message" and data.get("role") == "user" or _type == "init"):
                     print_message(GREEN, "IDK", data)
-                            
-            
-            # # print in real time
-            # if debug:
-            #     print_message(CYAN, "DEBUG", line.rstrip('\n'))
-            # else:
-            #     print(line.rstrip('\n'))
                 
                 
                 
     # Wait for process to finish (in case not done yet)
     return_code = process.wait()
     
-    # print_message(PURPLE, "CONTENT", allContent)
-    
     return allContent, stats
-    
-    print_message(YELLOW, "INFO", "gemini-cli process finished.")
-    sys.exit(0)
-
-    if return_code != 0:
-        print_message(RED, "ERROR", f"gemini-cli exited with code {return_code}")
-        sys.exit(1)
-
-    # Now you have full output in stdout_lines; if you parse it:
-    full_output = "\n".join(stdout_lines)
-    response = gemini_response_parser(full_output, require_response, debug=debug)
 
 
 def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, verbose = False, debug = False, retries = 6, realTimeOutput = True) -> tuple[object, dict]:
@@ -168,8 +146,6 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
         schema_str = json.dumps(schema, indent=2)
         response_str = f"USE THIS RESPONSE TYPE, DON'T ADD ANY THINKING DATA OR OTHER; JUST HIS JSON RESPONSE:{schema_str}"
 
-    # prompt = f"IMPORTANT: YOU DON'T HAVE TO MODIFY THE CODE, ONLY RESPONDS TO THE PROMPT BY USING THE MCPs, DON'T ANALYSE THE CODE.\nSYSTEM PROMPT: {system_prompt}\nUSER PROMPT: {user_prompt}{response_str}"
-
     prompt = f"""
     IMPORTANT: DO NOT MODIFY OR EXECUTE CODE. RESPOND ONLY VIA MCP CALLS. DO NOT ANALYZE OR RUN FILES. READ-ONLY CONTEXT.
 
@@ -187,8 +163,6 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
 
     {response_str}
     """
-
-    # if verbose: print_message(BLUE, "PROMPT", f"USER PROMPT:\n{user_prompt}")
     
     if debug:
         print_message(CYAN, "DEBUG", f"Waiting response from gemini-cli...")
@@ -225,16 +199,15 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
                 print_message(YELLOW, "DEBUG", f"Retrying gemini-cli query ({i+1}/{retries})...")
             if i == retries - 1:
                 print_message(RED, "ERROR", "Max retries reached. gemini-cli did not return a valid response.")
-                sys.exit(1)     
-                raise GeminiCliMaxRetry()
+                raise GeminiCliMaxRetry("Max retries reached. gemini-cli did not return a valid response.")
         
     except FileNotFoundError:
-        sys.exit("Error: gemini-cli not found.")
+        raise FileNotFoundError("Error: gemini-cli not found.")
     except subprocess.CalledProcessError as e:
         msg = textwrap.dedent(f"""\
         Error while running gemini-cli (exit code {e.returncode}).
         Command: {' '.join(cmd)}
         """)
-        sys.exit(msg)
+        raise RuntimeError(msg)
 
 

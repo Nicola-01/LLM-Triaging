@@ -25,13 +25,18 @@ from MCPs.CrashSummary import Crashes
 from utils import *
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
-def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int = 120) -> MCPServerStdio: # files: List[str], 
+def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int = 120) -> MCPServerStdio: 
     """
     Build a Ghidra MCP server for the given list of binaries (.so, executables).
     It uses uvx pyghidra-mcp -t stdio "<file1>" "<file2>" ...
     """
     ghidra_mcp_dir = os.getenv("GHIDRA_MCP_DIR")
     ghidra_dir = os.getenv("GHIDRA_INSTALL_DIR")
+    
+    if not ghidra_mcp_dir:
+        raise ValueError("GHIDRA_MCP_DIR environment variable is not set.")
+    if not ghidra_dir:
+        raise ValueError("GHIDRA_INSTALL_DIR environment variable is not set.")
         
     return MCPServerStdio(
         "python3",
@@ -53,12 +58,10 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     
     if debug:
         print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(relevant_libs_map.keys())} relevant libs: {list(relevant_libs_map.keys())}")
-    ghidra_server = make_ghidra_server(timeout=timeout) #[str(p) for p in relevant_libs_map.keys()],  debug=debug, verbose=debug)
+    ghidra_server = make_ghidra_server(timeout=timeout)
     jadx_server = make_jadx_server(timeout=timeout)
 
     results = AnalysisResults()
-
-    # if verbose: print_message(BLUE, "SYSTEM_PROMPT", DETECTION_SYSTEM_PROMPT)
 
     sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
         
@@ -69,9 +72,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     libs_map = "\n".join([f"- {re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {relevant_libs_map[lib]}" 
                     for lib in relevant_libs_map.keys()])
                 
-    # if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
-    # async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
-    
     agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
         start = time.time()
@@ -156,7 +156,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     return results
 
 class GhidraFunctionList(BaseModel):
-    # methods (list[str]): Methods.
     """
     Ghidra function list.
     

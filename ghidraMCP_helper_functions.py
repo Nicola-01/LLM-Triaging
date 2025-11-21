@@ -15,7 +15,6 @@ wmctrl_cmd = require_executable("wmctrl", "wmctrl")
 def _cleanup():
     """Cleanup routine called on normal program exit."""
     try:
-        # if you stored the window ID, use it here (otherwise closeGhidraGUI searches for the window)
         closeGhidraGUI()
     except Exception as e:
         # do not interrupt the exit if cleanup fails
@@ -24,7 +23,6 @@ def _cleanup():
 def _signal_handler(signum, frame):
     """Handles SIGINT, SIGTERM, etc., and triggers cleanup."""
     _cleanup()
-    # re-send the signal to the process to terminate with the same exit code (optional)
     sys.exit(128 + (signum if isinstance(signum, int) else 0))
 
     

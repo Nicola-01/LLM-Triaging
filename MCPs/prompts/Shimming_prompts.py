@@ -884,14 +884,14 @@ Available functionalities in JADX-MCP:
         "method_name"
       ]
     }
-  - search_string                                                                                                                                                                             
-  Retrieve contents of strings.xml files and search the required string                                                                                                                     
-                                                                                                                                                                                              
-    Args:                                                                                                                                                                                     
-        string_name: Name of the string to be returned                                                                                                                                        
-        contains: `False`: equals elements, `True`: elements that contains <string_name>                                                                                                      
-                                                                                                                                                                                             ▄
-    Returns:                                                                                                                                                                                 █
+  - search_string
+  Retrieve contents of strings.xml files and search the required string
+
+    Args:
+        string_name: Name of the string to be returned
+        contains: `False`: equals elements, `True`: elements that contains <string_name>
+
+    Returns:
         Dictionary containing contents of strings.xml file, filtered by string_name.                                                                                                          
       Parameters:                                                                                                                                                                             
       {                                                                                                                                                                                       

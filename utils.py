@@ -29,7 +29,6 @@ CYAN='\033[0;36m'
 def print_message(color: str, level:str, msg: str = ""):
     """Print a colored message with a level tag."""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    # print(f'{color}[{level}]{NC} {msg}')
     print(f'{GRAY}[{timestamp}] {color}[{level}]{NC} {msg}')
 
 def require_executable(name_or_path: str, friendly: str):
@@ -141,10 +140,6 @@ def find_relevant_libs(so_paths: List[Path], crashes: 'Crashes', debug: bool = F
         except Exception:
             continue
         
-    # if debug:
-    #     for lib, methods in relevant_libs_map.items():
-    #         print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")
-
     return relevant_libs_map
 
 def handle_model_errors(e):

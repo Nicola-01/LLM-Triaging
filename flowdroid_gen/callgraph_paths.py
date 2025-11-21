@@ -17,7 +17,6 @@ def rg(pattern, file):
     """Executes ripgrep and returns the found lines as a list of strings."""   
     
     safe = escape(pattern)
-    # print(f"rg '{safe}' {file}")
     result = subprocess.run(
         ["rg", safe, file],
         stdout=subprocess.PIPE,
@@ -180,7 +179,6 @@ def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['F
         
     output_dir = f"{callGraphDir}/{package_name}"
     
-    # print(f"app path: {app_path}\noutput: {output_dir}")
     callgraph_file = f"{output_dir}/callgraph.json"
     
     try:
@@ -194,7 +192,7 @@ def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['F
             )
             return True
         elif (os.path.getsize(callgraph_file) == 0): # Empty file
-            # print_message(YELLOW, "WARNING", f"The file {callgraph_file} exists but is empty, skipping call graph analysis.")
+            print_message(YELLOW, "WARNING", f"The file {callgraph_file} exists but is empty, skipping call graph analysis.")
             return False
     except subprocess.TimeoutExpired:
         print_message(YELLOW, "WARNING", f"FlowDroid call timed out after {timeout} seconds. The call graph was not generated.")
@@ -226,7 +224,6 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
     else:
         package_name = app_path.parent.name
             
-    # print(f"app path: {app_path}\noutput: {output_dir}")
     callgraph_file = f"{callGraphDir}/{package_name}/callgraph.json"
     
     if not os.path.exists(callgraph_file):
@@ -293,5 +290,4 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
         ret.append(" -> ".join(p))
     if debug:
         print_message(GREEN, "INFO", f"Found {len(paths)} paths:")
-        # print_message(CYAN, "DEBUG", " -> ".join(p))
     return ret
