@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Nicola MCP Orchestrator - Crash to Vulnerability Detection
+Nicola - MCP Orchestrator - Crash to Vulnerability Detection
 
 Usage:
   python3 main.py APP.apk crash.txt [-m MODEL] [-o report.json] [-d] [--verbose] [--headless]
@@ -47,8 +47,16 @@ from jadx_helper_functions import kill_jadx, start_jadx_gui
 from MCPs.AppMetadata import AppMetadata
 from MCPs.jadxMCP import get_jadx_metadata
 
-sys.path.append(os.path.dirname(__file__))
+from dotenv import load_dotenv
+load_dotenv()
 
+cwd = os.getcwd()
+current_path = os.environ.get("PATH", "")
+path_parts = current_path.split(os.pathsep)
+if cwd not in path_parts:
+    os.environ["PATH"] = current_path + os.pathsep + cwd
+
+sys.path.append(os.path.dirname(__file__))
 
 # Matches case folders like: fname-signature@cs_number-io_matching_possibility
 _CASE_DIR_RE = re.compile(r"^[\w.-]+@[\w*-]+@[\d-]+$")
@@ -109,7 +117,7 @@ def parse_args():
 
     p.add_argument("--apk-list", type=Path, default=None, help="Path to a .txt file containing the list of APKs/APPNAMEs to be included (one per line)." )
     p.add_argument("-m", "--model-name", type=str, default=os.getenv("LLM_MODEL_NAME", "gpt-5"), help="LLM model name (default: env LLM_MODEL_NAME or gemini-2.5-flash)")
-    p.add_argument("-s", "--ollama-url", type=str, default="http://localhost:11434/v1", help="The base url for the Ollama requests.")
+    p.add_argument("-s", "--ollama-url", type=str, default=os.getenv("OLLAMA_URL", "http://localhost:11434/v1"), help="The base url for the Ollama requests.")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
     p.add_argument("--flowgraph-dir", type=Path, default="callGraph", help="Path to store or find the callGrapg obtain my flowdroid_gen/callgraph_paths.py")
