@@ -49,6 +49,26 @@ class EvidenceItem(BaseModel):
             f"  Note     : {self.note or '(none)'}\n"
             f"  Snippet  :{snippet_block}"
         )
+        
+class Exploit(BaseModel):
+    """
+    Proof-of-concept exploit information for reproducing or triggering the vulnerability.
+    """
+    # Fields
+    # - **exploitability** (str): Classification of exploitability (e.g., "none", "theoretical", "practical").
+    # - **trigger_method** (str): High-level description (e.g., "malformed intent", "corrupted mp4", "race condition").
+    # - **prerequisites** (List[str]): Conditions required (specific device state, permissions, exported component, etc.).
+    # - **poc_commands** (List[str]): Concrete ADB / intent commands or scripts to reproduce the issue.
+    # - **poc_files** (List[str]): References to files needed for the exploit (e.g., crafted payload).
+    # - **notes** (Optional[str]): Additional clarifications or warnings.
+
+    exploitability: str = Field(default="unknown", description="Exploitability level: none, theoretical, practical.")
+    trigger_method: Optional[str] = Field(default=None, description="Mechanism that triggers the vulnerability, e.g. malformed intent.")
+    prerequisites: List[str] = Field(default_factory=list, description="Environmental or permission prerequisites for the exploit.")
+    poc_commands: Optional[List[str]] = Field(default=None, description="Fully copy/paste-ready ADB or shell commands to reproduce the crash or exploit.")
+    poc_files: Optional[List[str]] = Field(default=None, description="Paths to crafted payload files used for exploitation.")
+    notes: Optional[str] = Field(default=None, description="Additional technical notes.")
+    
 
 class VulnResult(BaseModel):
     """
@@ -80,6 +100,7 @@ class VulnResult(BaseModel):
     assumptions: List[str] = Field(default_factory=list, description="Assumptions made during reasoning.")
     limitations: List[str] = Field(default_factory=list, description="Missing info or analysis uncertainties.")
     
+    exploit: Optional[Exploit] = Field(default=None, description="Exploitability assessment and PoC commands.")
     
     def __str__(self) -> str:
         """

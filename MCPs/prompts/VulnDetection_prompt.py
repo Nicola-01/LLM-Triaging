@@ -98,7 +98,17 @@ Return a JSON object with:
 - `assumptions`: short list of assumptions  
 - `limitations`: short list of missing or uncertain factors  
 
+- `exploit`: null OR an object with:
+    - `exploitability`: string ('none','unknown','theoretical','practical')
+    - `trigger_method`: string or null  
+    - `prerequisites`: list of strings  
+    - `poc_commands`: list of strings or null 
+    - `poc_files`: list of strings or null 
+    - `notes`: string or null  
+
 Rules:
+- If `is_vulnerability == true`, the `exploit` field MUST be present and non-null.
+- If `is_vulnerability == false`, the `exploit` field MUST be `null`.
 - Never invent values. Use null or [] when unknown.  
 - Confidence must reflect actual certainty.  
 - Keep all text concise (max 1-3 short items per list).  
