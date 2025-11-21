@@ -65,10 +65,41 @@ class Exploit(BaseModel):
     exploitability: str = Field(default="unknown", description="Exploitability level: none, theoretical, practical.")
     trigger_method: Optional[str] = Field(default=None, description="Mechanism that triggers the vulnerability, e.g. malformed intent.")
     prerequisites: List[str] = Field(default_factory=list, description="Environmental or permission prerequisites for the exploit.")
-    poc_commands: Optional[List[str]] = Field(default=None, description="Fully copy/paste-ready ADB or shell commands to reproduce the crash or exploit.")
-    poc_files: Optional[List[str]] = Field(default=None, description="Paths to crafted payload files used for exploitation.")
+    poc_commands: List[str] = Field(default_factory=list, description="Fully copy/paste-ready ADB or shell commands to reproduce the crash or exploit.")
+    poc_files: List[str] = Field(default_factory=list, description="Paths to crafted payload files used for exploitation.")
     notes: Optional[str] = Field(default=None, description="Additional technical notes.")
     
+    def __str__(self) -> str:
+        """
+        Pretty-print the exploit information in a structured, readable format.
+        """
+        prereq_block = (
+            " (none)"
+            if not self.prerequisites
+            else "\n" + textwrap.indent("\n".join(f"- {p}" for p in self.prerequisites), "        ")
+        )
+        cmd_block = (
+            " (none)"
+            if not self.poc_commands
+            else "\n" + textwrap.indent("\n".join(f"$ {c}" for c in self.poc_commands), "        ")
+        )
+        file_block = (
+            " (none)"
+            if not self.poc_files
+            else "\n" + textwrap.indent("\n".join(f"- {f}" for f in self.poc_files), "        ")
+        )
+
+        notes_block = f" {self.notes}" if self.notes else " (none)"
+
+        return (
+            "Exploit:\n"
+            f"  Exploitability : {self.exploitability}\n"
+            f"  Trigger Method : {self.trigger_method or '(none)'}\n"
+            f"  Prerequisites  :{prereq_block}\n"
+            f"  PoC Commands   :{cmd_block}\n"
+            f"  PoC Files      :{file_block}\n"
+            f"  Notes          :{notes_block}"
+        )
 
 class VulnResult(BaseModel):
     """
@@ -95,6 +126,7 @@ class VulnResult(BaseModel):
     
     affected_libraries: List[str] = Field(default_factory=list, description="Libraries (.so) involved in the crash.")
     evidence: List[EvidenceItem] = Field(default_factory=list, description="Supporting code evidence or snippets.")
+    call_sequence : List[str] = Field(default_factory=list, description="Sequence of function calls leading to the vulnerable code region.")
     
     recommendations: List[str] = Field(default_factory=list, description="Actionable next steps or fixes.")
     assumptions: List[str] = Field(default_factory=list, description="Assumptions made during reasoning.")
@@ -104,8 +136,8 @@ class VulnResult(BaseModel):
     
     def __str__(self) -> str:
         """
-        Pretty text rendering of the assessment, including stack, reasons, and evidence.
-        Uses compact '(none)' markers when lists are empty.
+        Pretty text rendering of the assessment, including stack, reasons, evidence,
+        and exploit information. Uses compact '(none)' markers when lists are empty.
         """
         verdict = "LIKELY VULNERABILITY" if self.is_vulnerability else "LIKELY NOT A VULNERABILITY"
         reasons_str = " (none)" if not self.reasons else "\n" + textwrap.indent("\n".join(f"- {r}" for r in self.reasons), "        ")
@@ -124,6 +156,18 @@ class VulnResult(BaseModel):
         rec_block = " (none)" if not self.recommendations else "\n" + textwrap.indent("\n".join(f"- {r}" for r in self.recommendations), "        ")
         asm_block = " (none)" if not self.assumptions else "\n" + textwrap.indent("\n".join(f"- {a}" for a in self.assumptions), "        ")
         lim_block = " (none)" if not self.limitations else "\n" + textwrap.indent("\n".join(f"- {l}" for l in self.limitations), "        ")
+        
+        # Call sequence
+        call_seq_block = (
+            " (none)"
+            if not getattr(self, "call_sequence", [])
+            else "\n" + textwrap.indent("\n".join(f"- {c}" for c in self.call_sequence), "        ")
+        )
+
+        if hasattr(self, "exploit") and self.exploit is not None:
+            exploit_block = "\n" + textwrap.indent(str(self.exploit), "        ")
+        else:
+            exploit_block = " (none)"
 
         return (
             "VulnDetection:\n"
@@ -133,9 +177,11 @@ class VulnResult(BaseModel):
             f"  Affected Libraries: {libs_str}\n"
             f"  Reasons           : {reasons_str}\n"
             f"  Evidence          : {evidence_block}\n"
+            f"  Call Sequence     : {call_seq_block}\n"
             f"  Recommendations   : {rec_block}\n"
             f"  Assumptions       : {asm_block}\n"
-            f"  Limitations       : {lim_block}"
+            f"  Limitations       : {lim_block}\n"
+            f"  Exploit           : {exploit_block}"
         )
 
 class AnalysisResult(BaseModel):

@@ -94,6 +94,11 @@ Return a JSON object with:
 - `stack_trace`: list (normalized)  
 - `affected_libraries`: list of filenames or empty  
 - `evidence`: list of objects `{ "function": str|null, "address": str|null, "file": str|null, "snippet": str|null, "note": str|null }`  
+- `call_sequence`: list of strings 
+    Each element of the list is a Path
+    Ordered list of functions (names or "name @ addr") representing the caller→callee path
+    that leads from JNI/fuzzer entrypoint to the vulnerable function.
+    MUST be derived through MCP cross-reference analysis.
 - `recommendations`: list of short, actionable next steps  
 - `assumptions`: short list of assumptions  
 - `limitations`: short list of missing or uncertain factors  
@@ -102,9 +107,27 @@ Return a JSON object with:
     - `exploitability`: string ('none','unknown','theoretical','practical')
     - `trigger_method`: string or null  
     - `prerequisites`: list of strings  
-    - `poc_commands`: list of strings or null 
-    - `poc_files`: list of strings or null 
+    - `poc_commands`: list of strings 
+    - `poc_files`: list of strings 
     - `notes`: string or null  
+    
+## 6a. Exploit field requirements (only when is_vulnerability=true)
+
+When a crash is classified as a real vulnerability:
+
+1. You MUST provide an `exploit` object with concrete, realistic details.  
+2. `poc_commands` MUST include at least one actionable Proof-of-Concept command  
+   usable on an Android device (e.g., ADB, am start, input file triggering).  
+3. PoC commands must be based on the available evidence:
+   - If the vulnerability is triggered by malformed file input, provide commands such as  
+        "adb push crafted.bin /sdcard/Download/payload.bin"  
+        "adb shell am start -n <package>/<activity> --es file /sdcard/Download/payload.bin"
+   - If triggered through an exported component, produce a realistic `am start` line.  
+   - If the vulnerability is inside a JNI call reachable from Java, reconstruct the simplest  
+     feasible invocation path consistent with the java_callgraph.  
+4. Never fabricate missing fields: if trigger path, activity name, or filenames are unknown,  
+   include placeholders (e.g., "/sdcard/Download/payload.bin") and state assumptions  
+   in the `assumptions` field.  
 
 Rules:
 - If `is_vulnerability == true`, the `exploit` field MUST be present and non-null.
