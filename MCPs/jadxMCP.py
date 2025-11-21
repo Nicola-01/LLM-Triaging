@@ -1,7 +1,7 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Manage the Jadx MCP server and extract app metadata.
+- Important functions: make_jadx_server, get_jadx_metadata.
 """
 
 

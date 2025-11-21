@@ -1,7 +1,7 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Parse and represent crash reports from the fuzzing pipeline.
+- Important classes: CrashSummary, Crashes.
 """
 
 import textwrap

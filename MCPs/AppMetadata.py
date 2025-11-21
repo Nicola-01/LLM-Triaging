@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Define the data model for application metadata extracted via Jadx.
+- Important classes: AppMetadata.
+"""
+
 import json
 from typing import Optional
 from pydantic import BaseModel
@@ -22,6 +28,9 @@ class AppMetadata(BaseModel):
     version_code: Optional[str] = None
     
     def __str__(self) -> str:
+        """
+        Return a human-readable string representation of the AppMetadata.
+        """
         fields = [
             f"App Name     : {self.app_name or 'N/A'}",
             f"Package      : {self.package}",

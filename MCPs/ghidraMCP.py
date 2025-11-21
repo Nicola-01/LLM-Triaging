@@ -1,7 +1,7 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Manage the Ghidra MCP server and run vulnerability detection analysis.
+- Important functions: make_ghidra_server, mcp_vuln_detection.
 """
 
 import os

@@ -1,7 +1,7 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Define the data model for vulnerability assessment results.
+- Important classes: VulnResult, AnalysisResult, EvidenceItem.
 """
 
 from dataclasses import asdict, dataclass, is_dataclass
@@ -191,10 +191,16 @@ class VulnResult(BaseModel):
         )
 
 class TokenUsage(BaseModel):
+    """
+    Tracks token usage for LLM interactions.
+    """
     input_tokens: int = 0
     output_tokens: int = 0
     
 class Statistics(BaseModel):
+    """
+    Statistics regarding the analysis process, including time and token usage.
+    """
     time: str = "00:00:00"
     llm_requests: int = None
     llm_tool_calls: int = None

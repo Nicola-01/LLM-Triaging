@@ -1,7 +1,7 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Factory function to create and configure Pydantic-AI agents with MCP toolsets.
+- Important functions: get_agent.
 """
 
 import os

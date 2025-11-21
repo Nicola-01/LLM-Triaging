@@ -1,3 +1,8 @@
+"""
+Module overview:
+- Purpose: Define prompts and tool descriptions for the shimming agent (Ghidra and Jadx MCPs).
+"""
+
 import json
 from MCPs.AppMetadata import AppMetadata
 from MCPs.prompts.AppMetadata_prompt import APPMETADATA_METADATA

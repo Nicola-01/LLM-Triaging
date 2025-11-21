@@ -3,8 +3,7 @@
 # --- App metadata extraction ---
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Define the system prompt for extracting application metadata via Jadx.
 """
 
 APPMETADATA_METADATA = """

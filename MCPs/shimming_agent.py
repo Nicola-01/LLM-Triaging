@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Provide a shimming agent to interface with MCP servers using local LLMs (e.g., Ollama).
+- Important functions: oss_model.
+"""
+
 import asyncio
 import json
 import os
@@ -20,6 +26,9 @@ JADX_MCP = "JADX_MCP"
 GHIDRA_MCP = "GHIDRA_MCP"
 
 def extract_first_json(s: str):
+    """
+    Extract the first JSON object from a string.
+    """
     finds = regex.search("{(?:[^{}]|(?R))*}", s)
  
     if not finds:
@@ -29,6 +38,9 @@ def extract_first_json(s: str):
     return finds.group()
 
 def response_parser(output_type: Any, data: Any) -> bool:
+    """
+    Parse and validate the response data against the expected output type.
+    """
     try:
         ret = output_type.model_validate(data)
         return ret
@@ -36,6 +48,9 @@ def response_parser(output_type: Any, data: Any) -> bool:
         return None
 
 async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None, debug:bool = False):
+    """
+    Handle MCP tool requests.
+    """
     
     if data["action"] in JADX_MCP_TOOLS:
         response = await mcp_clients[JADX_MCP].call_tool(data["action"], data["args"])
@@ -72,6 +87,21 @@ async def mcpRequest(mcp_clients:list, data, MAX_ERRORS = 5, error_calls = None,
 
 
 async def oss_model(system_prompt:str, prompt:str, output_type:object, model_ulr:str, model_name:str, onlyJadx:bool = False, debug:bool = False) -> object:
+    """
+    Run the OSS model agent loop, handling tool calls and final response generation.
+    
+    Args:
+        system_prompt: System prompt for the agent.
+        prompt: User prompt.
+        output_type: Expected Pydantic model for the output.
+        model_ulr: URL for the model API (e.g., Ollama).
+        model_name: Name of the model to use.
+        onlyJadx: If True, only start Jadx MCP server.
+        debug: Debug mode flag.
+        
+    Returns:
+        The validated output object.
+    """
     mcp_clients = {}
     mcp_clients[JADX_MCP] = BasicMCPClient("http://127.0.0.1:8651/sse")
     jadx_mcp_process = subprocess.Popen(

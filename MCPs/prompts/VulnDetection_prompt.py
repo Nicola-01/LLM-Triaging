@@ -1,7 +1,6 @@
 """
 Module overview:
-- Purpose: Provide high-level description of this module.
-- Important classes/functions are documented inline.
+- Purpose: Define the system prompt for vulnerability detection analysis.
 """
 DETECTION_SYSTEM_PROMPT = """
 You are a **senior mobile reverse-engineering & security engineer**.  

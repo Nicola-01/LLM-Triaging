@@ -1,3 +1,9 @@
+"""
+Module overview:
+- Purpose: Interface with the Gemini CLI for LLM queries.
+- Important functions: query_gemini_cli, realtime.
+"""
+
 import sys
 import os
 from typing import Any
@@ -11,6 +17,7 @@ from utils import *
 import textwrap
 
 class GeminiCliMaxRetry(Exception):
+    """Exception raised when Gemini CLI retries are exhausted."""
     pass
 
 
@@ -50,6 +57,17 @@ def gemini_response_parser(output: str, output_type: Any = None, debug = False) 
 
 
 def realtime(cmd, debug = True, require_response = None):
+    """
+    Execute a command and process its output in real-time.
+    
+    Args:
+        cmd: The command to execute.
+        debug: Whether to print debug information.
+        require_response: Optional Pydantic model to validate the response against.
+        
+    Returns:
+        Tuple containing the full output content and statistics.
+    """
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -128,6 +146,21 @@ def realtime(cmd, debug = True, require_response = None):
 
 
 def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, verbose = False, debug = False, retries = 6, realTimeOutput = True) -> tuple[object, dict]:
+    """
+    Query the Gemini CLI with a system and user prompt.
+    
+    Args:
+        system_prompt: The system prompt.
+        user_prompt: The user prompt.
+        require_response: Optional Pydantic model for response validation.
+        verbose: Verbose output flag.
+        debug: Debug mode flag.
+        retries: Number of retries on failure.
+        realTimeOutput: Whether to use real-time output processing.
+        
+    Returns:
+        Tuple of (response object, statistics dictionary).
+    """
     # Build gemini-cli command
     response_str = ""
     if require_response:
