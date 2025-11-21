@@ -107,6 +107,7 @@ Return a JSON object with:
     - `exploitability`: string ('none','unknown','theoretical','practical')
     - `trigger_method`: string or null  
     - `prerequisites`: list of strings  
+    - `exploit_pipeline`: list of strings 
     - `poc_commands`: list of strings 
     - `poc_files`: list of strings 
     - `notes`: string or null  
@@ -116,16 +117,17 @@ Return a JSON object with:
 When a crash is classified as a real vulnerability:
 
 1. You MUST provide an `exploit` object with concrete, realistic details.  
-2. `poc_commands` MUST include at least one actionable Proof-of-Concept command  
+2. The `exploit_pipeline` MUST describe, in 3-5 ordered steps, the conceptual flow an attacker would follow to exploit the vulnerability, combining prerequisites, payload preparation, triggering mechanism, and expected effect.
+3. `poc_commands` MUST include at least one actionable Proof-of-Concept command  
    usable on an Android device (e.g., ADB, am start, input file triggering).  
-3. PoC commands must be based on the available evidence:
+4. PoC commands must be based on the available evidence:
    - If the vulnerability is triggered by malformed file input, provide commands such as  
         "adb push crafted.bin /sdcard/Download/payload.bin"  
         "adb shell am start -n <package>/<activity> --es file /sdcard/Download/payload.bin"
    - If triggered through an exported component, produce a realistic `am start` line.  
    - If the vulnerability is inside a JNI call reachable from Java, reconstruct the simplest  
      feasible invocation path consistent with the java_callgraph.  
-4. Never fabricate missing fields: if trigger path, activity name, or filenames are unknown,  
+5. Never fabricate missing fields: if trigger path, activity name, or filenames are unknown,  
    include placeholders (e.g., "/sdcard/Download/payload.bin") and state assumptions  
    in the `assumptions` field.  
 

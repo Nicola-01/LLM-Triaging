@@ -26,9 +26,10 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 
-def print_message(color: str, level:str, msg: str):
+def print_message(color: str, level:str, msg: str = ""):
     """Print a colored message with a level tag."""
     timestamp = datetime.now().strftime("%H:%M:%S")
+    # print(f'{color}[{level}]{NC} {msg}')
     print(f'{GRAY}[{timestamp}] {color}[{level}]{NC} {msg}')
 
 def require_executable(name_or_path: str, friendly: str):

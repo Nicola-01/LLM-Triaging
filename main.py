@@ -114,6 +114,7 @@ def parse_args():
     p.add_argument("-s", "--ollama-url", type=str, default="http://localhost:11434/v1", help="The base url for the Ollama requests.")
     p.add_argument("-o", "--out-dir", type=Path, default=default_outdir, help="Base directory for reports. If not provided, a directory named 'classification_YYYY_MM_DD_HH:MM' will be created.")
     p.add_argument("--timeout", type=int, default=180, help="Timeout (seconds) for MCP servers")
+    p.add_argument("--flowgraph-dir", type=Path, default="callGraph", help="Path to store or find the callGrapg obtain my flowdroid_gen/callgraph_paths.py")
     
     p.add_argument("-d", "--debug", action="store_true", help="Enable verbose debug logs")
     p.add_argument("-v", "--verbose", action="store_true", help="Echo system/user prompts and model outputs")
@@ -398,6 +399,7 @@ def main():
         print_message(GREEN, "DEBUG", f"Using Ghidra install dir: {os.getenv('GHIDRA_INSTALL_DIR')}")
         
     os.environ['OLLAMA_BASE_URL'] = args.ollama_url
+    os.environ['FLOWGRAPH_DIR'] = args.flowgraph_dir
         
     # --- Run the assessment ---
     

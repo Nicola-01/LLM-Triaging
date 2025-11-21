@@ -65,6 +65,7 @@ class Exploit(BaseModel):
     exploitability: str = Field(default="unknown", description="Exploitability level: none, theoretical, practical.")
     trigger_method: Optional[str] = Field(default=None, description="Mechanism that triggers the vulnerability, e.g. malformed intent.")
     prerequisites: List[str] = Field(default_factory=list, description="Environmental or permission prerequisites for the exploit.")
+    exploit_pipeline: List[str] = Field(default_factory=list, description= "Ordered steps that describe the exploitation flow from initial setup to triggering the vulnerability.")
     poc_commands: List[str] = Field(default_factory=list, description="Fully copy/paste-ready ADB or shell commands to reproduce the crash or exploit.")
     poc_files: List[str] = Field(default_factory=list, description="Paths to crafted payload files used for exploitation.")
     notes: Optional[str] = Field(default=None, description="Additional technical notes.")
@@ -77,6 +78,11 @@ class Exploit(BaseModel):
             " (none)"
             if not self.prerequisites
             else "\n" + textwrap.indent("\n".join(f"- {p}" for p in self.prerequisites), "        ")
+        )
+        pipe_block = (
+            " (none)"
+            if not self.exploit_pipeline
+            else "\n" + textwrap.indent("\n".join(f"{i+1}. {s}" for i, s in enumerate(self.exploit_pipeline)), "        ")
         )
         cmd_block = (
             " (none)"
@@ -92,13 +98,13 @@ class Exploit(BaseModel):
         notes_block = f" {self.notes}" if self.notes else " (none)"
 
         return (
-            "Exploit:\n"
             f"  Exploitability : {self.exploitability}\n"
             f"  Trigger Method : {self.trigger_method or '(none)'}\n"
-            f"  Prerequisites  :{prereq_block}\n"
-            f"  PoC Commands   :{cmd_block}\n"
-            f"  PoC Files      :{file_block}\n"
-            f"  Notes          :{notes_block}"
+            f"  Prerequisites  : {prereq_block}\n"
+            f"  Pipeline       : {pipe_block}\n"
+            f"  PoC Commands   : {cmd_block}\n"
+            f"  PoC Files      : {file_block}\n"
+            f"  Notes          : {notes_block}"
         )
 
 class VulnResult(BaseModel):
@@ -184,6 +190,25 @@ class VulnResult(BaseModel):
             f"  Exploit           : {exploit_block}"
         )
 
+class TokenUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    
+class Statistics(BaseModel):
+    time: str = "00:00:00"
+    llm_requests: int = None
+    llm_tool_calls: int = None
+    input_tokens: int = None
+    output_tokens: int = None
+    
+    def __str__(self) -> str:
+        lines = [f"Statistics:", f"  Time           : {self.time}"]
+        if self.llm_requests is not None:   lines.append(f"  LLM Requests   : {self.llm_requests}")
+        if self.llm_tool_calls is not None: lines.append(f"  LLM Tool Calls : {self.llm_tool_calls}")
+        if self.input_tokens is not None:   lines.append(f"  Input Tokens   : {self.input_tokens}")
+        if self.output_tokens is not None:  lines.append(f"  Output Tokens  : {self.output_tokens}")
+        return "\n".join(lines)
+
 class AnalysisResult(BaseModel):
     """
     Combines a CrashSummary with its corresponding VulnDetection.
@@ -194,6 +219,7 @@ class AnalysisResult(BaseModel):
     # - **assessment** (VulnDetection): Detection.
     crash: CrashSummary
     assessment: VulnResult
+    statistics: Statistics
     
     # model_config = ConfigDict(arbitrary_types_allowed=True, ser_json_inf_nan=False)
 

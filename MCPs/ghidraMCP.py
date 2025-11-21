@@ -16,7 +16,7 @@ from MCPs.jadxMCP import make_jadx_server
 from MCPs.prompts.Shimming_prompts import SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
 from MCPs.shimming_agent import oss_model
-from MCPs.VulnResult import AnalysisResult, AnalysisResults, VulnResult
+from MCPs.VulnResult import AnalysisResult, AnalysisResults, Statistics, VulnResult
 from ghidraMCP_helper_functions import *
 from .get_agent import get_agent
 
@@ -71,9 +71,11 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                 
     # if (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") and not model_name == "gemini-cli"):
     # async with get_agent(DETECTION_SYSTEM_PROMPT, VulnDetection, [jadx_server, ghidra_server], model_name=model_name) as agent:
+    
     agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
-        if not crash.JavaCallGraph:
+        start = time.time()
+        if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
             vuln = VulnResult(
                 is_vulnerability = 0,
                 confidence = 1.0,
@@ -102,6 +104,7 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
         if verbose:
             print_message(CYAN, "QUERY", f"{query}")
 
+        is_oss_model = False
         if agent:
             async with agent:
                 try:
@@ -113,18 +116,37 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                     if debug:
                         print_message(RED, "ERROR", str(e))
                     continue
+                
+            usage = resp.usage()
+            statistics=Statistics(
+                time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)),
+                llm_requests=usage.requests,
+                llm_tool_calls=usage.tool_calls,
+                input_tokens=usage.input_tokens, 
+                output_tokens=usage.output_tokens
+            )
+            
+            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=statistics))
         elif model_name == "gemini-cli":
             try:
-                vuln: VulnResult = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnResult, verbose=verbose, debug=debug, realTimeOutput=True)
+                vuln, stats = query_gemini_cli(DETECTION_SYSTEM_PROMPT, query, VulnResult, verbose=verbose, debug=debug)
             except GeminiCliMaxRetry:
                 continue
+            
+            statistics=Statistics(
+                time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)),
+                llm_tool_calls=stats.get("tool_calls"),
+                input_tokens=stats.get("input_tokens"), 
+                output_tokens=stats.get("output_tokens")
+            )
+            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=statistics))
         else:
             print_message(RED,"oss",model_name)
+            is_oss_model = True
             vuln: VulnResult = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
                                         output_type=VulnResult, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
-
-        
-        results.append(AnalysisResult(crash=crash, assessment=vuln))
+            results.append(AnalysisResult(crash=crash, assessment=vuln, 
+                                statistics=Statistics(time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)))))        
 
         if verbose:
             print_message(PURPLE, "RESPONSE", vuln)

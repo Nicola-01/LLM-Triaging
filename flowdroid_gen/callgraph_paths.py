@@ -153,7 +153,7 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, debug: bool = False) -> bool:
+def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['FLOWGRAPH_DIR'], debug: bool = False) -> bool:
     """Generate a call graph `callgraph.json`
     
     Args:
@@ -167,9 +167,8 @@ def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, deb
     """
     
     app_path = Path(app_path)
-    directory = "callGraph"
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+    if not os.path.exists(callGraphDir):
+        os.makedirs(callGraphDir)
             
     app_name = app_path.name
     package_name = app_name
@@ -179,13 +178,13 @@ def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, deb
     else:
         package_name = app_path.parent.name
         
-    output_dir = f"{directory}/{package_name}"
+    output_dir = f"{callGraphDir}/{package_name}"
     
     # print(f"app path: {app_path}\noutput: {output_dir}")
     callgraph_file = f"{output_dir}/callgraph.json"
     
     try:
-        if not os.path.exists(callgraph_file) or overwrite:
+        if not os.path.exists(callgraph_file):
             # Note: $HOME/Android/Sdk/platforms is used as the Android platform path
             print_message(BLUE, "INFO", f"Extracting flow graph from {package_name}")
             subprocess.run(
@@ -194,12 +193,16 @@ def generateCallGraph(app_path, timeout:int = 60*5, overwrite: bool = False, deb
                 timeout=timeout 
             )
             return True
+        elif (os.path.getsize(callgraph_file) == 0): # Empty file
+            # print_message(YELLOW, "WARNING", f"The file {callgraph_file} exists but is empty, skipping call graph analysis.")
+            return False
     except subprocess.TimeoutExpired:
         print_message(YELLOW, "WARNING", f"FlowDroid call timed out after {timeout} seconds. The call graph was not generated.")
         return False
+    return True
     
 
-def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths = 25, debug: bool = False) -> List[str]:
+def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths = 25, callGraphDir = os.environ['FLOWGRAPH_DIR'], debug: bool = False) -> List[str]:
     """
     Finds call paths backward from the start_method in the call graph.
 
@@ -224,7 +227,7 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
         package_name = app_path.parent.name
             
     # print(f"app path: {app_path}\noutput: {output_dir}")
-    callgraph_file = f"callGraph/{package_name}/callgraph.json"
+    callgraph_file = f"{callGraphDir}/{package_name}/callgraph.json"
     
     if not os.path.exists(callgraph_file):
         print_message(YELLOW,"WARNING", f"The file {callgraph_file} doesent exists")
@@ -232,6 +235,7 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
        
     bridgeMethod = JNIBridgeMethod.split("_") 
     start_method = None 
+    max_i = 0
     for i in range(1,len(bridgeMethod)):
         test_method = "_".join(bridgeMethod[-i:])
         ret = rg(test_method, callgraph_file)
@@ -239,6 +243,7 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
             print_message(CYAN, "DEBUG", f"Search for {test_method} in {callgraph_file}")
         if (len(ret) > 0):
             start_method = test_method
+            max_i = i
         else:
             break
         
@@ -253,22 +258,16 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
             ret = rg(test_method, callgraph_file)
             if (len(ret) == 0):
                 break
-            if (max_i >= i):
+            if (i >= max_i):
                 max_i = i
                 start_method = test_method
         
     if not start_method:
         print_message(YELLOW, "WARNING", f"The method {JNIBridgeMethod} is not present in {callgraph_file}")
-        return None
+        return []
         
     start_src, target_dst = find_start_dst(start_method, callgraph_file)
-
-    if not start_src:
-        print_message(YELLOW, "WARNING", "Target not found or not called by any method. Check the target name and the content of callgraph.json.")
-        return None
         
-    callGraph = None
-    # new_callGraph = getFlowGraph(apk, JNIBridgeMethod, max_depth, debug=True)
     paths = []
     ret: list[str] = []
     depth = 1
@@ -288,10 +287,11 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
 
     if len(paths) == 0:
         print_message(YELLOW, "WARNING", "No paths found.")
-        return None
-    elif debug:
+        return []
+    
+    for p in paths:
+        ret.append(" -> ".join(p))
+    if debug:
         print_message(GREEN, "INFO", f"Found {len(paths)} paths:")
-        for p in paths:
-            ret.append(" -> ".join(p))
-            # print_message(CYAN, "DEBUG", " -> ".join(p))
+        # print_message(CYAN, "DEBUG", " -> ".join(p))
     return ret

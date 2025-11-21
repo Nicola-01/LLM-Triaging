@@ -124,6 +124,7 @@ class Crashes:
             A list of CrashEntry objects, in the order they appear.
         """
         text = path.read_text(errors="replace")
+        method = path.parent.parent.name.split("@")[0]
         # Drop empty lines, keep order; strip trailing/leading spaces
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         cur: List[str] = []
@@ -142,10 +143,11 @@ class Crashes:
 
             # Initialize defaults to keep behavior predictable even with short sections
             ProcessTermination = cur[0] if len(cur) >= 1 else ""
-            JNIBridgeMethod = ""
+            JNIBridgeMethod = method
             FuzzHarnessEntry = ""
             ProgramEntry = ""
             StackTrace: List[str] = []
+            StackTrace.append(method)
 
             # Map last 4 lines (if present) to the labeled fields
             n = len(cur)
@@ -153,17 +155,16 @@ class Crashes:
                 if i == 0:
                     # First line already captured as ProcessTermination
                     continue
-                elif i == n - 3:
-                    JNIBridgeMethod = line
-                    StackTrace.append(line)
                 elif i == n - 2:
                     FuzzHarnessEntry = line
                 elif i == n - 1:
                     ProgramEntry = line
                 else:
                     StackTrace.append(line)
-                    
-            callGraph = getFlowGraph(apk, JNIBridgeMethod, debug=debug)
+            
+            callGraph = None
+            if haveCallGraph:
+                callGraph = getFlowGraph(apk, JNIBridgeMethod, debug=debug)
             
             results.append(
                 CrashSummary(

@@ -61,6 +61,7 @@ def realtime(cmd, debug = True, require_response = None):
 
     stdout_lines = []
     allContent = ""
+    stats = {}
     
     while True:
         line = process.stdout.readline()
@@ -78,7 +79,7 @@ def realtime(cmd, debug = True, require_response = None):
                 data = None
                 
             if data is not None:
-                _type      = data.get("type")
+                _type = data.get("type")
                 
                 if _type == "tool_result":
                     print_message(CYAN, re.sub(r'-.*','',str(data.get("tool_id"))), f"Status: {data.get('status')} - Output: {data.get('output')!r}")
@@ -88,7 +89,13 @@ def realtime(cmd, debug = True, require_response = None):
                     content = data.get("content")
                     allContent += content
                 elif _type == "result":
-                    print_message(BLUE, "INFO", f"Tokens: {data.get("status")}")
+                    stats = data.get("stats")
+                    stats = {
+                        "input_tokens" : stats.get("input_tokens"),
+                        "output_tokens" : stats.get("output_tokens"),
+                        "tool_calls" : stats.get("tool_calls")
+                    }
+                    print_message(BLUE, "INFO", f"Stats: {stats}")
                 elif not (_type == "message" and data.get("role") == "user" or _type == "init"):
                     print_message(GREEN, "IDK", data)
                             
@@ -106,7 +113,7 @@ def realtime(cmd, debug = True, require_response = None):
     
     # print_message(PURPLE, "CONTENT", allContent)
     
-    return allContent
+    return allContent, stats
     
     print_message(YELLOW, "INFO", "gemini-cli process finished.")
     sys.exit(0)
@@ -120,7 +127,7 @@ def realtime(cmd, debug = True, require_response = None):
     response = gemini_response_parser(full_output, require_response, debug=debug)
 
 
-def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, verbose = False, debug = False, retries = 4, realTimeOutput = False):
+def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, verbose = False, debug = False, retries = 6, realTimeOutput = True) -> tuple[object, dict]:
     # Build gemini-cli command
     response_str = ""
     if require_response:
@@ -166,7 +173,7 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
                     cmd.extend(["--output-format", "stream-json"])
             
             if realTimeOutput:
-                stdout = realtime(cmd, require_response=require_response)
+                stdout, stats = realtime(cmd, require_response=require_response)
                 response = gemini_response_parser(stdout, require_response, debug=debug)
             else: 
                 result = subprocess.run(
@@ -179,7 +186,7 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
                 response = gemini_response_parser(result.stdout, require_response, debug=debug)
             
             if response is not None:
-                return response
+                return response, stats
             
             if debug:
                 print_message(YELLOW, "DEBUG", f"Retrying gemini-cli query ({i+1}/{retries})...")
