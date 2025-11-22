@@ -152,7 +152,7 @@ def dfs_paths(start, file, max_depth, initial_target_dst):
     
     return all_paths
 
-def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['FLOWGRAPH_DIR'], debug: bool = False) -> bool:
+def generateCallGraph(app_path, timeout:int = 60*5, debug: bool = False) -> bool:
     """Generate a call graph `callgraph.json`
     
     Args:
@@ -166,6 +166,8 @@ def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['F
     """
     
     app_path = Path(app_path)
+    callGraphDir = os.environ['FLOWGRAPH_DIR']
+    
     if not os.path.exists(callGraphDir):
         os.makedirs(callGraphDir)
             
@@ -200,7 +202,7 @@ def generateCallGraph(app_path, timeout:int = 60*5, callGraphDir = os.environ['F
     return True
     
 
-def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths = 25, callGraphDir = os.environ['FLOWGRAPH_DIR'], debug: bool = False) -> List[str]:
+def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths = 25, debug: bool = False) -> List[str]:
     """
     Finds call paths backward from the start_method in the call graph.
 
@@ -215,6 +217,7 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
         List[List[str]]: Found call paths ([Root → ... → Target]) or None.
     """
     app_path = Path(app_path)
+    callGraphDir = os.environ['FLOWGRAPH_DIR']
     
     app_name = app_path.name
     package_name = app_name

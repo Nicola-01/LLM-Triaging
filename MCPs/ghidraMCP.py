@@ -7,6 +7,7 @@ Module overview:
 import os
 import re
 import sys
+import tempfile
 from typing import List
 from pydantic import BaseModel
 from pydantic_ai.mcp import MCPServerStdio
@@ -17,12 +18,18 @@ from MCPs.prompts.Shimming_prompts import SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
 from MCPs.shimming_agent import oss_model
 from MCPs.VulnResult import AnalysisResult, AnalysisResults, Statistics, VulnResult
-from ghidraMCP_helper_functions import *
+from ghidra_helper_functions import *
 from .get_agent import get_agent
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from MCPs.CrashSummary import Crashes
 from utils import *
+
+# Shered dir with the ghidra mcp bridge
+SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
+os.makedirs(SHARED_DIR, exist_ok=True)
+FILE_AVAILABLE = os.path.join(SHARED_DIR, "available.txt")
+FILE_CURRENT = os.path.join(SHARED_DIR, "current.txt")
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
 def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int = 120) -> MCPServerStdio: 
@@ -64,14 +71,21 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     results = AnalysisResults()
 
     sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
-        
+            
     openGhidraGUI(sorted_libs, timeout=45*(len(sorted_libs)+1), debug=debug)
-    for lib in sorted_libs:
-        openGhidraFile(sorted_libs, lib, debug=debug)
+
+    with open(FILE_AVAILABLE, "w", encoding="utf-8") as f:
+        libs = "\n".join(sorted_libs)
+        libs = re.sub(r'APKs/[^/]+/lib/[^/]+/', '', libs)
+        f.write(libs)
         
+    openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
+    with open(FILE_CURRENT, "w", encoding="utf-8") as f:
+        f.write(sorted_libs[0])
+
     libs_map = "\n".join([f"- {re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {relevant_libs_map[lib]}" 
-                    for lib in relevant_libs_map.keys()])
-                
+                    for lib in sorted(relevant_libs_map.keys())])
+        
     agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
         start = time.time()
@@ -104,7 +118,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
         if verbose:
             print_message(CYAN, "QUERY", f"{query}")
 
-        is_oss_model = False
         if agent:
             async with agent:
                 try:

@@ -6,13 +6,41 @@
 # ]
 # ///
 
+import os
 import sys
+import tempfile
 import requests
 import argparse
 import logging
 from urllib.parse import urljoin
 
 from mcp.server.fastmcp import FastMCP
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+if 'DISPLAY' not in os.environ:
+    os.environ['DISPLAY'] = ':0'
+
+# if 'XAUTHORITY' not in os.environ:
+#     import pwd
+    
+#     uid = os.getuid()
+#     user_entry = pwd.getpwuid(uid)
+#     real_home = user_entry.pw_dir
+    
+#     # Costruisce il percorso
+#     xauth_path = os.path.join(real_home, '.Xauthority')
+    
+#     if os.path.exists(xauth_path):
+#         os.environ['XAUTHORITY'] = xauth_path
+#     else:
+#         print(f"[WARN] .Xauthority non trovato in {real_home}", file=sys.stderr)
+            
+    
+from ghidra_helper_functions import closeGhidraFile, openGhidraFile
 
 DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
 
@@ -286,6 +314,76 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
     if filter:
         params["filter"] = filter
     return safe_get("strings", params)
+
+
+SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
+os.makedirs(SHARED_DIR, exist_ok=True)
+FILE_AVAILABLE = os.path.join(SHARED_DIR, "available.txt")
+FILE_CURRENT = os.path.join(SHARED_DIR, "current.txt")
+
+def _read_lines(filepath):
+    """Helper for reading clean lines from a txt file."""
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath, "r", encoding="utf-8") as f:
+        return sorted([line.strip() for line in f if line.strip()], key=lambda s: s.lower())
+
+@mcp.tool()
+def list_available_libs() -> list:
+    """
+    Retrieves a list of all libs currently imported into the Ghidra Project.
+    
+    Use this tool to discover valid libs names before attempting to open or analyze a specific binary.
+    If the user asks about a specific library that is not in this list, you may need to use `analyze_new_binary` (if available) or ask the user to import it.
+
+    Returns:
+        A list of filenames (e.g., ["libssl.so", "lib2.so"]) available in the project root.
+    """
+    files = _read_lines(FILE_AVAILABLE)
+    if not files:
+        raise Exception("No libs found in GHIDRA_FILES environment variable.")
+    return files
+
+@mcp.tool()
+def get_current_lib_name() -> str:
+    """
+    Identifies the lib currently active and visible in the Ghidra CodeBrowser.
+
+    Use this to establish context before performing analysis actions to ensure you are working on the correct file.
+    
+    Returns:
+        str: The name of the currently open lib (e.g., "auth_module.dll").
+    """
+    ret = _read_lines(FILE_CURRENT)
+    if ret[0] == None:
+        raise Exception("There are not open files, open one with `open_lib`")
+    else:
+        return ret[0]
+
+@mcp.tool()
+def open_lib(lib_name: str):
+    """
+    Switches the active view in Ghidra CodeBrowser to the specified lib.
+
+    You should call `list_available_libs` first to verify the lib exists.
+    This does not start analysis, it only brings the binary into focus in the UI.
+    
+    Args:
+        lib_name (str): The exact name of the lib to open (must match an entry from `list_available_libs`).      
+    """
+    files = _read_lines(FILE_AVAILABLE)
+    if lib_name not in files:
+        raise Exception(f"The lib {lib_name} doesn't exists in current Ghidra session, use one of this {files}")
+    
+    if lib_name == get_current_lib_name():
+        raise Exception(f"The lib {lib_name} is currently open")
+    
+    for f in files:
+        closeGhidraFile(f, debug=True)
+    openGhidraFile(files, lib_name)
+    with open(FILE_CURRENT, "w", encoding="utf-8") as f:
+        f.write(lib_name)
+    
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

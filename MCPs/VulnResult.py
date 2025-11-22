@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from MCPs.CrashSummary import CrashSummary
 
-from ghidraMCP_helper_functions import *
+from ghidra_helper_functions import *
 from utils import *
 
 class EvidenceItem(BaseModel):

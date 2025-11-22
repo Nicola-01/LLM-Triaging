@@ -1,5 +1,26 @@
 import subprocess
 import time
+import os
+import sys
+
+if 'DISPLAY' not in os.environ:
+    os.environ['DISPLAY'] = ':0'
+
+# if 'XAUTHORITY' not in os.environ:
+#     import pwd
+    
+#     uid = os.getuid()
+#     user_entry = pwd.getpwuid(uid)
+#     real_home = user_entry.pw_dir
+    
+#     # Costruisce il percorso
+#     xauth_path = os.path.join(real_home, '.Xauthority')
+    
+#     if os.path.exists(xauth_path):
+#         os.environ['XAUTHORITY'] = xauth_path
+#     else:
+#         print(f"[WARN] .Xauthority non trovato in {real_home}", file=sys.stderr)
+
 import pyautogui
 pyautogui.FAILSAFE= True
 import os
@@ -95,7 +116,7 @@ def openGhidraGUI(import_files: list, timeout = 45, debug = False):
     for f in import_files:
         cmd += f" -i {shlex.quote(f)}"
         
-    print_message(GREEN, "INFO", "Launching Ghidra GUI...")
+    print_message(GREEN, "INFO", "Launching Ghidra GUI. Opening depends on the number of libs.")
     if debug:
         print_message(CYAN, "DEBUG", f"Importing: {import_files}")
     try:
@@ -151,10 +172,16 @@ def openGhidraFile(import_files: list, select_file: str, debug = False):
     # bring to front
     print_message(GREEN, "INFO", "Bringing Ghidra GUI to foreground")
     _run_cmd(f"{wmctrl_cmd} -a \"Ghidra:\"", shell=True)
-    time.sleep(1)
+    time.sleep(2)
+    
+    # go to the first element
+    for f in import_files:
+        pyautogui.press('up')
+        time.sleep(0.1)
+    # pyautogui.press('down') 
 
     # sort files and find position (1-based)
-    files_sorted = sorted(import_files)
+    files_sorted = sorted(import_files, key=lambda s: s.lower())
     try:
         idx = files_sorted.index(select_file) + 1
     except ValueError:

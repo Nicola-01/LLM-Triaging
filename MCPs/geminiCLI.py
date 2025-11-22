@@ -97,11 +97,15 @@ def realtime(cmd, debug = True, require_response = None):
             if data is not None:
                 _type = data.get("type")
                 
-                if _type == "tool_result":
-                    print_message(CYAN, re.sub(r'-.*','',str(data.get("tool_id"))), f"Status: {data.get('status')} - Output: {data.get('output')!r}")
-                elif _type == "tool_use":
-                    print_message(YELLOW, data.get("tool_name"), f"{re.sub(r'-.*','',data.get("tool_id"))}:({data.get('parameters')})")
-                elif _type == "message" and data.get("role") == "assistant":
+                if debug:
+                    if _type == "tool_result":
+                        print_message(CYAN, re.sub(r'-.*','',str(data.get("tool_id"))), f"Status: {data.get('status')} - Output: {data.get('output')[:200]}...")
+                    elif _type == "tool_use":
+                        print_message(YELLOW, data.get("tool_name"), f"{re.sub(r'-.*','',data.get("tool_id"))}:({data.get('parameters')})")
+                    elif not (_type == "message" and data.get("role") == "user" or _type == "init"):
+                        print_message(GREEN, "IDK", data)
+                    
+                if _type == "message" and data.get("role") == "assistant":
                     content = data.get("content")
                     allContent += content
                 elif _type == "result":
@@ -111,9 +115,6 @@ def realtime(cmd, debug = True, require_response = None):
                         "output_tokens" : stats.get("output_tokens"),
                         "tool_calls" : stats.get("tool_calls")
                     }
-                    print_message(BLUE, "INFO", f"Stats: {stats}")
-                elif not (_type == "message" and data.get("role") == "user" or _type == "init"):
-                    print_message(GREEN, "IDK", data)
                 
                 
                 
@@ -180,7 +181,7 @@ def query_gemini_cli(system_prompt, user_prompt: str, require_response = None, v
                     cmd.extend(["--output-format", "stream-json"])
             
             if realTimeOutput:
-                stdout, stats = realtime(cmd, require_response=require_response)
+                stdout, stats = realtime(cmd, require_response=require_response, debug=debug)
                 response = gemini_response_parser(stdout, require_response, debug=debug)
             else: 
                 result = subprocess.run(

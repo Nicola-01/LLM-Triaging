@@ -112,6 +112,7 @@ All Python dependencies are listed in `requirements.txt`:
    sudo apt install -y openjdk-17-jdk python3 python3-pip python3-tk python3-dev \
                        wget unzip maven android-sdk wmctrl \
                        libcanberra-gtk-module libcanberra-gtk3-module
+   touch .Xauthority # Needed for pyautogui
    ```
 
 3. **Install Jadx**:

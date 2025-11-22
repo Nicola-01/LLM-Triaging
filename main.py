@@ -399,7 +399,7 @@ def main():
         print_message(GREEN, "DEBUG", f"Using Ghidra install dir: {os.getenv('GHIDRA_INSTALL_DIR')}")
         
     os.environ['OLLAMA_BASE_URL'] = args.ollama_url
-    os.environ['FLOWGRAPH_DIR'] = args.flowgraph_dir
+    os.environ['FLOWGRAPH_DIR'] = str(args.flowgraph_dir)
         
     # --- Run the assessment ---
     
