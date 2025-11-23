@@ -55,22 +55,10 @@ def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int 
         env={"GHIDRA_INSTALL_DIR": ghidra_dir},
         timeout=timeout,
     )
-    
-async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_map: Dict[Path, List[str]], timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
-    """
-    Run the assessment agent once, then feed it each CrashEntry (one by one).
-    Returns a list of VulnDetection, in the same order as 'crashes'.
-    """
-    # Start MCP servers once
-    
-    if debug:
-        print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(relevant_libs_map.keys())} relevant libs: {list(relevant_libs_map.keys())}")
-    ghidra_server = make_ghidra_server(timeout=timeout)
-    jadx_server = make_jadx_server(timeout=timeout)
 
-    results = AnalysisResults()
-
-    sorted_libs = sorted(str(p) for p in relevant_libs_map.keys())
+def startGhidraWith(libs: List[str], debug: bool = False):
+    
+    sorted_libs = sorted(libs, key=lambda s: s.lower())
             
     openGhidraGUI(sorted_libs, timeout=45*(len(sorted_libs)+1), debug=debug)
 
@@ -82,12 +70,31 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
     openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
     with open(FILE_CURRENT, "w", encoding="utf-8") as f:
         f.write(sorted_libs[0])
-
-    libs_map = "\n".join([f"- {re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {relevant_libs_map[lib]}" 
-                    for lib in sorted(relevant_libs_map.keys())])
         
+    if debug:
+        print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(libs.keys())} relevant libs: {list(libs.keys())}")
+    
+async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
+    """
+    Run the assessment agent once, then feed it each CrashEntry (one by one).
+    Returns a list of VulnDetection, in the same order as 'crashes'.
+    """
+    # Start MCP servers once
+    ghidra_server = make_ghidra_server(timeout=timeout)
+    jadx_server = make_jadx_server(timeout=timeout)
+
+    results = AnalysisResults()
+    last_libs_open = None
+    
     agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
+        
+        libs = crash.LibMap.keys()
+        libs = sorted(libs, key=lambda s: s.lower())
+        if last_libs_open is None or set(last_libs_open) != set(libs):
+            startGhidraWith(libs)
+            last_libs_open = libs
+        
         start = time.time()
         if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
             vuln = VulnResult(
@@ -96,7 +103,7 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
                 reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
                 cwe_ids = [],
                 severity = None,
-                affected_libraries = sorted_libs,
+                affected_libraries = libs,
                 evidence = [],
                 recommendations = [],
                 assumptions = [],
@@ -110,9 +117,9 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, relevant_libs_m
 
         query = (
             f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
-            f"{crash_str}\n"
-            f"This is a map where each key is a Path to a relevant .so library, "
-            f"and the value is the list of JNI methods it implements: \n{libs_map}"
+            f"{crash_str}"
+            # f"This is a map where each key is a Path to a relevant .so library, "
+            # f"and the value is the list of JNI methods it implements: \n{libs}"
         )
 
         if verbose:

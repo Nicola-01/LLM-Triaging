@@ -38,7 +38,6 @@ Crashes that **should NOT** be labeled as vulnerable include:
 - `fuzz_harness_entry`: string or null
 - `program_entry`: string or null
 - Map of relevant libraries and their JNI methods
-- Optional metadata (package, version, ABI, filenames)
 
 ---
 

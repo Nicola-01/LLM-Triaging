@@ -73,13 +73,7 @@ class AnalysisBlock(BaseModel):
     """Holds the full analysis block, including tool info, app metadata, and results."""
     tool: Optional[ToolInfo] = None
     app: Optional[AppMetadata] = None
-    relevant_libs_map: Dict[Path, List[str]] = Field(default_factory=dict, alias="libs")
     analysisResults: AnalysisResults = Field(default_factory=AnalysisResults)
-
-    @field_serializer("relevant_libs_map")
-    def serialize_paths(self, libs: Dict[Path, List[str]], _info):
-        # return just sanitized paths
-        return [re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(p)) for p in libs.keys()]
 
     @field_serializer("analysisResults")
     def serialize_results(self, results: AnalysisResults, _info):
@@ -173,34 +167,16 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
     # Parse crash report
     crashes = Crashes(apk, backtraces, debug=debug)
                 
-    # Prepare native libs via APK extraction
-    print_message(BLUE, "INFO", f"Getting .so files from APK: {apk}")
-    so_paths = extract_so_files(apk)
-    
-    relevant_libs_map = find_relevant_libs(so_paths, crashes=crashes, debug=args.debug)
-    if not relevant_libs_map:
-        print_message(YELLOW, "WARN", "No relevant libs identified; Returning empty assessment.")
-        analysisResults = AnalysisResults()
-        tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
-        envelope = AnalysisContainer(
-            analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs=[] )
-        )
-        return envelope
-    
-    if args.debug:
-        for lib, methods in relevant_libs_map.items():
-            print_message(CYAN, "DEBUG", f"Lib: {lib}, Methods: {methods}")                
-                
     print_message(BLUE, "INFO", f"Starting vulnerability assessment for {len(crashes)} crash entries...")
     
     try:
-        analysisResults : AnalysisResults = await mcp_vuln_detection(model_name=args.model_name, crashes=crashes, relevant_libs_map=relevant_libs_map, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
+        analysisResults : AnalysisResults = await mcp_vuln_detection(model_name=args.model_name, crashes=crashes, timeout=args.timeout, verbose=args.verbose, debug=args.debug)
     except Exception as e:
         handle_model_errors(e)
     
     tool = ToolInfo(model_name=args.model_name, apk_path=str(apk), version=TOOL_VERSION)
     envelope = AnalysisContainer(
-        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool, relevant_libs_map=relevant_libs_map)
+        analysis=AnalysisBlock(app=appMetadata, analysisResults=analysisResults, tool=tool)
     )
     print_message(BLUE, "INFO", f"vulnerability detection completed. Summary:")
     return envelope

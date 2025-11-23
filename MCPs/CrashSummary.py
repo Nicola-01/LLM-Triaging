@@ -4,13 +4,16 @@ Module overview:
 - Important classes: CrashSummary, Crashes.
 """
 
+import shutil
+import subprocess
 import textwrap
-from typing import List, Iterable, Union, Sequence
+from typing import Dict, List, Iterable, Union, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from flowdroid_gen.callgraph_paths import generateCallGraph, getFlowGraph
-from utils import print_message, YELLOW
+from utils import CYAN, RED, print_message, YELLOW
 
 # ----------------------------
 # Data model
@@ -34,6 +37,7 @@ class CrashSummary:
     JavaCallGraph: List[str]
     FuzzHarnessEntry: str
     ProgramEntry: str
+    LibMap: Dict[str, List[str]]
     
     def __str__(self) -> str:
         """
@@ -51,6 +55,13 @@ class CrashSummary:
             else "\n" + textwrap.indent("\n".join(self.JavaCallGraph), "        ")
         )
         
+        libs_map = [f"{re.sub(r'APKs/[^/]+/lib/[^/]+/', '', str(lib))}: {self.LibMap[lib]}" 
+            for lib in sorted(self.LibMap.keys())]
+        LibMap_str = (
+            "(empty)"
+            if not self.LibMap
+            else "\n" + textwrap.indent("\n".join(libs_map), "        ")
+        )
         
         return (
             "CrashEntry:\n"
@@ -59,7 +70,8 @@ class CrashSummary:
             f"  Native Stack Trace  : {stack_str}\n"
             f"  Java Call Graph     : {javaCallGraph_str}\n"
             f"  Fuzz Harness Entry  : {self.FuzzHarnessEntry}\n"
-            f"  Program Entry       : {self.ProgramEntry}"
+            f"  Program Entry       : {self.ProgramEntry}\n"
+            f"  Library Map         : {LibMap_str}"
         )
 
 
@@ -121,6 +133,7 @@ class Crashes:
         # Drop empty lines, keep order; strip trailing/leading spaces
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         cur: List[str] = []
+        lib_methods_map: Dict[str, List[str]] = get_libs_method_map(apk=apk,)
         results: List[CrashSummary] = []
         
         haveCallGraph = generateCallGraph(apk)
@@ -144,15 +157,11 @@ class Crashes:
             # Map last 4 lines (if present) to the labeled fields
             n = len(cur)
             for i, line in enumerate(cur):
-                if i == 0:
-                    # First line already captured as ProcessTermination
-                    continue
-                elif i == n - 2:
+                if i == n - 2:
                     FuzzHarnessEntry = line
                 elif i == n - 1:
                     ProgramEntry = line
-                else:
-                    StackTrace.append(line)
+                StackTrace.append(line)
             
             callGraph = None
             if haveCallGraph:
@@ -168,6 +177,7 @@ class Crashes:
                     JavaCallGraph=callGraph,
                     FuzzHarnessEntry=FuzzHarnessEntry,
                     ProgramEntry=ProgramEntry,
+                    LibMap=find_relevant_libs(lib_methods_map, StackTrace)
                 )
             )
             cur = []
@@ -223,3 +233,87 @@ class Crashes:
                 f"program_entry='{e.ProgramEntry}']"
             )
         return "\n".join(lines)
+  
+    
+def extract_so_files(apk: Path) -> List[Path]:
+    """Return all .so files inside apk/lib/ and its subdirectories."""
+    lib_dir = apk.parent / "lib"
+    if not lib_dir.exists():
+        return []
+    return sorted(
+        [p for p in lib_dir.rglob("*.so") if p.is_file()],
+        key=lambda x: str(x)
+    )
+           
+def get_libs_method_map(apk: Path, debug: bool = False) -> Dict[str, List[str]]:
+    """
+    Given a list of .so files, return those that implement JNI methods,
+    preferring specific ABIs in the following order:
+        arm64-v8a > armeabi-v7a > armeabi > arm* > x86_64 > x86 > any other.
+    """
+    so_paths = extract_so_files(apk)
+
+    nm = shutil.which("nm") or shutil.which("llvm-nm")
+    if not nm:
+        print_message(RED, "ERROR", "Neither 'nm' nor 'llvm-nm' command is available in PATH.")
+        print_message(YELLOW, "WARN", "Returning all .so files without filtering.")
+        return so_paths
+
+    # Group libs by ABI (directory name under /lib/)
+    abi_groups: Dict[str, List[Path]] = {}
+    for so in so_paths:
+        abi = so.parent.name
+        abi_groups.setdefault(abi, []).append(so)
+
+    # Define ABI preference order
+    abi_preference = [
+        "arm64-v8a",
+        "armeabi-v7a",
+        "armeabi",
+        "arm",
+        "x86_64",
+        "x86"
+    ]
+
+    # Select the best available ABI group
+    selected_abi = None
+    for abi in abi_preference:
+        if abi in abi_groups:
+            selected_abi = abi
+            break
+    if not selected_abi:
+        # fallback: pick any remaining ABI folder
+        selected_abi = next(iter(abi_groups.keys()), None)
+
+    if debug:
+        print_message(CYAN, "DEBUG", f"Selected ABI: {selected_abi}")
+
+    selected_libs = abi_groups.get(selected_abi, [])
+    
+    libs_map: Dict[Path, List[str]] = {}
+    
+    # Filter selected libs by JNI symbol presence
+    for so in selected_libs:
+        try:
+            nm_out = subprocess.check_output([nm, "-D", str(so)], text=True, stderr=subprocess.DEVNULL)
+            symbols = set(line.split()[-1] for line in nm_out.splitlines() if line and not line.startswith("U "))            
+            libs_map[str(so)] = symbols
+        except Exception:
+            continue
+    return libs_map
+
+
+def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str]):
+    relevant_libs_map: Dict[Path, List[str]] = {}
+    
+    for lib, method in lib_methods_map.items():
+        matched = [m for m in stackTrace if any(m in s for s in method)]
+                    
+        for x in ("main", "abort"): 
+            if x in matched:
+                matched.remove(x)
+        
+        if matched:
+            relevant_libs_map.setdefault(lib, []).extend(matched)
+            
+    return relevant_libs_map
