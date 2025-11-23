@@ -24,14 +24,14 @@ class CrashSummary:
     Fields:
         ProcessTermination: The first line in the section, describing how the process died.
         StackTrace:         Middle lines (except the last 3), preserved order.
-        JNIBridgeMethod:    The line at position (len(section) - 3).
+        JNIBridgeMethod:    Call from Java to native method.
         FuzzHarnessEntry:   The line at position (len(section) - 2).
         ProgramEntry:       The last line in the section (typically 'main').
     """
     ProcessTermination: str
     StackTrace: List[str]
-    JavaCallGraph: List[str]
     JNIBridgeMethod: str
+    JavaCallGraph: List[str]
     FuzzHarnessEntry: str
     ProgramEntry: str
     
@@ -136,11 +136,10 @@ class Crashes:
 
             # Initialize defaults to keep behavior predictable even with short sections
             ProcessTermination = cur[0] if len(cur) >= 1 else ""
-            JNIBridgeMethod = method
+            JNIBridgeMethod = None
             FuzzHarnessEntry = ""
             ProgramEntry = ""
             StackTrace: List[str] = []
-            StackTrace.append(method)
 
             # Map last 4 lines (if present) to the labeled fields
             n = len(cur)
@@ -157,7 +156,9 @@ class Crashes:
             
             callGraph = None
             if haveCallGraph:
-                callGraph = getFlowGraph(apk, JNIBridgeMethod, debug=debug)
+                callGraph = getFlowGraph(apk, method, debug=debug)
+                if len(callGraph) > 0:
+                    JNIBridgeMethod = callGraph[0].split(" -> ")[-1].strip()
             
             results.append(
                 CrashSummary(
