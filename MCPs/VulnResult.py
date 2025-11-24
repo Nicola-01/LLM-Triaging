@@ -98,6 +98,7 @@ class VulnResult(BaseModel):
     Result of a vulnerability assessment for a single crash.
     """
     
+    chain_of_thought: List[str] = Field(..., description="A detailed, step-by-step internal monologue BEFORE classifying")
     is_vulnerability: bool = Field(..., description="True if the crash likely reflects a real code vulnerability.")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in [0-1]; >=0.9 confirmed, <0.3 unlikely.")
     reasons: List[str] = Field(default_factory=list, description="Key bullet points supporting the decision.")
@@ -119,6 +120,7 @@ class VulnResult(BaseModel):
         Pretty text rendering of the assessment, including stack, reasons, evidence,
         and exploit information. Uses compact '(none)' markers when lists are empty.
         """
+        CoT_str = " (none)" if not self.chain_of_thought else "\n" + textwrap.indent("\n".join(f"- {r}" for r in self.chain_of_thought), "        ")
         verdict = "LIKELY VULNERABILITY" if self.is_vulnerability else "LIKELY NOT A VULNERABILITY"
         reasons_str = " (none)" if not self.reasons else "\n" + textwrap.indent("\n".join(f"- {r}" for r in self.reasons), "        ")
         libs_str = ", ".join(self.affected_libraries) if self.affected_libraries else "(none)"
@@ -151,6 +153,7 @@ class VulnResult(BaseModel):
 
         return (
             "VulnDetection:\n"
+            f"  chain_of_thought  : {CoT_str}\n"
             f"  Verdict           : {verdict}\n"
             f"  Confidence        : {self.confidence:.2f}\n"
             f"  Severity          : {self.severity or '(unknown)'}\n"

@@ -23,6 +23,10 @@ Concrete examples that qualify as *vulnerable*:
 
 Crashes that **should NOT** be labeled as vulnerable include:  
 - Infinite loops or benign aborts (non-security relevant DoS)  
+- **Local Denial of Service (App Crash):** If the only impact is that the application crashes/restarts, this is a FUNCTIONAL BUG, not a security vulnerability.
+    - EXCEPTION: Unless the crash causes a persistent "boot loop" preventing device usage or affects a privileged system service (system_server).
+- **Null Pointer Dereferences (Read/Write near 0x0):** Crashes accessing low memory addresses (e.g., 0x0, 0x3, 0x18) are typically caused by missing null checks. Unless you can prove the address offset is large and attacker-controlled (mapping a valid page), classify as "Benign Bug".
+- Harness or environment faults.
 - Harness or environment faults (e.g., NULL passed by harness, invalid ownership)  
 - Crashes under unrealistic or malformed inputs not reachable from the app  
 - Sanitizer/allocator aborts without supporting unsafe app-level code evidence  
@@ -79,8 +83,8 @@ If you use `search_functions_by_name` form the Ghidra MCP, that retunr `<functio
 
 ## 6. Output schema (strict JSON, no prose outside)
 Return a JSON object with:
-
-- `is_vulnerability`: boolean  
+- `chain_of_thought`: string. **MANDATORY.** Write a detailed, step-by-step internal monologue BEFORE classifying.
+- `is_vulnerability`: boolean 
 - `confidence`: float (0.0-1.0)  
 - `reasons`: list of short bullet strings  
 - `classification`: one of  
