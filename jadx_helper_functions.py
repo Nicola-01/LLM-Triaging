@@ -86,7 +86,7 @@ def start_jadx_gui(apk_path: str, jadx_cmd: str = "jadx-gui", timeout_sec: int =
         )
         atexit.register(kill_jadx)
         _install_signal_handlers()
-
+        
         # Start a background thread to read log lines
         t = threading.Thread(
             target=_reader_thread, args=(JADX_PROC.stdout, debug,), daemon=True

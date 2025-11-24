@@ -177,7 +177,7 @@ class Crashes:
                     JavaCallGraph=callGraph,
                     FuzzHarnessEntry=FuzzHarnessEntry,
                     ProgramEntry=ProgramEntry,
-                    LibMap=find_relevant_libs(lib_methods_map, StackTrace)
+                    LibMap=find_relevant_libs(lib_methods_map, StackTrace, method)
                 )
             )
             cur = []
@@ -303,16 +303,21 @@ def get_libs_method_map(apk: Path, debug: bool = False) -> Dict[str, List[str]]:
     return libs_map
 
 
-def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str]):
+def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str], method: str):
     relevant_libs_map: Dict[Path, List[str]] = {}
+    stackTrace.append(method)
     
-    for lib, method in lib_methods_map.items():
-        matched = [m for m in stackTrace if any(m in s for s in method)]
+    for lib, methods in lib_methods_map.items():
+        matched = [m for m in stackTrace if any(m in s for s in methods)]
                     
-        for x in ("main", "abort"): 
+        for x in ("main", "abort", "memmove"): 
             if x in matched:
                 matched.remove(x)
-        
+                
+        for m in matched:
+            if m.startswith("__"):
+                matched.remove(m)
+                
         if matched:
             relevant_libs_map.setdefault(lib, []).extend(matched)
             

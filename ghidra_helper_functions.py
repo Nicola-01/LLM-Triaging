@@ -116,7 +116,7 @@ def openGhidraGUI(import_files: list, timeout = 45, debug = False):
     for f in import_files:
         cmd += f" -i {shlex.quote(f)}"
         
-    print_message(GREEN, "INFO", "Launching Ghidra GUI. Opening depends on the number of libs.")
+    print_message(GREEN, "INFO", f"Launching Ghidra GUI with {len(import_files)} lib(s). Opening depends on the number of libs.")
     if debug:
         print_message(CYAN, "DEBUG", f"Importing: {import_files}")
     try:

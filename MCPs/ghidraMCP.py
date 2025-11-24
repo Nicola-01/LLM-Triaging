@@ -60,19 +60,19 @@ def startGhidraWith(libs: List[str], debug: bool = False):
     
     sorted_libs = sorted(libs, key=lambda s: s.lower())
             
-    openGhidraGUI(sorted_libs, timeout=45*(len(sorted_libs)+1), debug=debug)
+    openGhidraGUI(sorted_libs, timeout=60*(len(sorted_libs)+2), debug=debug)
 
     with open(FILE_AVAILABLE, "w", encoding="utf-8") as f:
         libs = "\n".join(sorted_libs)
         libs = re.sub(r'APKs/[^/]+/lib/[^/]+/', '', libs)
         f.write(libs)
-        
+                
     openGhidraFile(sorted_libs, sorted_libs[0], debug=debug)
     with open(FILE_CURRENT, "w", encoding="utf-8") as f:
         f.write(sorted_libs[0])
         
     if debug:
-        print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(libs.keys())} relevant libs: {list(libs.keys())}")
+        print_message(CYAN, "DEBUG", f"Starting MCP servers with {len(sorted_libs)} relevant libs: {sorted_libs}")
     
 async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 60, verbose: bool = False, debug: bool = False) -> AnalysisResults:
     """
@@ -91,13 +91,18 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
         
         libs = crash.LibMap.keys()
         libs = sorted(libs, key=lambda s: s.lower())
+        
+        if len(libs) == 0:
+            print_message(YELLOW, "Warning", f"The method {crash.JNIBridgeMethod}, is not in the .so files")
+        
         if last_libs_open is None or set(last_libs_open) != set(libs):
-            startGhidraWith(libs)
+            startGhidraWith(libs,debug=debug)
             last_libs_open = libs
         
         start = time.time()
         if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
             vuln = VulnResult(
+                chain_of_thought = [],
                 is_vulnerability = 0,
                 confidence = 1.0,
                 reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
@@ -109,7 +114,7 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
                 assumptions = [],
                 limitations = []
             )
-            results.append(AnalysisResult(crash=crash, assessment=vuln))
+            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
             continue
         
         crash_str = str(crash)
@@ -130,8 +135,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
                 try:
                     resp = await agent.run(query)
                     vuln = resp.output
-                    if debug:
-                        print_message(GREEN, "LLM-USAGE", resp.usage())
                 except Exception as e:
                     if debug:
                         print_message(RED, "ERROR", str(e))
@@ -165,11 +168,14 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
             is_oss_model = True
             vuln: VulnResult = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
                                         output_type=VulnResult, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
-            results.append(AnalysisResult(crash=crash, assessment=vuln, 
-                                statistics=Statistics(time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)))))        
+            statistics=Statistics(time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)))
+            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=statistics))        
 
         if verbose:
             print_message(PURPLE, "RESPONSE", vuln)
+        if debug:
+            print_message(BLUE, "USAGE", statistics)
+            
         
     closeGhidraGUI(debug=debug)
 

@@ -193,6 +193,7 @@ def _normalize_name_for_filter(s: str) -> str:
         base = base[:-4]
     if base.startswith("#"):
         return ""
+    base = re.sub(r'#.*', '', base).strip()
     return base
 
 def load_filter_set(apk_list_path: Optional[Path], *, debug: bool=False) -> Optional[set]:
@@ -291,7 +292,7 @@ def run(args):
     if not pairs:
         print_message(YELLOW, "WARN", "No pairs found. Exiting.")
         sys.exit(0)
-        
+                
     previous_appname = None
     previous_appMetadata = None
     for pair in pairs:
