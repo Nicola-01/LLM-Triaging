@@ -4,6 +4,7 @@ Module overview:
 - Important classes: CrashSummary, Crashes.
 """
 
+import copy
 import shutil
 import subprocess
 import textwrap
@@ -28,8 +29,10 @@ class CrashSummary:
         ProcessTermination: The first line in the section, describing how the process died.
         StackTrace:         Middle lines (except the last 3), preserved order.
         JNIBridgeMethod:    Call from Java to native method.
+        JavaCallGraph:      The filtered Java call chain leading to the JNI bridge method, derived from the FlowDroid call graph.
         FuzzHarnessEntry:   The line at position (len(section) - 2).
         ProgramEntry:       The last line in the section (typically 'main').
+        LibMap:             The set of native libraries relevant to the crash, identified by matching symbol tables with the stack trace.
     """
     ProcessTermination: str
     StackTrace: List[str]
@@ -149,7 +152,7 @@ class Crashes:
 
             # Initialize defaults to keep behavior predictable even with short sections
             ProcessTermination = cur[0] if len(cur) >= 1 else ""
-            JNIBridgeMethod = None
+            JNIBridgeMethod = method
             FuzzHarnessEntry = ""
             ProgramEntry = ""
             StackTrace: List[str] = []
@@ -168,6 +171,8 @@ class Crashes:
                 callGraph = getFlowGraph(apk, method, debug=debug)
                 if len(callGraph) > 0:
                     JNIBridgeMethod = callGraph[0].split(" -> ")[-1].strip()
+            else:
+                callGraph = ["The callgraph is not available"]
             
             results.append(
                 CrashSummary(
@@ -177,7 +182,7 @@ class Crashes:
                     JavaCallGraph=callGraph,
                     FuzzHarnessEntry=FuzzHarnessEntry,
                     ProgramEntry=ProgramEntry,
-                    LibMap=find_relevant_libs(lib_methods_map, StackTrace, method)
+                    LibMap=find_relevant_libs(lib_methods_map, copy.deepcopy(StackTrace), method)
                 )
             )
             cur = []
@@ -306,7 +311,7 @@ def get_libs_method_map(apk: Path, debug: bool = False) -> Dict[str, List[str]]:
 def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str], method: str):
     relevant_libs_map: Dict[Path, List[str]] = {}
     stackTrace.append(method)
-    
+        
     for lib, methods in lib_methods_map.items():
         matched = [m for m in stackTrace if any(m in s for s in methods)]
                     

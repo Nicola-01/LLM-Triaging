@@ -94,12 +94,7 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
         
         if len(libs) == 0:
             print_message(YELLOW, "Warning", f"The method {crash.JNIBridgeMethod}, is not in the .so files")
-        
-        if last_libs_open is None or set(last_libs_open) != set(libs):
-            startGhidraWith(libs,debug=debug)
-            last_libs_open = libs
-        
-        start = time.time()
+                
         if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
             vuln = VulnResult(
                 chain_of_thought = [],
@@ -117,14 +112,17 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
             results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
             continue
         
+        if last_libs_open is None or set(last_libs_open) != set(libs):
+            startGhidraWith(libs,debug=debug)
+            last_libs_open = libs
+        start = time.time()
+        
         crash_str = str(crash)
         print_message(BLUE, "INFO", f"Assessing crash #{i}") 
 
         query = (
             f"Assess the following crash and provide a vulnerability assessment in the specified format.\n"
             f"{crash_str}"
-            # f"This is a map where each key is a Path to a relevant .so library, "
-            # f"and the value is the list of JNI methods it implements: \n{libs}"
         )
 
         if verbose:

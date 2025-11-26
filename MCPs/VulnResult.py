@@ -153,7 +153,7 @@ class VulnResult(BaseModel):
 
         return (
             "VulnDetection:\n"
-            f"  chain_of_thought  : {CoT_str}\n"
+            f"  Chain of Thought  : {CoT_str}\n"
             f"  Verdict           : {verdict}\n"
             f"  Confidence        : {self.confidence:.2f}\n"
             f"  Severity          : {self.severity or '(unknown)'}\n"
