@@ -122,6 +122,10 @@ def parse_args():
 
 # ---------- Orchestration ----------
 
+SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
+os.makedirs(SHARED_DIR, exist_ok=True)
+APK_CURRENT = os.path.join(SHARED_DIR, "current_apk.txt")
+
 async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, args, debug=False) -> AnalysisContainer:
     """
         Orchestrate the end-to-end vulnerability assessment for a single APK + crash report.
@@ -156,6 +160,9 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
           - app/package/SDK/version fields (when available)
           - apk_path/apk_sha256, jni_methods, native_functions
     """
+    
+    with open(APK_CURRENT, "w", encoding="utf-8") as f:
+        f.write(str(apk))
     
     if not is_valid_apk(apk):
         print_message(RED, "ERROR", f"Invalid APK: {apk}")

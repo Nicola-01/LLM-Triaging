@@ -308,9 +308,12 @@ def get_libs_method_map(apk: Path, debug: bool = False) -> Dict[str, List[str]]:
     return libs_map
 
 
-def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str], method: str):
+def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[str] = None, method: str = None):
     relevant_libs_map: Dict[Path, List[str]] = {}
-    stackTrace.append(method)
+    if stackTrace is None:
+        stackTrace = []
+    if not (method is None):
+        stackTrace.append(method)
         
     for lib, methods in lib_methods_map.items():
         matched = [m for m in stackTrace if any(m in s for s in methods)]

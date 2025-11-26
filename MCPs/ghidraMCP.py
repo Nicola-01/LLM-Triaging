@@ -29,7 +29,7 @@ from utils import *
 SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
 os.makedirs(SHARED_DIR, exist_ok=True)
 FILE_AVAILABLE = os.path.join(SHARED_DIR, "available.txt")
-FILE_CURRENT = os.path.join(SHARED_DIR, "current.txt")
+FILE_CURRENT = os.path.join(SHARED_DIR, "current_lib.txt")
 
 # export GHIDRA_INSTALL_DIR="/snap/ghidra/current/ghidra_11.4_PUBLIC"
 def make_ghidra_server(debug: bool = False, verbose: bool = False, timeout: int = 120) -> MCPServerStdio: 

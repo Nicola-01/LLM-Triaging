@@ -7,6 +7,8 @@
 # ///
 
 import os
+from pathlib import Path
+import re
 import sys
 import tempfile
 import requests
@@ -40,7 +42,9 @@ if 'DISPLAY' not in os.environ:
 #         print(f"[WARN] .Xauthority non trovato in {real_home}", file=sys.stderr)
             
     
-from ghidra_helper_functions import closeGhidraFile, openGhidraFile
+from ghidra_helper_functions import closeGhidraFile, closeGhidraGUI, openGhidraFile, openGhidraGUI
+from MCPs.CrashSummary import find_relevant_libs, get_libs_method_map
+
 
 DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
 
@@ -319,7 +323,8 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
 SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
 os.makedirs(SHARED_DIR, exist_ok=True)
 FILE_AVAILABLE = os.path.join(SHARED_DIR, "available.txt")
-FILE_CURRENT = os.path.join(SHARED_DIR, "current.txt")
+FILE_CURRENT = os.path.join(SHARED_DIR, "current_lib.txt")
+APK_CURRENT = os.path.join(SHARED_DIR, "current_apk.txt")
 
 def _read_lines(filepath):
     """Helper for reading clean lines from a txt file."""
@@ -384,6 +389,54 @@ def open_lib(lib_name: str):
     with open(FILE_CURRENT, "w", encoding="utf-8") as f:
         f.write(lib_name)
     
+def open_external_method(method_name: str):
+    """
+    Searches for the given method in the APK's native libraries and imports the libs.
+
+    Args:
+        method_name (str): Exact JNI method name to locate.
+
+    Raises:
+        Exception: If the method cannot be found or is already available.
+    """
+    
+    apk_path = Path(_read_lines(APK_CURRENT)[0])
+    
+    lib_method_map = get_libs_method_map(apk_path)
+    new_lib_map = find_relevant_libs(lib_method_map, method_name).keys()
+    new_lib = new_lib_map.keys()
+    
+    files = _read_lines(FILE_AVAILABLE)
+    
+    prev_size = len(files)
+    
+    if len(new_lib) == 0:
+        raise Exception("The method could not be found.")
+    
+    for n in new_lib:
+        files.append(n)
+        
+    new_size = len(files)
+    if new_size == prev_size:
+        for lib, method in new_lib_map.items():  # for name, age in dictionary.iteritems():  (for Python 2.x)
+            if method == method_name:
+                raise Exception(f"The method is alreadi available at {lib}")
+        raise Exception("The method is not available.")
+    
+    closeGhidraGUI()
+    
+    sorted_libs = sorted(files, key=lambda s: s.lower())
+    
+    openGhidraGUI(sorted_libs, timeout=60*(len(sorted_libs)+2))
+
+    with open(FILE_AVAILABLE, "w", encoding="utf-8") as f:
+        libs = "\n".join(sorted_libs)
+        libs = re.sub(r'APKs/[^/]+/lib/[^/]+/', '', libs)
+        f.write(libs)
+                
+    openGhidraFile(sorted_libs, sorted_libs[0])
+    with open(FILE_CURRENT, "w", encoding="utf-8") as f:
+        f.write(sorted_libs[0])
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
