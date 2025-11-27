@@ -315,7 +315,7 @@ Each `report.json` contains:
 {
   "analysis": {
     "tool": {
-      "model_name": "gpt-5",
+      "model_name": "gpt-5.1",
       "apk_path": "/path/to/base.apk",
       "version": "1.0"
     },
@@ -326,24 +326,39 @@ Each `report.json` contains:
       "target_sdk": 34,
       ...
     },
-    "libs": [
-      "libnative.so",
-      "libcrypto.so"
-    ],
-    "analysisResults": {
-      "is_vulnerable": true,
-      "confidence": 0.85,
-      "severity": "HIGH",
-      "reasons": [
-        "Buffer overflow in native function parse_data",
-        "No bounds checking before memcpy operation",
-        ...
-      ],
-      "evidence": [...],
-      "next_steps": [...],
-      "assumptions": [...],
-      "limitations": [...]
-    }
+    "analysisResults": [
+      {
+         "crash": { 
+            "StackTrace": [...],
+            "JavaCallGraph": [...],
+            "LibMap": { "...": [...] }
+         }
+         "assessment": {
+          "chain_of_thought": [
+            "Reasoning step 1...",
+            "Reasoning step 2...",
+            "..."
+          ],
+          "is_vulnerable": true/false,
+         }
+         "is_vulnerable": true,
+         "confidence": [0-1],
+         "cwe_ids": [...],
+         "severity": "LOW-HIGH",
+         "reasons": [...],
+         "evidence": [...],
+         "assumptions": [...],
+         "limitations": [...],
+         ...
+         "exploit": {
+            ...
+            "prerequisites": [...]
+            "exploit_pipeline": [...]
+            "poc_commands": [...]
+            ...
+         }
+      }
+    ]
   }
 }
 ```
