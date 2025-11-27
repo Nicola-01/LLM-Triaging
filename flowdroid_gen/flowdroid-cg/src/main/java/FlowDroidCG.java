@@ -1,4 +1,5 @@
 
+import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
 import static java.lang.System.exit;
@@ -10,9 +11,11 @@ import java.util.Iterator;
 import org.xmlpull.v1.XmlPullParserException;
 
 import soot.Scene;
+import soot.SootClass;
 import soot.SootMethod;
 import soot.jimple.infoflow.android.InfoflowAndroidConfiguration;
 import soot.jimple.infoflow.android.SetupApplication;
+import soot.jimple.infoflow.android.resources.ARSCFileParser;
 import soot.jimple.toolkits.callgraph.Edge;
 
 public class FlowDroidCG {
@@ -34,11 +37,13 @@ public class FlowDroidCG {
         }
 
         InfoflowAndroidConfiguration config = new InfoflowAndroidConfiguration();
-        config.getAnalysisFileConfig().setAndroidPlatformDir(platforms_dir);
-        config.getAnalysisFileConfig().setTargetAPKFile(apk_path);
+        config.getAnalysisFileConfig().setAndroidPlatformDir(new File(platforms_dir));
+        config.getAnalysisFileConfig().setTargetAPKFile(new File(apk_path));
         config.setMergeDexFiles(true);
+
+        ARSCFileParser.STRICT_MODE = false;
         
-        // config.getCallbackConfig().setEnableCallbacks(true); // to del
+        config.getCallbackConfig().setEnableCallbacks(true); // to del
         // config.setCodeEliminationMode(InfoflowConfiguration.CodeEliminationMode.NoCodeElimination); // to del
         // config.getPathConfiguration().setPathReconstructionMode(InfoflowConfiguration.PathReconstructionMode.Precise); // to del
 
@@ -68,6 +73,17 @@ public class FlowDroidCG {
                 }
             }
             writer.write("  ]\n}");
+        }
+
+        System.out.println();
+        System.out.println();
+        System.out.println();
+
+        for (SootClass sc : Scene.v().getApplicationClasses()) {
+            for (SootMethod m : sc.getMethods()) {
+                if (m.getName().contains("method"))
+                System.err.println(m);
+            }
         }
 
         System.out.println("Callgraph saved to: " + outputFilePath);

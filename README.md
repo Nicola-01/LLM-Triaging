@@ -331,7 +331,7 @@ Each `report.json` contains:
       "libcrypto.so"
     ],
     "analysisResults": {
-      "is_vulnerability": true,
+      "is_vulnerable": true,
       "confidence": 0.85,
       "severity": "HIGH",
       "reasons": [
@@ -350,7 +350,7 @@ Each `report.json` contains:
 
 ### Key Fields
 
-- **is_vulnerability**: Boolean indicating if the crash likely represents a vulnerability
+- **is_vulnerable**: Boolean indicating if the crash likely represents a vulnerability
 - **confidence**: Float between 0 and 1 indicating the model's confidence
 - **severity**: Risk level (e.g., `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`)
 - **reasons**: List of explanations for the classification

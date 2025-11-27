@@ -16,6 +16,7 @@ from MCPs.geminiCLI import GeminiCliMaxRetry, query_gemini_cli
 from MCPs.jadxMCP import make_jadx_server
 from MCPs.prompts.Shimming_prompts import SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
+from MCPs.prompts.VulnDetection_prompt_WITHOUT_CG import DETECTION_SYSTEM_PROMPT_WITOUT_CG
 from MCPs.shimming_agent import oss_model
 from MCPs.VulnResult import AnalysisResult, AnalysisResults, Statistics, VulnResult
 from ghidra_helper_functions import *
@@ -83,35 +84,44 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
     ghidra_server = make_ghidra_server(timeout=timeout)
     jadx_server = make_jadx_server(timeout=timeout)
 
+    create_agent = True
+    
     results = AnalysisResults()
     last_libs_open = None
-    
-    agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
     for i, crash in enumerate(crashes, start=1):
+        
+        if create_agent:
+            if crash.JavaCallGraph is None or len(crash.JavaCallGraph) == 0: # The call graph is the same for all the crashes of the same methods
+                print_message(YELLOW, "WARNING", "No Java Call Graph detected, triaging without CG")
+                agent = get_agent(DETECTION_SYSTEM_PROMPT_WITOUT_CG, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
+            else:
+                agent = get_agent(DETECTION_SYSTEM_PROMPT, VulnResult, [jadx_server, ghidra_server], model_name=model_name)
+            create_agent = False
         
         libs = crash.LibMap.keys()
         libs = sorted(libs, key=lambda s: s.lower())
         
         if len(libs) == 0:
             print_message(YELLOW, "Warning", f"The method {crash.JNIBridgeMethod}, is not in the .so files")
+           
+        # # Early skip if the Java call graph is empty     
+        # if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
+        #     vuln = VulnResult(
+        #         chain_of_thought = [],
+        #         is_vulnerable = 0,
+        #         confidence = 1.0,
+        #         reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
+        #         cwe_ids = [],
+        #         severity = None,
+        #         affected_libraries = libs,
+        #         evidence = [],
+        #         recommendations = [],
+        #         assumptions = [],
+        #         limitations = []
+        #     )
+        #     results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
+        #     continue
                 
-        if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
-            vuln = VulnResult(
-                chain_of_thought = [],
-                is_vulnerability = 0,
-                confidence = 1.0,
-                reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
-                cwe_ids = [],
-                severity = None,
-                affected_libraries = libs,
-                evidence = [],
-                recommendations = [],
-                assumptions = [],
-                limitations = []
-            )
-            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
-            continue
-        
         if last_libs_open is None or set(last_libs_open) != set(libs):
             startGhidraWith(libs,debug=debug)
             last_libs_open = libs

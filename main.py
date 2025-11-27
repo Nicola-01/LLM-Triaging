@@ -154,7 +154,7 @@ async def run_detection(apk: Path, appMetadata: AppMetadata, backtraces: Path, a
     -------
     VulnDetection
         Structured decision:
-          - is_vulnerability (bool)
+          - is_vulnerable (bool)
           - confidence (float in [0, 1])
           - reasons (List[str])
           - app/package/SDK/version fields (when available)

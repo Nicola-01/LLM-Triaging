@@ -236,6 +236,8 @@ def getFlowGraph(app_path: Path, JNIBridgeMethod: str, max_depth = 5, max_paths 
     bridgeMethod = JNIBridgeMethod.split("_") 
     start_method = None 
     max_i = 0
+    if "Java_com_ubikey_jni_UbikeyJni_j" in JNIBridgeMethod and bridgeMethod[-1].startswith("j"):
+        bridgeMethod[-1] = bridgeMethod[-1][1:]
     for i in range(1,len(bridgeMethod)):
         test_method = "_".join(bridgeMethod[-i:])
         ret = rg(test_method, callgraph_file)

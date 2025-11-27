@@ -166,13 +166,11 @@ class Crashes:
                     ProgramEntry = line
                 StackTrace.append(line)
             
-            callGraph = None
+            callGraph = []
             if haveCallGraph:
                 callGraph = getFlowGraph(apk, method, debug=debug)
                 if len(callGraph) > 0:
                     JNIBridgeMethod = callGraph[0].split(" -> ")[-1].strip()
-            else:
-                callGraph = ["The callgraph is not available"]
             
             results.append(
                 CrashSummary(
