@@ -74,6 +74,6 @@ def get_agent(system_prompt: str, output_type, toolsets: List[MCPServerStdio], m
         system_prompt=system_prompt,
         output_type=output_type,
         retries=4,                 # retry per tool & output validation
-        output_retries=4,          # esplicito (altrimenti = retries)
+        output_retries=4,
         toolsets=toolsets,
     )

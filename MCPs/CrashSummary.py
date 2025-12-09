@@ -35,11 +35,11 @@ class CrashSummary:
         LibMap:             The set of native libraries relevant to the crash, identified by matching symbol tables with the stack trace.
     """
     ProcessTermination: str
+    FuzzHarnessEntry: str
+    ProgramEntry: str
     StackTrace: List[str]
     JNIBridgeMethod: str
     JavaCallGraph: List[str]
-    FuzzHarnessEntry: str
-    ProgramEntry: str
     LibMap: Dict[str, List[str]]
     
     def __str__(self) -> str:
@@ -312,6 +312,11 @@ def find_relevant_libs(lib_methods_map: Dict[Path, List[str]], stackTrace: List[
         stackTrace = []
     if not (method is None):
         stackTrace.append(method)
+        if "_1" in method:
+            tmp = method.replace("_1", ";")
+            tmp = tmp.split("_")[-1]
+            tmp = tmp.replace(";", "_")
+            stackTrace.append(tmp)
         
     for lib, methods in lib_methods_map.items():
         matched = [m for m in stackTrace if any(m in s for s in methods)]

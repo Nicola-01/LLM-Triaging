@@ -124,6 +124,7 @@ def openGhidraGUI(import_files: list, timeout = 45, debug = False):
         process.communicate(timeout=timeout) 
     except Exception as e:
         print_message(RED, "ERROR", f"Failed to launch Ghidra CLI: {e}")
+        sys.exit(1)
         return None
         
     process.wait()

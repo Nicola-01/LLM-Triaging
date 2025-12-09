@@ -102,7 +102,9 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
         libs = sorted(libs, key=lambda s: s.lower())
         
         if len(libs) == 0:
-            print_message(YELLOW, "Warning", f"The method {crash.JNIBridgeMethod}, is not in the .so files")
+            print_message(RED, "ERROR", f"The method is not in the .so files")
+            return results
+            
            
         # # Early skip if the Java call graph is empty     
         # if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
@@ -144,8 +146,7 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
                     resp = await agent.run(query)
                     vuln = resp.output
                 except Exception as e:
-                    if debug:
-                        print_message(RED, "ERROR", str(e))
+                    print_message(RED, "ERROR", str(e))
                     continue
                 
             usage = resp.usage()
@@ -173,7 +174,6 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
             results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=statistics))
         else:
             print_message(RED,"oss",model_name)
-            is_oss_model = True
             vuln: VulnResult = await oss_model(system_prompt=SHIMMING_VULNDECT_SYSTEM_PROMPT, prompt=query, 
                                         output_type=VulnResult, model_ulr=os.getenv('OLLAMA_BASE_URL'), model_name=model_name, debug=debug)
             statistics=Statistics(time=time.strftime('%H:%M:%S', time.gmtime(time.time() - start)))

@@ -144,7 +144,7 @@ Return a JSON object with:
 - `limitations`: short list of missing or uncertain factors  
 
 - `exploit`: null OR an object with:
-    - `exploitability`: string ('none','unknown','theoretical','practical')
+    - `exploitability`: string ('unknown','theoretical','practical')
     - `trigger_method`: string or null  
     - `prerequisites`: list of strings  
     - `exploit_pipeline`: list of strings 

@@ -346,7 +346,8 @@ def list_available_libs() -> list:
     """
     files = _read_lines(FILE_AVAILABLE)
     if not files:
-        raise Exception("No libs found in GHIDRA_FILES environment variable.")
+        return "No libs found in GHIDRA_FILES environment variable."
+        # raise Exception("No libs found in GHIDRA_FILES environment variable.")
     return files
 
 @mcp.tool()
@@ -361,7 +362,8 @@ def get_current_lib_name() -> str:
     """
     ret = _read_lines(FILE_CURRENT)
     if ret[0] == None:
-        raise Exception("There are not open files, open one with `open_lib`")
+        return "There are not open files, open one with `open_lib`"
+        # raise Exception("There are not open files, open one with `open_lib`")
     else:
         return ret[0]
 
@@ -378,16 +380,20 @@ def open_lib(lib_name: str):
     """
     files = _read_lines(FILE_AVAILABLE)
     if lib_name not in files:
-        raise Exception(f"The lib {lib_name} doesn't exists in current Ghidra session, use one of this {files}")
+        return f"The lib {lib_name} doesn't exists in current Ghidra session, use one of this {files}"
+        # raise Exception(f"The lib {lib_name} doesn't exists in current Ghidra session, use one of this {files}")
     
     if lib_name == get_current_lib_name():
-        raise Exception(f"The lib {lib_name} is currently open")
+        return f"The lib {lib_name} is currently open"
+        # raise Exception(f"The lib {lib_name} is currently open")
     
     for f in files:
         closeGhidraFile(f, debug=True)
     openGhidraFile(files, lib_name)
     with open(FILE_CURRENT, "w", encoding="utf-8") as f:
         f.write(lib_name)
+        
+    return safe_get("string", {"outcome": f"The lib {lib_name} has been opened successfully."})
     
 def open_external_method(method_name: str):
     """
@@ -411,17 +417,20 @@ def open_external_method(method_name: str):
     prev_size = len(files)
     
     if len(new_lib) == 0:
-        raise Exception("The method could not be found.")
+        return "The method could not be found."
+        # raise Exception("The method could not be found.")
     
     for n in new_lib:
         files.append(n)
-        
-    new_size = len(files)
+    
+    new_size = len(set(files))
     if new_size == prev_size:
         for lib, method in new_lib_map.items():  # for name, age in dictionary.iteritems():  (for Python 2.x)
             if method == method_name:
-                raise Exception(f"The method is alreadi available at {lib}")
-        raise Exception("The method is not available.")
+                return f"The method {method_name} is already available at {lib}"
+                # raise Exception(f"The method is already available at {lib}")
+        return "The method is not available."
+        # raise Exception("The method is not available.")
     
     closeGhidraGUI()
     
@@ -437,6 +446,8 @@ def open_external_method(method_name: str):
     openGhidraFile(sorted_libs, sorted_libs[0])
     with open(FILE_CURRENT, "w", encoding="utf-8") as f:
         f.write(sorted_libs[0])
+        
+    return f"The method {method_name} has been found and the relevant libs have been imported: {', '.join(new_lib).strip()}."
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
