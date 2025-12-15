@@ -1,0 +1,223 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/tw.gov.tra.twtraffic/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "台鐵e訂通",
+      "package": "tw.gov.tra.twtraffic",
+      "min_sdk": 21,
+      "target_sdk": 31,
+      "version_name": "2.1.2",
+      "version_code": "419"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strchr_default",
+          "StackTrace": [
+            "strchr_default",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/tw.gov.tra.twtraffic/lib/arm64-v8a/libtbxml.so": [
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is strchr_default/strchr wrapper in libtbxml.so, but decompiled strchr is just a thunk calling PTR_strchr_00112f88, so real logic is in underlying C library; next app frame is decodeBytes, which is just an indirect call via function pointer PTR_decodeBytes_00112f60.",
+            "Decompiled Java_za_co_twyst_tbxml_TBXML_jniParse shows typical pattern: it obtains byte[] length via JNI env function, allocates length+1 bytes with calloc, then calls env->GetByteArrayRegion (or similar) to copy Java bytes into native buffer and NUL-terminate. Then it calls decodeBytes(puVar2), and returns puVar2 as a native document handle. No memcpy/memmove, only JNI-mediated copy with correct buffer size.",
+            "The crash in strchr_default suggests that decodeBytes or a downstream XML parsing function eventually calls strchr on some string pointer; however decodeBytes body is unknown (indirect via function ptr) and strchr is an imported libc function. There is no direct evidence in the visible code of an out-of-bounds read/write: we only see safe allocations sized from the byte[] length and no unsafe arithmetic.",
+            "The fuzzer harness calls fuzz_one_input → Java_za_co_twyst_tbxml_TBXML_jniParse with arbitrary bytes, but in real app, TBXML.parse(String) converts a Java String to bytes and passes it. That is one layer of input (KML/XML string) but still normal for an XML parser. Crashes inside libc strchr when parsing arbitrary bytes are often due to decodeBytes assuming NUL-terminated or well-formed text; however, missing NULL checks causing strchr on a NULL pointer typically manifests as a null-deref. We do not have fault address or confirmation that input controls the pointer rather than just the contents.",
+            "Because decodeBytes implementation is opaque (function pointer, not decompiled) and strchr wrapper is just a call into external symbol, we cannot confirm any specific unsafe operation like OOB-read. We also cannot see length checks or internal parser behavior. The stack and decompiled code provide no firm code-level evidence of a memory safety violation; the crash could equally be due to harness misuse, invalid function pointer, or a benign null pointer dereference inside decodeBytes. Under assessment rules, absent clear proof of attacker-influenced memory corruption, this must be treated as non-vulnerability with low confidence about any security impact.",
+            "Given that TBXML is a local XML/KML parser used within an app and jniParse returns a handle that is only used by the same process, even if there were a parsing bug it would likely be at most a local DoS (crash of the app) when given malformed XML. That does not meet the bar for a security vulnerability per the rubric unless it affects a privileged process or causes a boot loop, which is not the case here."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.25,
+          "reasons": [
+            "strchr and decodeBytes are thunks/indirect calls; actual parsing implementation is not visible, so no direct evidence of OOB-read/write or UAF",
+            "JNI entry jniParse allocates buffers based on exact Java byte[] length and uses JNI copy; no unsafe memcpy/memmove observed",
+            "Likely effect is at most a crash of the calling app when parsing malformed XML/KML, which is classified as functional DoS, not a security vulnerability under given rules"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "file": "libtbxml.so",
+              "snippet": "puVar2 = (undefined8 *)calloc(1,0x38);\n  iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n  *(int *)(puVar2 + 1) = iVar1;\n  pvVar3 = calloc(1,(long)(iVar1 + 1));\n  lVar4 = *param_1;\n  *puVar2 = pvVar3;\n  pcVar5 = *(code **)(lVar4 + 0x640);\n  ...\n  (*pcVar5)(param_1,param_3,0,iVar1,pvVar3);\n  decodeBytes(puVar2);",
+              "note": "JNI allocates buffer based on byte[] length+1, then uses JNI env to fill it and NUL-terminate before calling decodeBytes"
+            },
+            {
+              "function": "decodeBytes",
+              "file": "libtbxml.so",
+              "snippet": "(*(code *)PTR_decodeBytes_00112f60)();",
+              "note": "decodeBytes is an indirect call via function pointer; implementation not available"
+            },
+            {
+              "function": "strchr",
+              "address": "0x00100f80",
+              "file": "libtbxml.so",
+              "snippet": "pcVar1 = (char *)(*(code *)PTR_strchr_00112f88)(__s,__c);",
+              "note": "strchr is a thin wrapper to external implementation; crash is inside libc, not app code"
+            },
+            {
+              "function": "za.co.twyst.tbxml.TBXML.parse",
+              "file": "classes.dex",
+              "snippet": "jniFree(this.document);\nlong jJniParse = jniParse(str.getBytes());\nthis.document = jJniParse;\nif (jJniParse == 0) {\n    throw new TBXMLException(\"Invalid document handle\");\n}",
+              "note": "Java side passes str.getBytes() into jniParse; no unusual or unsafe handling"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "decodeBytes",
+            "strchr"
+          ],
+          "recommendations": [
+            "Obtain and analyze the actual implementation behind PTR_decodeBytes_00112f60 and the external strchr to verify whether malformed XML can cause OOB access",
+            "If decodeBytes assumes well-formed, NUL-terminated strings, add explicit length checks or validation before parsing",
+            "Add defensive null/length checks in native XML parsing paths and consider fuzzing with ASan-instrumented builds"
+          ],
+          "assumptions": [
+            "decodeBytes implementation is not available in the current binary or lies in another library not provided",
+            "Crash occurs within the libc strchr implementation rather than at the wrapper site",
+            "The app using TBXML is not a privileged/system process and crashes only affect its own process"
+          ],
+          "limitations": [
+            "No decompiled body for decodeBytes target function, so internal parsing logic is unknown",
+            "No register/fault address context from the actual crash, so cannot distinguish OOB-read from null deref",
+            "Cannot see the concrete libc implementation of strchr used at runtime"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:43",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 21768,
+          "output_tokens": 1658
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "strpbrk",
+          "StackTrace": [
+            "strpbrk",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/tw.gov.tra.twtraffic/lib/arm64-v8a/libtbxml.so": [
+              "strpbrk",
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is strpbrk, called from decodeBytes, which in turn is indirectly called via function pointer from Java_za_co_twyst_tbxml_TBXML_jniParse. Need to see if crash is due to misuse of C string expectations (missing NUL) or real OOB corruption, and whether input length is properly bounded.",
+            "Decompiled jniParse shows: it obtains iVar1 = (*env->GetArrayLength)(env, param_3); stores it in puVar2[1]; allocates pvVar3 = calloc(1, iVar1+1); stores in puVar2[0]; then calls (*GetByteArrayRegion)(env, param_3, 0, iVar1, pvVar3); then calls decodeBytes(puVar2). This ensures one extra byte zero-initialized, so byte buffer is NUL-terminated, so later use with strpbrk is safe wrt bounds if decodeBytes respects the allocated size.",
+            "decodeBytes is just an indirect jump via function pointer PTR_decodeBytes_00112f60; implementation is not in this lib (likely in same lib but unresolved via MCP). However the input structure to decodeBytes clearly includes: pointer to NUL-terminated buffer and the exact original length in puVar2[1].",
+            "The Java TBXML.jniParse takes a byte[] and calls into this JNI. Java TBXML.parse(String) converts KML content string to bytes with str.getBytes() (default charset). No length or content validation at Java level; attacker can fully control XML string through KML contents, which are fetched either from arbitrary HTTP(S) URLs or local files/asset paths, so input is attacker-controlled.",
+            "Crash site is strpbrk – which only reads memory until it finds a char from a delimiter set or hits NUL. Given JNI prepared a proper NUL-terminated buffer, unbounded read into other memory is unlikely unless decodeBytes corrupts the buffer or passes an invalid pointer. Without decodeBytes body we can't see clear evidence of OOB or UAF. Crash could also be due to decodeBytes passing a null pointer or uninitialized pointer to strpbrk, which would be a plain null deref or harness artifact, not proven exploitable.",
+            "Process termination is just 'strpbrk' (probably an abort inside libc due to bad pointer), but we have no ASan or allocator error indicating heap overflow/underflow. No memcpy/memmove identified in jniParse; decodeBytes not visible. Therefore, we lack concrete evidence of memory corruption triggered by attacker-controlled size; we only know decodeBytes ultimately calls strpbrk on the controlled XML buffer.",
+            "Given the well-bounded allocation pattern and null-termination, plus missing visibility into decodeBytes internals, defaulting to non-vulnerability is appropriate. The crash is most consistent with a logic bug or benign memory error in decodeBytes (possibly null deref) under malformed XML, resulting only in app-level DoS. Exploitability beyond crashing this app is speculative.",
+            "Thus classify as not a confirmed vulnerability, category Env/Harness or Other, with low confidence of being exploitable. Note that even if there is a bug in decodeBytes, impact is limited to this app parsing attacker-supplied KML via plugin; no system privileges involved."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.25,
+          "reasons": [
+            "JNI entry jniParse allocates buffer of size length+1 using GetArrayLength and calloc, ensuring proper bounds and NUL-termination before passing to decodeBytes",
+            "Implementation of decodeBytes (which calls strpbrk) is not available, so no concrete evidence of OOB read/write or other exploitable memory corruption is visible",
+            "Crash likely results in at most application-level denial of service when parsing malformed KML/XML, with no indication of privilege escalation or code execution"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "file": "libtbxml.so",
+              "snippet": "puVar2 = (undefined8 *)calloc(1,0x38);\niVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // GetArrayLength\n*(int *)(puVar2 + 1) = iVar1;\npvVar3 = calloc(1,(long)(iVar1 + 1));\n*puVar2 = pvVar3;\npcVar5 = *(code **)(lVar4 + 0x640); // GetByteArrayRegion\n(*pcVar5)(param_1,param_3,0,iVar1,pvVar3);\ndecodeBytes(puVar2);",
+              "note": "JNI code carefully allocates length+1 and zero-initializes the native buffer before filling it from Java byte[] and passing it to decodeBytes."
+            },
+            {
+              "function": "decodeBytes",
+              "file": "libtbxml.so",
+              "snippet": "(*(code *)PTR_decodeBytes_00112f60)();",
+              "note": "decodeBytes is an indirect call through a function pointer; its body (where strpbrk is used) is not visible in this context."
+            },
+            {
+              "function": "za.co.twyst.tbxml.TBXML.parse",
+              "file": "classes.dex",
+              "snippet": "public void parse(String str) throws TBXMLException {\n    jniFree(this.document);\n    long jJniParse = jniParse(str.getBytes());\n    this.document = jJniParse;\n    if (jJniParse == 0) {\n        throw new TBXMLException(\"Invalid document handle\");\n    }\n}",
+              "note": "Java layer passes arbitrary string bytes to native jniParse but does not affect the safe buffer sizing logic in JNI."
+            },
+            {
+              "function": "plugin.google.maps.PluginKmlOverlay.loadKml",
+              "file": "classes.dex",
+              "snippet": "InputStream kmlContents = getKmlContents(str);\n...\nwhile ((line = bufferedReader.readLine()) != null) {\n    sb.append(line);\n    sb.append(\"\\n\");\n}\nTBXML tbxml = new TBXML();\ntbxml.parse(sb.toString());",
+              "note": "KML data comes from network or file but is ultimately just used to build the string passed to TBXML.parse; no additional unsafe native operations are evident beyond decodeBytes/strpbrk."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "decodeBytes",
+            "strpbrk"
+          ],
+          "recommendations": [
+            "Inspect and decompile the decodeBytes implementation and its use of strpbrk to confirm whether any pointer arithmetic or buffer traversal can exceed allocated bounds.",
+            "Add defensive checks or assertions around the decodeBytes input structure (buffer pointer and length) before invoking it, and handle malformed XML gracefully instead of crashing.",
+            "If decodeBytes is third-party or closed-source, consider wrapping it with additional validation or switching to a safer XML parser library."
+          ],
+          "assumptions": [
+            "The implementation of decodeBytes and the function pointer it calls could not be inspected within this MCP context.",
+            "The crash reason labeled as 'strpbrk' does not include detailed fault address or sanitizer diagnostics, so the exact memory error is unknown.",
+            "No additional bounds checks occur inside decodeBytes that would change the effective reachable behavior."
+          ],
+          "limitations": [
+            "decodeBytes body and its internal calls, including the exact strpbrk usage, were not available, preventing definitive classification of the underlying bug.",
+            "No register/memory dump or ASan report was provided with the crash, limiting insight into the precise fault address and access type.",
+            "Analysis was limited to the visible JNI and Java code; native implementations in other linked libraries may introduce additional behavior not captured here."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 2,
+          "llm_tool_calls": 5,
+          "input_tokens": 21066,
+          "output_tokens": 1872
+        }
+      }
+    ]
+  }
+}

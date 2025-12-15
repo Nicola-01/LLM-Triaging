@@ -1,0 +1,123 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.skmc.okcashbag.home_google/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "OK Cashbag",
+      "package": "com.skmc.okcashbag.home_google",
+      "min_sdk": 26,
+      "target_sdk": 35,
+      "version_name": "7.0.8",
+      "version_code": "223"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.skmc.okcashbag.home_google/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top frame is __memcpy, next is NI_PublicKeyDecode in libNSaferJNI.so; that is our first app-level native frame.",
+            "Decompiled NI_PublicKeyDecode shows multiple memcpy calls where length and content are derived from ASN.1 parsing of attacker-controlled input (param_1, param_2) coming from JNI via N_publickey_export.",
+            "Key pattern: buffer size uVar1 = param_2 + 0x80, then calloc of __dest and __dest_00 of size uVar1. First memcpy(__dest, param_1, param_2) is safe as long as param_1/param_2 consistent; fuzz harness probably ensures buffer size >= param_2.",
+            "Later, ASN1_length_decode fills local_94 and is used as length for several memcpy calls into __dest_00 and __dest, but guarded by `if (local_94 <= uVar1)` so these copies are bounded by the allocated buffer size (param_2+0x80).",
+            "The crash is in generic __memcpy, not the checked __memcpy_chk which is used with explicit bound 0x14 and length < 0x15; that path is safe against overflow. Thus crashing memcpy is one of the uninstrumented calls.",
+            "The last memcpy before returns that can touch external pointers are: memcpy(param_3,pcVar7,uVar5) after checking `if (0x100 < local_94) goto LAB_0014e220;`, and memcpy(param_5,pcVar7 + 1 + (uVar4 & 0xffffffff),(ulong)local_94) with condition `if (local_94 <= *param_6)`.",
+            "In both external memcpy calls, destination buffers and max lengths are provided by caller (N_publickey_export and deeper). In NI_PublicKeyDecode, there is a bound check: for param_3, require local_94 <= 0x100; for param_5, require local_94 <= *param_6. So NI_PublicKeyDecode itself does not overflow dst if callers pass valid destination+length pairing.",
+            "Crash reason __memcpy could still be from reading from invalid src (e.g., param_1/pcVar7 out of range) if ASN.1 parsing walks beyond provided param_1 buffer despite uVar1 = param_2+0x80 allocation. However, __dest is allocated to param_2+0x80 and fed entirely from param_1 for param_2 bytes, so any ASN.1 walk is within __dest; no direct out-of-bounds read on original input buffer.",
+            "The length checks use local_94 <= uVar1 where uVar1= param_2+0x80, and they are performed before each memcpy into __dest/__dest_00, ensuring no overflow on those internal buffers even if ASN1_length_decode returns larger lengths from malformed data.",
+            "Thus, in NI_PublicKeyDecode, all memcpy destinations have explicit upper-bound checks: internal buffers bounded by uVar1, external outputs bounded by 0x100 or *param_6. No obvious memory corruption primitive is visible.",
+            "Given fuzzing context, __memcpy crash most likely comes from harness passing inconsistent arguments to NI_PublicKeyDecode (e.g. param_3 NULL while used? but function checks param_3 != 0; or param_5 invalid with *param_6 pointing to unmapped memory). However, NI_PublicKeyDecode does not dereference param_5 without checking local_94 <= *param_6, but it does not validate that param_5 itself is non-NULL when using it; only param_3 is checked for null.",
+            "So if caller passes param_5=NULL with *param_6 nonzero and ASN.1 path triggers the second memcpy, this becomes a NULL dst memcpy, which on some platforms is a crash (SIGSEGV) but not exploitable. Similarly, caller could pass arbitrary invalid param_5 pointer.",
+            "From a security perspective, NI_PublicKeyDecode expects its caller to provide valid buffers; misuse (passing NULL or bad pointers) is a harness or higher-level bug, not directly attacker-controlled in a deployed app because Java side allocates arrays/byte[] and native wrappers convert them properly.",
+            "Examining Java_com_nshc_NSaferJNI_N_1PublicKeyExport: it does not call NI_PublicKeyDecode directly; instead it calls N_publickey_export(&local_2e0,&local_120). NI_PublicKeyDecode likely is used inside N_publickey_export, which we do not have, but its parameters will come from structured native objects, not raw fuzz harness.",
+            "Since we lack crash address inside NI_PublicKeyDecode, but see strong internal bounds checking and only potential crash from invalid caller-owned pointers (param_5 etc.), classification leans to non-vulnerability or at most a robustness bug requiring broken caller behavior, not attacker-controlled input under normal app usage.",
+            "Therefore, this crash is best classified as non-security-relevant (harness/caller misuse), with moderate confidence since we cannot inspect N_publickey_export or verify how param_5/param_6 are set in real flows."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.75,
+          "reasons": [
+            "Crashing memcpy is in NI_PublicKeyDecode, which performs bounds checks on all internal buffer copies based on allocated size uVar1 = param_2 + 0x80",
+            "External memcpy destinations (param_3, param_5) are guarded by length checks (<=0x100 and <=*param_6), so NI_PublicKeyDecode does not itself write past provided buffers",
+            "The only realistic crash cause is invalid destination pointers (e.g., NULL or bad param_5) supplied by the caller, which in production come from native code, not directly from untrusted input",
+            "JNI entry Java_com_nshc_NSaferJNI_N_1PublicKeyExport does not expose raw pointers; it uses higher-level helpers and does not itself manipulate the buffers passed to NI_PublicKeyDecode"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "uVar1 = param_2 + 0x80; __dest = calloc(1,uVar1); __dest_00 = calloc(1,uVar1); ... if (local_94 <= uVar1) memcpy(__dest_00,pcVar7 + (uVar4 & 0xffffffff),local_94); ... if (local_94 <= uVar1) { ... memcpy(__dest,pcVar2,uVar5); }",
+              "note": "Internal memcpy calls are bounded by allocated buffer size (param_2+0x80)."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "if (param_3 != 0) { if (0x100 < local_94) goto LAB_0014e220; memcpy(param_3,pcVar7,uVar5); *param_4 = uVar1; } ... if (local_94 <= *param_6) { memcpy(param_5,pcVar7 + 1 + (uVar4 & 0xffffffff),local_94); *param_6 = local_94; }",
+              "note": "Function relies on caller to supply valid param_3/param_5 pointers but enforces length limits; misuse causes crashes but not attacker-controlled corruption."
+            },
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_100 = CI_jbyteArray2cstr(param_1,param_3,&uStack_f8);\niVar2 = N_publickey_export(&local_2e0,&local_120);\n... CI_cstr2jbyteArray(param_1,local_2c0,uStack_2b8 & 0xffffffff);",
+              "note": "JNI bridge works with managed buffers and helper functions; no direct memcpy or raw pointer arithmetic visible."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "N_publickey_export",
+            "NI_PublicKeyDecode",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add explicit NULL and pointer validity checks for param_5/param_6 in NI_PublicKeyDecode (e.g., ensure param_5 != NULL when local_94 <= *param_6 before memcpy)",
+            "Augment fuzz harness to respect expected API contracts (non-NULL output buffers) when calling NI_PublicKeyDecode or higher-level wrappers",
+            "If crashes persist, instrument build with ASan/UBSan and capture exact faulting memcpy site to confirm no overlooked length/path issues"
+          ],
+          "assumptions": [
+            "N_publickey_export invokes NI_PublicKeyDecode with consistent buffer sizes and valid pointers in production builds",
+            "JNI helper functions CI_jbyteArray2cstr/CI_cstr2jbyteArray correctly allocate and size native buffers from Java arrays",
+            "Crash occurs in generic memcpy rather than __memcpy_chk or other sanitizer wrappers"
+          ],
+          "limitations": [
+            "Exact faulting source/destination/length for crashing memcpy is not provided",
+            "Implementation of N_publickey_export and ASN1_length_decode is not available, so deeper validation logic is inferred",
+            "Callers outside JNI (pure native components) might misuse NI_PublicKeyDecode differently, which isn’t visible from current trace"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:29",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 15246,
+          "output_tokens": 2135
+        }
+      }
+    ]
+  }
+}

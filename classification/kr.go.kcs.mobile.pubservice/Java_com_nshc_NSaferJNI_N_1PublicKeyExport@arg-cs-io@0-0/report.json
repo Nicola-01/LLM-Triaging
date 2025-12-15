@@ -1,0 +1,137 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.go.kcs.mobile.pubservice/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "모바일 관세청",
+      "package": "kr.go.kcs.mobile.pubservice",
+      "min_sdk": 23,
+      "target_sdk": 34,
+      "version_name": "1.0.281",
+      "version_code": "281"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.go.kcs.mobile.pubservice/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is NI_PublicKeyDecode, which is just an indirect jump via PTR_NI_PublicKeyDecode_00175cb8, so we can’t see its body in this lib. Crash is in __memcpy, so likely from whatever that pointer targets.",
+            "The JNI entry Java_com_nshc_NSaferJNI_N_1PublicKeyExport is decompiled and shows no direct memcpy-like calls. It uses CI_jbyteArray2cstr to convert the Java input into a C buffer, then calls N_publickey_export(local_2d8, local_118). These two stack objects are initialized with small fixed-size layouts and a pointer local_2b8 = auStack_218 (256‑byte buffer) and a flag local_2ac = 1. There is no evidence that lengths passed to lower layers are attacker-controlled beyond that 256‑byte buffer.",
+            "The crash stack puts NI_PublicKeyDecode above the JNI bridge; that suggests NI_PublicKeyDecode is called somewhere inside N_publickey_export or deeper. However N_publickey_export is not exported in the library map, so we can’t inspect it here. Without seeing NI_PublicKeyDecode’s implementation or the target of PTR_NI_PublicKeyDecode_00175cb8, we cannot directly see the memcpy arguments.",
+            "Data flow: attacker input is the jbyteArray passed into param_3 → CI_jbyteArray2cstr → local_f8/local_f0. Then N_publickey_export uses local_2d8/local_118 (struct-like descriptors) and ultimately some code path reaches memcpy inside NI_PublicKeyDecode or its target. Since local_2b8 is a fixed 256‑byte local buffer and local_2b0 presumably holds its length, an unbounded memcpy from a decoded public key into this stack buffer could overflow if the key is long. Given we’re fuzzing a public key export/parse API, such a mistake is plausible and attacker-controllable via key size/content.",
+            "However, there is no direct evidence in the visible decompiled JNI function of incorrect length handling; the bug likely lives in the closed NI_PublicKeyDecode implementation or in N_publickey_export. Fuzzing caused a memcpy crash, which usually implies OOB read or write. Public key decoding must process variable-length input; if the length checks are insufficient, this is a genuine memory-safety issue. Because the path is clearly reachable from untrusted JNI input, I consider a vulnerability likely, though not 100% proven due to missing inner code.",
+            "Impact-wise, a memcpy-based overflow or out-of-bounds read in key decode logic can lead to memory corruption in a native crypto library. This is typically rated high severity due to potential for code execution, even if in practice it may manifest as a crash. We don’t see evidence of sanitizers aborting; it’s just __memcpy crashing.",
+            "Therefore I classify this as a likely memory-safety vulnerability (CWE-787 / CWE-119) reached via attacker-controlled key data, with moderate-to-high confidence but not absolute because the critical function body is unresolved. I’ll mark severity high and confidence ~0.75, and explain that the main limitation is missing NI_PublicKeyDecode / N_publickey_export internals."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.75,
+          "reasons": [
+            "Crash occurs in __memcpy called from NI_PublicKeyDecode, indicating likely out-of-bounds access in native code",
+            "JNI entry Java_com_nshc_NSaferJNI_N_1PublicKeyExport takes attacker-controlled jbyteArray, converts it to C buffer, and passes it into native public key export/decoding routines without visible size enforcement at this layer",
+            "Public key decode/export logic inherently processes variable-length data; a memcpy-based crash in this path is consistent with a classic buffer overflow or over-read",
+            "The path is reachable from JNI and not an artificial harness-only fault, so malformed keys from Java can realistically trigger the issue"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_2b8 = auStack_218; // 256-byte buffer\nlocal_2b0 = 0; local_2ac = 1;\nlocal_f8 = CI_jbyteArray2cstr(param_1,param_3,&local_f0);\niVar2 = N_publickey_export(local_2d8,local_118);\n... NI_PublicKeyDecode appears above in crash stack, implying lower-level parsing of attacker-provided data leads to memcpy crash.",
+              "note": "Shows attacker-controlled key material flowing into N_publickey_export and, indirectly, NI_PublicKeyDecode."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "void NI_PublicKeyDecode(void)\n{\n  (*(code *)PTR_NI_PublicKeyDecode_00175cb8)();\n  return;\n}",
+              "note": "Indirection to an unresolved implementation where the __memcpy crash occurs, suggesting an internal memcpy with bad bounds."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "N_publickey_export",
+            "NI_PublicKeyDecode",
+            "PTR_NI_PublicKeyDecode_00175cb8/__memcpy"
+          ],
+          "recommendations": [
+            "Review and decompile the implementation referenced by PTR_NI_PublicKeyDecode_00175cb8 and N_publickey_export to locate the exact memcpy call and ensure destination buffer sizes are honored",
+            "Add explicit length checks on public key inputs and structure fields before performing memcpy/memmove within the decode and export routines",
+            "Compile with stack canaries and ASAN/UBSAN during testing, and add regression fuzz tests around NI_PublicKeyDecode to confirm the fix"
+          ],
+          "assumptions": [
+            "JNI method N_PublicKeyExport is reachable with attacker-controlled jbyteArray parameters in real app usage",
+            "The __memcpy crash is due to out-of-bounds access rather than an internal libc/harness anomaly",
+            "N_publickey_export or the target of PTR_NI_PublicKeyDecode_00175cb8 uses memcpy on attacker-derived lengths without sufficient bounds checks"
+          ],
+          "limitations": [
+            "Body of N_publickey_export and the real NI_PublicKeyDecode implementation are not available, so the exact memcpy argument relationships can’t be proven",
+            "Crash log does not include register state or concrete buffer sizes at the time of memcpy",
+            "No visibility into full library map or other modules that might wrap or constrain NI_PublicKeyDecode"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed or oversized public key data passed via JNI into N_PublicKeyExport",
+            "prerequisites": [
+              "Ability to call the Java-layer API that ultimately invokes NSaferJNI.N_PublicKeyExport with attacker-controlled byte[]",
+              "Application must load and use libNSaferJNI.so in its normal operation",
+              "Native library compiled without strong runtime mitigations that would completely neutralize the overflow"
+            ],
+            "exploit_pipeline": [
+              "Craft a byte array representing a malformed or extremely large public key structure designed to cause NI_PublicKeyDecode to copy more data than the destination buffer can hold",
+              "From Java or another caller, invoke the NSaferJNI.N_PublicKeyExport JNI method (or its public wrapper) with this crafted key data",
+              "The JNI bridge converts the byte[] into a native buffer and calls N_publickey_export, which eventually calls NI_PublicKeyDecode",
+              "Inside NI_PublicKeyDecode, an unchecked memcpy processes the attacker-controlled data and overflows or over-reads a buffer, corrupting memory or causing a crash",
+              "Iterate on the crafted payload while observing crashes to attempt to gain more controlled memory corruption (e.g., overwriting adjacent metadata or return addresses on platforms with weaker mitigations)"
+            ],
+            "poc_commands": [
+              "adb push crafted_key.bin /sdcard/Download/crafted_key.bin",
+              "adb shell am start -n <package>/<MainActivity> --es key_path /sdcard/Download/crafted_key.bin",
+              "adb logcat | grep -i NSaferJNI"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_key.bin"
+            ],
+            "notes": "Activity and exact Java API names are placeholders; adjust to the real app entrypoints. A minimal PoC would call the Java method that wraps N_PublicKeyExport with the contents of crafted_key.bin as a byte array."
+          }
+        },
+        "statistics": {
+          "time": "00:00:39",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 12985,
+          "output_tokens": 1891
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/sam.myanycar.samsungFire/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "삼성화재 다이렉트",
+      "package": "sam.myanycar.samsungFire",
+      "min_sdk": 21,
+      "target_sdk": 32,
+      "version_name": "6.0.8",
+      "version_code": "642"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/sam.myanycar.samsungFire/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, allocator/sanitizer not shown, so first app-level frame below libc is NI_PublicKeyDecode, but its body is only an indirect call through PTR_NI_PublicKeyDecode_00175cb8; decompilation shows no memcpy there, so the memcpy must occur inside that indirect target, which is not resolved in the current analysis.",
+            "Next frame up is Java_com_nshc_NSaferJNI_N_1PublicKeyExport, which we decompiled. It sets up local structures, calls CI_jbyteArray2cstr on the Java byte[] param_3, then calls N_publickey_export(local_2d8, local_118). That function is also just a thunk to an indirect pointer PTR_N_publickey_export_00175c38. Thus the memcpy crash likely happens inside the proprietary crypto implementation behind that pointer, not in the visible stub code.",
+            "We must check for memcpy/memmove usage in the JNI stub itself. The decompiled JNI function uses memset on local buffers and calls helper functions (CI_jbyteArray2cstr, CI_cstr2jbyteArray, N_publickey_export, N_clear_object) but no direct memcpy/memmove. Therefore the out-of-bounds or invalid memcpy parameters are computed deeper in the hidden implementation (N_publickey_export or NI_PublicKeyDecode).",
+            "For backward data flow from __memcpy arguments, the immediate caller NI_PublicKeyDecode is just a trampoline; its arguments and internal state are opaque. However, xrefs show NI_PublicKeyDecode is called from various N_* crypto routines (N_derive_key, N_publickey_export, etc.), indicating NI_PublicKeyDecode is part of a generic key decode/parse layer. Since the crash occurred while fuzzing Java_com_nshc_NSaferJNI_N_1PublicKeyExport, the tainted input is param_3 (jbyteArray) coming from Java/fuzzer. That array is converted to a C string by CI_jbyteArray2cstr, which supplies local_f0 (length) and local_f8 (pointer) and is then passed to N_publickey_export via the local_2d8/local_118 structures.",
+            "CI_jbyteArray2cstr plausibly copies bytes from the Java array into heap memory and returns both pointer and size. There is no evidence in the JNI wrapper of any bounds checking on the public key contents; N_publickey_export presumably interprets this attacker-controlled data as a public key structure and calls NI_PublicKeyDecode, where memcpy is used to move internal elements. The crash during memcpy under fuzzing strongly suggests that NI_PublicKeyDecode (or N_publickey_export) trusts length/offset fields embedded in the attacker-supplied key blob without validating them against the actual buffer length, causing out-of-bounds read/write.",
+            "Because the crash happens in a generic __memcpy rather than an explicit defensive abort, and is triggered by feeding malformed public key bytes through a realistic JNI API (N_PublicKeyExport) that is part of the shipped library, this is not a harness-only condition. Public key data in a normal app is typically derived from remote servers, certificates, or user-imported keys, which are attacker-influenced. Therefore there is a plausible and realistic path for untrusted input to reach NI_PublicKeyDecode and drive unsafe memcpy parameters.",
+            "We lack the decompiled body of the real NI_PublicKeyDecode/N_publickey_export implementations, so we cannot pinpoint the exact bounds check omission. However, the tight chain JNI -> CI_jbyteArray2cstr -> N_publickey_export -> NI_PublicKeyDecode -> __memcpy with no apparent validation in the visible stubs is highly indicative of a genuine memory-safety bug in proprietary crypto code: improper bounds checking when decoding or exporting public keys. Given memcpy and fuzz-triggered SIGSEGV/abort, this is likely an out-of-bounds read/write (CWE-787/788) or heap-based buffer overflow. Exploitability is at least theoretical and probably practical for DoS; RCE may or may not be achievable depending on heap layout and platform mitigations.",
+            "Because the vulnerable code is part of a JNI library used by an Android app, any component that accepts external key material and calls N_PublicKeyExport could be abused to crash the app or possibly perform more severe exploitation. Without Java-level call graph we cannot confirm which components are exposed, so severity is kept as high but not critical, and confidence is moderate-high (0.7) due to the indirect nature of the pointers and missing implementation bodies."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Crash occurs in __memcpy called from NI_PublicKeyDecode during processing of attacker-controllable public key data",
+            "JNI wrapper Java_com_nshc_NSaferJNI_N_1PublicKeyExport passes a fuzzed jbyteArray through CI_jbyteArray2cstr into N_publickey_export/NI_PublicKeyDecode without visible bounds checks on the internal structure",
+            "N_publickey_export and NI_PublicKeyDecode are indirect-call thunks into proprietary crypto code, strongly suggesting an internal length/offset handling bug leading to out-of-bounds memcpy",
+            "Fuzzing triggers a native crash via a realistic JNI entry point, not an artificial harness-only path, so malformed keys can likely crash the app in real use"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/sam.myanycar.samsungFire/lib/arm64-v8a/libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_f8 = CI_jbyteArray2cstr(param_1,param_3,&local_f0);\niVar2 = N_publickey_export(local_2d8,local_118);\nif (iVar2 == 0) {\n  uVar3 = CI_cstr2jbyteArray(param_1,local_2b8,local_2b0);\n  ...\n}\nCI_freecstr(&local_f8);\nN_clear_object(local_2d8,2);\nN_clear_object(local_118,2);",
+              "note": "JNI wrapper takes Java byte[] (public key) and passes converted C buffer into N_publickey_export with no structural validation visible."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "void NI_PublicKeyDecode(void)\n{\n  (*(code *)PTR_NI_PublicKeyDecode_00175cb8)();\n  return;\n}",
+              "note": "Trampoline into proprietary decode implementation; stack trace shows this calls __memcpy where crash occurs."
+            },
+            {
+              "function": "N_publickey_export",
+              "file": "libNSaferJNI.so",
+              "snippet": "void N_publickey_export(void)\n{\n  (*(code *)PTR_N_publickey_export_00175c38)();\n  return;\n}",
+              "note": "Another trampoline; likely calls NI_PublicKeyDecode internally for key parsing, connecting JNI input to crashing memcpy."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "N_publickey_export (via PTR_N_publickey_export_00175c38)",
+            "NI_PublicKeyDecode (via PTR_NI_PublicKeyDecode_00175cb8)",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Inspect and decompile the real implementations behind PTR_N_publickey_export_00175c38 and PTR_NI_PublicKeyDecode_00175cb8 to identify the exact memcpy call and add strict bounds checks against the actual buffer length returned by CI_jbyteArray2cstr",
+            "Harden key parsing code to validate all embedded length/offset fields in public key structures before memcpy/memmove, rejecting malformed keys early with clear error codes instead of proceeding",
+            "Add fuzz and negative testing for all JNI crypto entry points that accept external key material to ensure malformed inputs cannot cause native memory corruption"
+          ],
+          "assumptions": [
+            "Public key bytes passed to Java_com_nshc_NSaferJNI_N_1PublicKeyExport originate from attacker-influenced sources such as remote servers or imported files",
+            "The crash in __memcpy is due to out-of-bounds access rather than an intentional abort in hardened memcpy",
+            "N_publickey_export internally uses NI_PublicKeyDecode to process the buffer from CI_jbyteArray2cstr"
+          ],
+          "limitations": [
+            "Implementations behind PTR_N_publickey_export_00175c38 and PTR_NI_PublicKeyDecode_00175cb8 are not visible, so the precise failing memcpy and its parameters cannot be directly inspected",
+            "Java-side call graph is missing, so the exact exposure surface (which components can trigger N_PublicKeyExport) is unknown",
+            "No concrete register/memory dump at crash time is available to distinguish out-of-bounds read vs write or stack vs heap location"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a malformed or crafted public key byte array to a Java API that calls N_PublicKeyExport (Java_com_nshc_NSaferJNI_N_1PublicKeyExport)",
+            "prerequisites": [
+              "Ability to influence the byte[] argument passed into NSaferJNI.N_PublicKeyExport from Java code, e.g., via imported key material or remote server data",
+              "Target app includes and uses libNSaferJNI.so on a device/ROM where the app is installed",
+              "Attacker can repeatedly trigger the vulnerable JNI call to probe crash behavior"
+            ],
+            "exploit_pipeline": [
+              "Identify or reverse engineer the Java wrapper around Java_com_nshc_NSaferJNI_N_1PublicKeyExport within the app to determine how it receives public key data (e.g., file import, network response)",
+              "Craft malformed public key byte sequences that trigger abnormal lengths/offsets in the internal decoder, and feed them through the Java API until a reproducible native crash occurs",
+              "Refine the payload to control the structure around the memcpy parameters (e.g., claimed key component lengths) to steer out-of-bounds writes toward sensitive heap metadata or objects",
+              "Leverage repeated triggering and heap grooming (if possible) to escalate from denial-of-service to controlled memory corruption, subject to platform mitigations like ASLR and hardened allocators"
+            ],
+            "poc_commands": [
+              "adb push crafted_pubkey.bin /sdcard/Download/crafted_pubkey.bin",
+              "adb shell am start -n <package>/<activity> --es pubkey_path /sdcard/Download/crafted_pubkey.bin",
+              "adb logcat | grep -i 'NSaferJNI'"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_pubkey.bin"
+            ],
+            "notes": "Activity and extra key names are placeholders; they must be replaced with the actual Java entry point that calls NSaferJNI.N_PublicKeyExport after reverse engineering the APK."
+          }
+        },
+        "statistics": {
+          "time": "00:00:40",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 20620,
+          "output_tokens": 2394
+        }
+      }
+    ]
+  }
+}

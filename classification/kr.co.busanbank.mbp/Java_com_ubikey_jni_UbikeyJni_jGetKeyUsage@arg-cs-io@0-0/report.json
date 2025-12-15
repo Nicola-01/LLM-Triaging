@@ -1,0 +1,819 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "부산은행 모바일뱅킹",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top app frame below any allocators/sanitizers is Compute_ASN1_ST_ChildNum per stack trace, but decompilation shows it is just an indirect-call stub through PTR_Compute_ASN1_ST_ChildNum_00181d50, so real logic is in target pointer, which is not resolved in this snippet.",
+            "Next frames Convert_ASN1_to_X509_TBS_CERT, Convert_ASN1_to_X509_CERT, CERT_Load are also pure thunks calling through function pointers. No visible memcpy/memmove or pointer arithmetic in these stubs, so no direct evidence of memory misuse here; actual implementations hidden behind pointers.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage is decompiled and contains the main visible logic: it obtains a length iVar2 via a virtual method at *param_1+0x558 (likely GetArrayLength), uses that as __size, then obtains __src via another virtual method (probably GetByteArrayElements), allocates __s = malloc(__size), does memset(__s,0,__size) and memcpy(__s,__src,__size), then releases the JNI buffer. No bounds checks or sanity checks on iVar2 beyond implicit constraints of JNIEnv and malloc succeeding.",
+            "Potential bug: malloc() return value is not checked before memset/memcpy; if __s == NULL (allocation failure), memset and memcpy dereference NULL and could crash. However, on typical Android devices and for fuzzing, malloc failure at this point is unlikely unless fuzzer passes a huge length, which would still be app-controlled input via Java, so this is a possible DoS but not memory corruption in the successful allocation case.",
+            "The subsequent use of BINSTR_Create, BINSTR_SetData(__s,iVar2,...) and CERT_Load show that attacker-controlled ASN.1 data (copied from Java byte[] into __s) is forwarded to a certificate parser implemented behind function pointers. The crash is reported inside Compute_ASN1_ST_ChildNum, part of that ASN.1/X509 stack. Since these parsing functions take arbitrary untrusted ASN.1 without any visible validation here and operate in native code, a crash there likely indicates a bug in ASN.1 tree handling (e.g., out-of-bounds child index, malformed structure traversal) driven by attacker input.",
+            "Because Compute_ASN1_ST_ChildNum and its callers are thunks via function pointers, I cannot see the internal implementation to confirm the exact operation (e.g., array indexing). However, the function name and call chain (Convert_ASN1_to_X509_TBS_CERT, Convert_ASN1_to_X509_CERT, CERT_Load) strongly indicate an internal X.509 ASN.1 parser; such code is classic for memory-safety vulnerabilities when given malformed ASN.1 from untrusted sources.",
+            "The JNI bridge takes a raw byte array from the caller without structural validation and passes it straight to CERT_Load. In a real app, that byte array could come from server-provided certificates, files, NFC tokens, etc., which are attacker-controlled in many situations. The fuzz harness just accelerates exploration but does not rely on impossible states (null JNIEnv is not used; only Java array length and contents vary).",
+            "Therefore, there is a realistic taint path: Java byte[] (attacker-controlled) → jGetKeyUsage JNI → BINSTR_SetData + CERT_Load → ASN.1/X509 parser → Compute_ASN1_ST_ChildNum crash. This meets the definition of a vulnerability: untrusted input drives complex native parsing logic that crashes, likely due to unsafe memory handling in the ASN.1 implementation.",
+            "Since we lack the internal body of Compute_ASN1_ST_ChildNum, I cannot point to a specific memcpy or out-of-bounds access, but given the typical design of ASN.1 child-number computations and the fact that fuzzing found a concrete crashing input, it is reasonable to classify this as at least a likely memory-safety or logic bug that can cause DoS, and potentially more severe corruption, assuming native code is not using hardened bounds-checked accessors.",
+            "Severity: at minimum, this is a DoS of any feature that parses untrusted certificates via this JNI call. It might be higher (e.g., heap overflow) but with missing implementation details, I’ll conservatively mark as high severity due to probable memory unsafe operations in ASN.1 parsing. Confidence is moderate-high (0.75) because the indirect call hides exact bug, yet the data-flow and crash location are strongly suggestive."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.75,
+          "reasons": [
+            "JNI method jGetKeyUsage copies attacker-controlled Java byte[] into native buffer and passes it directly to CERT_Load and subsequent ASN.1/X509 conversion routines.",
+            "Crash occurs inside Compute_ASN1_ST_ChildNum, part of an internal ASN.1/X509 parser stack, which is classic for memory-safety issues when handling malformed ASN.1.",
+            "Actual ASN.1/X509 parsing implementations are hidden behind function pointers, but the naming and call sequence strongly suggest unsafe traversal of ASN.1 structures driven by untrusted input.",
+            "Even without seeing the body of Compute_ASN1_ST_ChildNum, the existence of a fuzzer-triggered native crash in this context implies at least a denial-of-service vulnerability and likely an underlying memory-safety bug."
+          ],
+          "cwe_ids": [
+            "CWE-20",
+            "CWE-787",
+            "CWE-94"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nBINSTR_SetData(__s,iVar2,auStack_438);\nCERT_Load(&local_440,auStack_438);",
+              "note": "Attacker-controlled Java byte[] is copied into native buffer of length based on unvalidated length and then used as input to certificate parser."
+            },
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "file": "libUbikeyJni.so",
+              "snippet": "void Compute_ASN1_ST_ChildNum(void) { (*(code *)PTR_Compute_ASN1_ST_ChildNum_00181d50)(); }",
+              "note": "Crash thunk calls into ASN.1 child-number computation via function pointer, actual implementation hidden but driven by CERT_Load input."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Inspect and fully decompile the implementation behind PTR_Compute_ASN1_ST_ChildNum_00181d50 and related ASN.1/X509 functions to locate the precise out-of-bounds or invalid access.",
+            "Add robust ASN.1 and X.509 structural validation (length checks, bounds checks on child indices) before or within CERT_Load and associated converters.",
+            "In Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage, validate input size, handle malloc failures before memcpy/memset, and consider using safer parsing libraries if available."
+          ],
+          "assumptions": [
+            "Java byte[] passed into jGetKeyUsage can be influenced by an attacker in realistic app flows (e.g., remote certificates or files).",
+            "The crash in Compute_ASN1_ST_ChildNum is due to malformed ASN.1, not an artificial harness condition like null JNIEnv or invalid object handles.",
+            "Underlying ASN.1/X509 parser does not use comprehensive internal bounds checking, making memory-safety issues plausible."
+          ],
+          "limitations": [
+            "Implementation bodies of Compute_ASN1_ST_ChildNum and related ASN.1/X509 functions are not visible due to indirect function pointers, so exact bug pattern cannot be shown.",
+            "Process termination reason string does not detail the exact fault (e.g., SIGSEGV vs abort), leaving some uncertainty about whether this is memory corruption or logic abort.",
+            "Fuzz harness context for CERT_Load usage in the real app is not fully known, so some reachability assumptions are made."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a crafted X.509/ASN.1 certificate blob to the JNI method jGetKeyUsage via Java byte[] input.",
+            "prerequisites": [
+              "Ability to cause the app to call UbikeyJni.jGetKeyUsage with attacker-controlled certificate bytes (e.g., importing a certificate, interacting with a smart token, or processing remote data).",
+              "App must ship with and use libUbikeyJni.so and expose jGetKeyUsage reachable from untrusted input paths."
+            ],
+            "exploit_pipeline": [
+              "Attacker crafts a malformed ASN.1/X.509 certificate designed to stress the ASN.1 tree handling in Compute_ASN1_ST_ChildNum (e.g., inconsistent child counts, lengths, or nested structures).",
+              "Attacker delivers this certificate to the app via any feature that ultimately calls UbikeyJni.jGetKeyUsage (for example by placing the bytes into a Java byte[] argument).",
+              "JNI bridge copies the bytes into a native buffer and passes them into CERT_Load and subsequent Convert_ASN1_to_X509_* functions with no structural validation.",
+              "The internal ASN.1 parser reaches Compute_ASN1_ST_ChildNum with inconsistent state, triggering an out-of-bounds or invalid memory access that crashes the process, causing denial-of-service and potentially memory corruption."
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.bin /sdcard/Download/payload_cert.bin",
+              "adb shell am start -n <PACKAGE>/<ACTIVITY> --es cert_path /sdcard/Download/payload_cert.bin",
+              "# Within the app or a test harness, read payload_cert.bin into a byte[] and invoke UbikeyJni.jGetKeyUsage(byteArray)."
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_cert.bin"
+            ],
+            "notes": "Exact byte structure for the crashing certificate must be derived from the existing fuzz input that triggered the crash; the PoC assumes a reachable Java path that forwards attacker-controlled certificate bytes into jGetKeyUsage."
+          }
+        },
+        "statistics": {
+          "time": "00:00:49",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 18839,
+          "output_tokens": 2450
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "??",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top app-level frame below alloc/sanitizers is Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage in libUbikeyJni.so. Crash is abort via __stack_chk_fail, meaning stack canary mismatch caused by stack buffer overflow or similar stack corruption in the current or a callee function.",
+            "Decompiled jGetKeyUsage shows: it queries a length with a JNI env call (function pointer at *param1+0x558), stores it in iVar2, casts to size_t as __size. It then obtains a source pointer __src via another JNI call (fp at *param1+0x5c0), allocates __s=malloc(__size), zeroes it with memset(__s,0,__size), then memcpy(__s,__src,__size). It does NOT check if malloc returned NULL before passing __s to memset/memcpy, leading to immediate null deref in OOM, but that would be a SIGSEGV, not a stack canary failure. The stack canary failure suggests some other corruption (likely in CERT_Load or CERT_GetKeyUsage), but jGetKeyUsage clearly performs unchecked memcpy based on length from Java.",
+            "We must follow the MCP protocol: inspect memcpy calls in this function and track src/dst/len. The memcpy call arguments are (dst=__s, src=__src, len=__size). Intra-function data flow: __size is (size_t)iVar2; iVar2 comes from JNI call **(code **)(*param1+0x558)(param1,param3). There is no bounds check or cap on iVar2 before casting to size_t and using as malloc size and memcpy length. __src comes from JNI fp **(code **)(*param1+0x5c0)(param1,param3,0) returning a pointer into a Java byte array or string. That pointer is treated as trusted; if iVar2 is larger than the actual underlying buffer or if length can be very large, this could cause allocator/sanitizer aborts or OOB reads from __src (though overflow would be on heap, not stack).",
+            "However, the immediate crash is stack canary, and there are several operations that might overflow stack buffers: auStack_438 (16 bytes) used with BINSTR_Create/SetData, and auStack_428 (1024 bytes) used with CERT_GetKeyUsage. Still, we do not see their implementations; in this binary these are indirect calls via CERT_Load, CERT_GetKeyUsage etc., which are pure thunks to function pointers loaded elsewhere. We cannot confirm their implementations here. The stack corrupter is likely in those indirect functions, not directly in jGetKeyUsage. But jGetKeyUsage passes auStack_438 and auStack_428 and fields derived from untrusted input without verification, so upstream vulnerability root is still untrusted parsing of ASN.1 cert via CERT_Load and CERT_GetKeyUsage with attacker-controlled data (Java byte array).",
+            "Because the fuzzer harness fuzz_one_input presumably passes arbitrary certificate blobs via JNI into jGetKeyUsage, the length iVar2 and the certificate bytes pointed by __src are fuzzer-controlled and, in realistic app use, come from external, possibly attacker-controlled cert data (e.g., smart card, server, or file). The library code provides no validation in this JNI wrapper: no boundary checks on __size, no structure validation before calling CERT_Load, which suggests that malformed ASN.1 at native level can cause memory corruption (as hinted by stack canary abort).",
+            "Even though the exact overflow location is in an indirect function (CERT_Load or CERT_GetKeyUsage), we have a clear data path: Java-provided binary data → BINSTR_SetData → CERT_Load/Cert parser → stack canary abort. ASN.1 parsing functions are notorious for memory safety bugs when given malformed input. Given that the crash is deterministic under fuzzing, it is reasonable to classify this as a likely memory corruption in cert parsing triggered by attacker-controlled cert. The JNI layer does not sanitize, so the vulnerability is app/library-level, not harness-only.",
+            "Classification: This is likely a genuine vulnerability due to unsafe parsing of untrusted ASN.1 certificate data leading to stack corruption and abort (__stack_chk_fail). CWE would be stack-based buffer overflow (CWE-121) or more general CWE-787/119. Severity high because it’s stack corruption with potential for RCE, though currently only evidenced by canary abort (no RCE PoC). Confidence moderately high (~0.78) because we don’t see the exact overflowing code but see strong indicators: __stack_chk_fail, parser-style functions, and no input validation. The harness uses fuzz_one_input but Java code could similarly pass attacker-controlled cert data in production. Not purely harness-only. We should mention OOM null-deref possibility from calloc/memcpy on NULL, but that would not cause canary, so is independent.",
+            "Call sequence: main → fuzz_one_input → Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage → CERT_Load (indirect) → Convert_ASN1_to_X509_CERT/TBS_CERT → ?? → __stack_chk_fail → abort. Affected library: libUbikeyJni.so. Recommendations: inspect and decompile actual CERT_* implementations, add robust length/structure validation before ASN.1 parsing, ensure BINSTR and CERT functions do proper bounds checking, and add tests with malformed certificates. Exploit path: attacker supplies a malicious certificate or key blob to app (via file, NFC, USB token, server) that is passed to jGetKeyUsage, triggering stack overflow in CERT_ parser. With careful shaping, may allow overwriting saved return address before canary or under non-hardened builds; on this build, leads at least to DoS."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash terminates in __stack_chk_fail indicating stack-based memory corruption rather than a simple harness misuse.",
+            "JNI function Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage takes a length and pointer from Java and uses them without bounds checks to construct ASN.1/BINSTR structures and call CERT_Load/CERT_GetKeyUsage, passing fully attacker-controlled certificate bytes into complex native parsers.",
+            "Multiple large stack buffers (16- and 1024-byte arrays) are passed by reference to indirect CERT_* functions, and the stack canary mismatch strongly suggests an overflow in these routines when parsing malformed ASN.1, which is typical for such code paths.",
+            "The code path is reachable from normal app operation where certificates or key blobs are processed, so malformed or malicious inputs could trigger the same memory corruption outside the fuzz harness."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-121"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nBINSTR_Create(auStack_438);\nBINSTR_SetData(__s,iVar2,auStack_438);\nCERT_Load(&local_440,auStack_438);\nmemset(auStack_428,0,0x400);\niVar2 = CERT_GetKeyUsage(local_440,0x400,auStack_428);\n...\n__stack_chk_fail();",
+              "note": "JNI wrapper copies attacker-controlled data of attacker-controlled length, then passes it into certificate parsing routines and later aborts via stack canary failure, implying stack-based overflow in native parsing."
+            }
+          ],
+          "call_sequence": [
+            "main",
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "??",
+            "__stack_chk_fail",
+            "abort"
+          ],
+          "recommendations": [
+            "Audit and decompile the implementations behind CERT_Load, CERT_GetKeyUsage, and related function pointers to identify concrete overflow sites and add strict bounds checks during ASN.1 parsing.",
+            "In Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage, validate the length iVar2 against both reasonable maximums and actual Java buffer size before malloc/memcpy and BINSTR_SetData; handle malloc failures before using the pointer.",
+            "Add negative and fuzz-style tests using malformed and oversized certificates/ASN.1 blobs to ensure CERT_* routines fail gracefully without corrupting stack or heap."
+          ],
+          "assumptions": [
+            "The CERT_Load and CERT_GetKeyUsage function pointers resolve to in-project X.509/ASN.1 parsing code that may contain memory safety bugs.",
+            "The length returned from the JNI env function at *param1+0x558 is directly derived from attacker-controlled certificate/key data size.",
+            "In production, the same JNI path is reachable when processing external certificates or key blobs, not only within the fuzz harness."
+          ],
+          "limitations": [
+            "Actual implementations of CERT_Load, CERT_GetKeyUsage, and BINSTR_* are not visible in this binary, so the precise overflow location cannot be pinpointed.",
+            "The stack trace frame labelled '??' before __stack_chk_fail prevents seeing the exact crashing function.",
+            "We do not see Java-side caller code to confirm precisely how inputs are sourced, so attacker control is inferred from typical JNI env usage and fuzz harness behavior."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supply a malicious or malformed certificate/key blob that the app passes into UbikeyJni.jGetKeyUsage via JNI.",
+            "prerequisites": [
+              "Ability to cause the target app to load or inspect attacker-controlled X.509 certificates or key blobs.",
+              "Target device/build where the same native library and CERT_* implementations are used without additional sandboxing beyond standard app isolation."
+            ],
+            "exploit_pipeline": [
+              "Craft an X.509/ASN.1 certificate or key blob specifically malformed to trigger an overflow in the CERT_Load / CERT_GetKeyUsage parsing logic when processed via jGetKeyUsage.",
+              "Deliver this crafted blob to the app through a reachable input channel (e.g., file import, NFC token, USB smart card, or remote server response) so that Java code passes it into UbikeyJni.jGetKeyUsage.",
+              "When the JNI method is invoked, it copies the attacker-controlled bytes into native buffers and calls CERT_Load/CERT_GetKeyUsage with stack-allocated structures, leading to stack corruption and __stack_chk_fail.",
+              "On hardened builds, this results in a controlled crash (denial of service); on weaker builds or with additional primitives, an attacker might shape the overflow to control return address or other control data for further exploitation."
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.der /sdcard/Download/crafted_cert.der",
+              "adb shell am start -n <target.package/.CertViewerActivity> --es cert_path /sdcard/Download/crafted_cert.der",
+              "adb logcat | grep -i UbikeyJni"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_cert.der"
+            ],
+            "notes": "The PoC assumes existence of an activity or code path that loads a certificate file and calls UbikeyJni.jGetKeyUsage on its contents. Exact component names and file paths must be adapted to the real app."
+          }
+        },
+        "statistics": {
+          "time": "00:00:59",
+          "llm_requests": 2,
+          "llm_tool_calls": 5,
+          "input_tokens": 12734,
+          "output_tokens": 2568
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_NAME",
+            "??",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_NAME",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Compute_ASN1_ST_ChildNum, but it is just an indirect thunk via PTR_Compute_ASN1_ST_ChildNum_00181d50; real logic is elsewhere and not visible here. Crash reason is a logical abort-like termination (Compute_ASN1_ST_ChildNum) rather than a clear SIGSEGV/ASan report, so we must infer from call chain.",
+            "We decompiled JNI entry Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage, which performs JNI calls to get a byte buffer: it obtains length via a function pointer at *param_1+0x558, obtains pointer __src via *param_1+0x5c0, then allocates malloc(__size) where __size=(size_t)iVar2, then memset and memcpy(__s,__src,__size). There is no check that iVar2>0 or that malloc succeeded, and memcpy is called unconditionally. If __s is NULL and __size>0, this would be a classic null-deref via memcpy; however, standard malloc returns NULL only on allocation failure, not on untrusted input, and __size comes from Java length, not under direct attacker control beyond usual application inputs.",
+            "But the fuzz harness fuzz_one_input presumably controls the Java-side param_3 content length and data fully. In a real app, param_3 originates from Java-provided certificate bytes (likely user/imported file or network), so attacker can control its size and content, but not allocator success. The memcpy length equals the actual buffer length returned (iVar2), so as long as the JNI helper functions are consistent, no out-of-bounds occurs here.",
+            "The actual crash is reported as Compute_ASN1_ST_ChildNum, deeper inside ASN.1 parsing in libUbikeyJni. Many higher-level conversion functions call Compute_ASN1_ST_ChildNum unconditionally. Without decompiled body we cannot see precise bug, but name suggests computing child count in ASN.1 structure. Crash could stem from malformed ASN.1 leading to invalid indexing or bounds miscalculation. However available stack trace only shows generic Compute_ASN1_ST_ChildNum termination, without sanitizer evidence or SIGSEGV; could be a library-internal assertion/abort when encountering structurally invalid ASN.1 created by the fuzzer.",
+            "Critical question: is this path reachable with realistic app inputs? Yes: CERT_Load and Convert_ASN1_to_X509_CERT parse untrusted certificate bytes, typically from files, tokens, or servers. An attacker can send a malformed certificate to a relying party using this library. If the internal ASN.1 handling mishandles length/child counters, it might corrupt memory. But we have no direct code evidence: Compute_ASN1_ST_ChildNum is a pure thunk to an opaque pointer; we lack its body, so we cannot confirm out-of-bounds, only infer a logical failure.",
+            "Given that the termination reason is named after a helper rather than an OS signal, and we lack ASan/malloc error, most likely the fuzzing corpus produced deliberately invalid ASN.1 that made the library hit an internal error path or abort in the hidden implementation; could still be a DoS (crash) on malformed cert. Even if it is just a clean abort when encountering invalid ASN.1, that still constitutes at most a local denial-of-service on malformed certificate parsing. There is no clear evidence of memory safety exploitation from the observed frames.",
+            "Therefore, I classify this as not a clearly demonstrated vulnerability. It may represent a robustness issue (library cannot gracefully handle malformed ASN.1) but we lack proof of memory corruption or exploitable state. Severity is low and confidence in non-exploitability moderate because of missing implementation of Compute_ASN1_ST_ChildNum and related converters."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.55,
+          "reasons": [
+            "Compute_ASN1_ST_ChildNum is only a thunk to an opaque function pointer; its actual implementation and failure mode are not visible, so no concrete memory-safety bug can be shown",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage uses memcpy with a length derived from the same source as the buffer pointer, so there is no obvious mismatch or integer overflow; potential null-deref on malloc failure is not attacker-controllable in a meaningful way",
+            "Crash reason is a named helper (Compute_ASN1_ST_ChildNum) rather than a SIGSEGV/ASan report, suggesting an internal parsing failure or abort on malformed ASN.1 rather than clear memory corruption",
+            "While the path is reachable with untrusted certificate data, we lack evidence that malformed input leads to out-of-bounds access or control-flow hijack rather than a simple abort"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);",
+              "note": "Length and source pointer come from the same JNI helper; no independent attacker-controlled length used for memcpy, only potential risk on malloc failure which is environmental."
+            },
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "file": "libUbikeyJni.so",
+              "snippet": "void Compute_ASN1_ST_ChildNum(void)\n{\n  (*(code *)PTR_Compute_ASN1_ST_ChildNum_00181d50)();\n  return;\n}",
+              "note": "Function is a stub calling through a function pointer; implementation not visible, so precise bug (if any) cannot be determined."
+            },
+            {
+              "function": "CERT_Load",
+              "file": "libUbikeyJni.so",
+              "snippet": "void CERT_Load(void)\n{\n  (*(code *)PTR_CERT_Load_00181638)();\n  return;\n}",
+              "note": "All ASN.1/X509 conversion helpers are pointer-indirections to opaque implementations, limiting insight into actual parsing logic and preventing firm conclusion about memory corruption."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_NAME",
+            "Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Instrument or acquire symbols for the underlying ASN.1 implementation behind PTR_Compute_ASN1_ST_ChildNum_00181d50 to inspect its error handling and bounds checks",
+            "Add robust error handling around CERT_Load and related converters to catch and report ASN.1 parse failures without crashing the process",
+            "Consider defensive checks on malloc results and on JNI buffer accessors to guard against null pointers and inconsistent length/ptr results"
+          ],
+          "assumptions": [
+            "fuzzer controls the bytes and length of the certificate data supplied to jGetKeyUsage",
+            "Compute_ASN1_ST_ChildNum termination reflects an internal parser error rather than a hardware fault, as no SIGSEGV/ASan context is provided",
+            "Implementations behind function pointers (PTR_Compute_ASN1_ST_ChildNum_* etc.) are part of a closed-source crypto/ASN.1 library not visible in this analysis"
+          ],
+          "limitations": [
+            "No decompiled body is available for the actual Compute_ASN1_ST_ChildNum implementation or the ASN.1/X509 conversion routines, preventing confirmation of memory-safety violations",
+            "Crash termination type only names a helper function and does not provide OS-level signal or sanitizer diagnostics",
+            "Java call graph and precise origin of param_3 data are not provided, so assumptions about attacker control of certificate bytes may be incomplete"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:47",
+          "llm_requests": 4,
+          "llm_tool_calls": 7,
+          "input_tokens": 26295,
+          "output_tokens": 1945
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "??",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "er to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "Convert_ASN1_to_X509_TBS_CERT",
+          "ProgramEntry": "er to this frame",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame of interest is Convert_ASN1_to_X509_TBS_CERT in libUbikeyJni.so; crash reason is abort via __stack_chk_fail, indicating stack canary corruption, i.e., stack buffer overflow or similar memory corruption in this thread.",
+            "We decompiled both Convert_ASN1_to_X509_TBS_CERT variants. 0x00111320 is a trivial thunk calling an indirect function pointer PTR_Convert_ASN1_to_X509_TBS_CERT_00181498, while 0x0015a884 is the real implementation with ASN.1 parsing. The harness entry and library map point to Convert_ASN1_to_X509_TBS_CERT as the target, but the stack trace line 'Convert_ASN1_to_X509_TBS_CERT' without address likely corresponds to the real implementation (0x0015a884).",
+            "The implementation of Convert_ASN1_to_X509_TBS_CERT at 0x0015a884 allocates a 0x40‑byte heap object into local_48 (either via calloc if *param_2 == 0, or reusing *param_2). It then calls a sequence of helper functions (FUN_0015aac8, FUN_0015abec, etc.) that populate various fields in this fixed‑size structure, and optionally Convert_ASN1_to_X509_EXTENSIONS for extensions. There are no obvious memcpy/memmove calls or explicit buffer writes in this function; all actual ASN.1 parsing and field writes happen inside the helper routines, which we do not see here.",
+            "Because the crash is specifically a stack canary failure (__stack_chk_fail), we must identify which function has a stack protector and is likely overflowing. Convert_ASN1_to_X509_TBS_CERT itself does not show explicit large local arrays; its locals are several pointers/ints only, so the likely overflow is in one of the called helper functions (e.g., Convert_ASN1_to_X509_EXTENSIONS, or FUN_0015aff8 et al.) that operate on ASN.1 nodes and write into the 0x40‑byte structure or into their own stack buffers.",
+            "Data‑flow / taint: param_1 is an ASN.1 node handle coming from external parsing. The fuzz harness calls Convert_ASN1_to_X509_TBS_CERT directly, so param_1 is fully attacker‑controlled. The helper functions process child nodes and fields (Compute_ASN1_ST_ChildNum, Get_DER_Child, Delete_ASN1, Convert_ASN1_to_X509_EXTENSIONS). All length/structure validation is done only via iVar1 < 8 and checking return codes of helpers; there is no explicit length check for individual fields, and no evidence of upper bounds on extension count or string lengths at this level. Thus, an attacker can supply arbitrarily long or malformed ASN.1 that will be traversed and decoded by the helper parsers.",
+            "The stack canary failure implies that some function further down overwrote a local buffer or return metadata based on ASN.1 content. Since inbound ASN.1 originates from attacker‑controlled data (file/network/cert blob) and we see no strong validation mediating field sizes, this matches a classic stack‑based buffer overflow caused by unsafe parsing of untrusted ASN.1 structures. Even though the exact helper where memcpy occurs has not been decompiled, the combination of __stack_chk_fail, ASN.1 parsing, and attacker‑controlled param_1 is strong evidence of memory corruption, not a harness artifact.",
+            "JNI entry point Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage also shows dangerous patterns with respect to native buffers: it obtains a certificate blob length (iVar2) from a Java object via a function pointer, allocates malloc(__size), zeroes then memcpy’s __size bytes from a src pointer also obtained from Java. There are no checks for negative lengths, extremely large sizes, or allocation failure; however, malloc+memcpy using the same size is internally consistent. The more relevant path for this crash is that CERT_Load and CERT_GetKeyUsage eventually parse ASN.1 and call into Convert_ASN1_to_X509_TBS_CERT or its helpers, feeding them attacker‑supplied certificate data. Thus, the JNI method provides a realistic attack surface from untrusted certificate content.",
+            "The crash occurs under fuzzing via the harness entry Convert_ASN1_to_X509_TBS_CERT, but the same code path is reachable from normal app logic when parsing key usage from a certificate, so this is not purely a harness‑only path. The stack canary abort indicates deterministic detection of memory corruption that would otherwise allow arbitrary code execution; under typical conditions, this is at least a high‑severity issue. Without decompiling the exact helper (e.g., Convert_ASN1_to_X509_EXTENSIONS), we cannot map the precise CWE beyond knowing it is a stack‑based buffer overflow or similar memory‑write past bounds, but the pattern fits CWE‑121/CWE‑787.",
+            "Given the clear evidence: (1) __stack_chk_fail abort, (2) ASN.1 parsing with minimal validation and attacker‑control over param_1 from JNI, (3) known fragility of ASN.1 parsers and use of multiple helper routines likely containing unsafe memory operations, I assess this as a real, likely exploitable vulnerability exposed via certificate/key‑usage parsing. Confidence is high but not absolute (we lack the exact overflowing helper function code), so I set confidence to about 0.85 and severity to high (potential RCE via memory corruption in native parsing)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.85,
+          "reasons": [
+            "Process aborts in __stack_chk_fail, indicating stack buffer overflow or similar memory corruption in native code.",
+            "Convert_ASN1_to_X509_TBS_CERT parses attacker‑controlled ASN.1 (certificate) data via multiple helper functions without visible field‑size validation at this level.",
+            "JNI method Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage feeds untrusted certificate blobs into CERT_Load/CERT_GetKeyUsage, which plausibly reach Convert_ASN1_to_X509_TBS_CERT, creating a realistic attack surface.",
+            "The fuzz harness calls the same native parsing function directly, so the crash is not due to an artificial JNI harness condition but due to genuine parser behavior under malformed input."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Convert_ASN1_to_X509_TBS_CERT @ 0015a884",
+              "address": "0015a884",
+              "file": "libUbikeyJni.so",
+              "snippet": "int Convert_ASN1_to_X509_TBS_CERT(long param_1,long *param_2){... iVar1 = Compute_ASN1_ST_ChildNum(param_1); if (iVar1 < 8) { local_3c = 0; } else { iVar2 = FUN_0015aac8(param_1,local_48); ... iVar2 = FUN_0015aff8(param_1,(long)local_48 + 0x30); ... local_3c = Convert_ASN1_to_X509_EXTENSIONS(local_38,(long)local_48 + 0x38); ... } ...}",
+              "note": "Top application‑level frame where ASN.1 structure is traversed; helper functions likely perform unsafe writes based on attacker‑controlled ASN.1 content."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n... CERT_Load(&local_440,auStack_438);\n... CERT_GetKeyUsage(local_440,0x400,auStack_428);",
+              "note": "JNI entry accepts arbitrary certificate bytes from Java, copies into native heap, and calls certificate parsing routines, creating a realistic path from untrusted input to ASN.1 parsing vulnerable code."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage -> CERT_Load/CERT_GetKeyUsage (internal) -> Convert_ASN1_to_X509_TBS_CERT @ 0015a884 -> FUN_0015aac8/FUN_0015abec/FUN_0015ac54/... (internal helpers) -> stack corruption -> __stack_chk_fail"
+          ],
+          "recommendations": [
+            "Decompile and audit all ASN.1 helper functions (e.g., FUN_0015aac8, FUN_0015aff8, Convert_ASN1_to_X509_EXTENSIONS) for unsafe buffer usage, adding strict bounds checks before writes.",
+            "Enable compiler stack protections and, if possible, compile with sanitizers in test builds to catch and localize the exact overflowing function, then fix by using length‑checked APIs and limiting ASN.1 field sizes.",
+            "Add robust ASN.1 input validation layers (maximum size, depth, and count checks) before invoking native parsing from Java, and treat any parsing error as fatal without continuing processing."
+          ],
+          "assumptions": [
+            "CERT_Load/CERT_GetKeyUsage internally use Convert_ASN1_to_X509_TBS_CERT or related ASN.1 parsing routines for certificate handling.",
+            "The crashed frame shown as Convert_ASN1_to_X509_TBS_CERT corresponds to the real implementation at 0x0015a884 rather than the trivial thunk at 0x00111320.",
+            "param_1 to Convert_ASN1_to_X509_TBS_CERT is derived from untrusted ASN.1 data provided by the attacker via Java or fuzz input."
+          ],
+          "limitations": [
+            "Helper functions called by Convert_ASN1_to_X509_TBS_CERT (e.g., FUN_0015aac8, Convert_ASN1_to_X509_EXTENSIONS) were not decompiled here, so the exact overflowing buffer and write operation are not identified.",
+            "The exact call path from CERT_GetKeyUsage to Convert_ASN1_to_X509_TBS_CERT is inferred rather than directly observed in the stack trace.",
+            "We do not see the full native stack trace beyond __stack_chk_fail and Convert_ASN1_to_X509_TBS_CERT, limiting precise localization of the overflow."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or malformed X.509 certificate/key‑usage ASN.1 blob processed via jGetKeyUsage JNI method or equivalent parsing entrypoint.",
+            "prerequisites": [
+              "Ability to supply or influence certificate/key‑usage data that the app passes into Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage (e.g., via file, network, or protocol input).",
+              "Target device runs a build without additional mitigations beyond standard stack canaries (e.g., typical release build)."
+            ],
+            "exploit_pipeline": [
+              "Craft an X.509 certificate with malformed or oversized ASN.1 structures in the TBSCertificate or extensions fields, targeting fields handled by FUN_0015aac8/FUN_0015aff8/Convert_ASN1_to_X509_EXTENSIONS.",
+              "Deliver this certificate to the app through whatever mechanism it uses to load or inspect certificates, ensuring it reaches the jGetKeyUsage native method.",
+              "When the app invokes Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage, the JNI layer copies the certificate bytes and calls CERT_Load/CERT_GetKeyUsage, which in turn parse ASN.1 via Convert_ASN1_to_X509_TBS_CERT and its helpers.",
+              "The malformed ASN.1 causes a stack buffer overflow in one of the helper routines, corrupting the stack and triggering __stack_chk_fail; in a build without canaries or with additional vulnerabilities, this could be turned into control‑flow hijack.",
+              "Iterate on the malformed ASN.1 payload to control overwritten return addresses or function pointers for potential RCE on vulnerable builds."
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.der /sdcard/Download/payload_cert.der",
+              "adb shell am start -n <app.package>/<app.activity> --es cert_path /sdcard/Download/payload_cert.der",
+              "adb logcat | grep -i UbikeyJni"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_cert.der"
+            ],
+            "notes": "Exact exploit primitives (e.g., overwritten return address) depend on the internal layout of the overflowing helper’s stack frame and presence of mitigations like ASLR and NX. At minimum, the bug is a robust crash (DoS) when parsing attacker‑supplied certificates; with careful shaping of ASN.1, it may be escalated to RCE on some builds."
+          }
+        },
+        "statistics": {
+          "time": "00:00:44",
+          "llm_requests": 5,
+          "llm_tool_calls": 5,
+          "input_tokens": 31518,
+          "output_tokens": 2915
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "??",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocators/sanitizers is Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage in libUbikeyJni.so, decompiled. Termination is abort via __stack_chk_fail, indicating stack canary corruption, typically from a stack buffer overflow in this function or a callee using stack buffers.",
+            "Inspecting jGetKeyUsage: it calls a JNI env function at *param1+0x558 to get a length (iVar2), treats it as size_t, allocates heap buffer __s = malloc(__size), then memset/memcpy __size bytes from __src (a pointer from another JNI call). No bounds issues on heap buffer: malloc size equals copy size, so overflow is unlikely there. Potential integer issues if iVar2<0, but length from GetArrayLength is non-negative in JNI. However the key point is use of fixed-size stack buffers auStack_438[16] and auStack_428[1024] and interaction with CERT_GetKeyUsage.",
+            "BINSTR_Create(auStack_438) and BINSTR_SetData(__s,iVar2,auStack_438) operate on a 16-byte stack object; these helpers likely treat that memory as a small struct and should be safe if implemented correctly. The more interesting part: memset(auStack_428,0,0x400) then CERT_GetKeyUsage(local_440,0x400,auStack_428). The function passes the correct buffer length (1024) to CERT_GetKeyUsage, so as long as CERT_GetKeyUsage respects this length, there's no overflow. Stack canary failure suggests some stack write overran local variables/return address, but the decompiled body itself does not contain any unsafe direct writes (only memset with constant length 0x10 and 0x400, and memcpy to heap).",
+            "Therefore, if a stack overflow occurred, it is much more likely inside CERT_Load or CERT_GetKeyUsage (or BINSTR_*), which parse attacker-controlled certificate data. However, this crash trace only shows abort -> __stack_chk_fail -> ??, but we know jGetKeyUsage is the app frame; Ghidra decomposition shows no direct overflow, so root cause is in callee library code not shown here. Without decompiling CERT_GetKeyUsage/CERT_Load further and correlating with stack trace, we cannot prove the exact unsafe operation. Also, the fuzz harness passes arbitrary param_3; in real app, jGetKeyUsage is presumably given a certificate byte[]/String; CERT_* expect well-formed X.509 data. Stack overflow on malformed cert still constitutes a vulnerability if untrusted certs are accepted, but this app likely uses user- or server-provided certs, so attack surface is plausible.",
+            "However, the immediate function under analysis uses correct buffer sizes and forwards length 0x400 to CERT_GetKeyUsage, and CERT_Load uses a bounded BINSTR that was created with the correct data pointer/length. No evidence of ignoring lengths is visible here. Given no direct misuse in jGetKeyUsage and uncertainty whether CERT_* have their own bugs vs. the harness feeding totally unrealistic inputs, classification leans towards \"unclear\". But since the crash is a stack canary abort and it is triggered by parsing attacker-controlled certificate bytes, there is at least a moderate likelihood of a real memory safety issue in CERT_GetKeyUsage or CERT_Load. Still, absent their decompilation, we cannot assign high confidence.",
+            "Net: jGetKeyUsage itself looks safe; any vulnerability would be in CERT_* routines. Because the task is to classify this crash instance, and evidence in this function does not reveal an obvious bug, I will mark as not confidently vulnerable, with low-medium confidence, and note that deeper analysis of CERT_GetKeyUsage is needed."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Abort via __stack_chk_fail implies memory corruption, but the decompiled JNI wrapper jGetKeyUsage uses correct-sized buffers and passes explicit lengths to helpers.",
+            "Heap buffer __s is allocated exactly iVar2 bytes and memcpy uses the same size, so no heap overflow path is evident here; JNI length from GetArrayLength is non-negative.",
+            "Potential overflow is more likely inside CERT_Load or CERT_GetKeyUsage when parsing certificate data, but their implementations were not analyzed in this crash, so no concrete unsafe operation is identified.",
+            "Fuzz harness may be providing arbitrarily malformed data that production code might never process, making exploitability uncertain."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "address": "00117678",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nmemset(auStack_428,0,0x400);\niVar2 = CERT_GetKeyUsage(local_440,0x400,auStack_428);",
+              "note": "JNI method allocates heap buffer using length from Java, then calls certificate parsing helpers with explicit buffer length 0x400; no direct stack overflow visible here."
+            }
+          ],
+          "call_sequence": [
+            "JNI Env (Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage) -> BINSTR_Create -> BINSTR_SetData -> CERT_Load -> CERT_GetKeyUsage"
+          ],
+          "recommendations": [
+            "Decompile and fuzz CERT_Load and CERT_GetKeyUsage directly to see if malformed certificate data can overflow internal stack buffers.",
+            "Add defensive checks on iVar2 (maximum expected size) before malloc/memcpy to avoid large allocations and potential downstream misuse.",
+            "Enable ASan/stack protector builds for libUbikeyJni.so and rerun fuzzing to capture more detailed traces inside CERT_* routines."
+          ],
+          "assumptions": [
+            "param_3 in jGetKeyUsage ultimately comes from a Java byte[] or similar untrusted input.",
+            "CERT_Load and CERT_GetKeyUsage are implemented within libUbikeyJni.so but their bodies were not inspected for this assessment.",
+            "The crash stack reported only abort and __stack_chk_fail without more precise frame info for CERT_* functions."
+          ],
+          "limitations": [
+            "No direct visibility into CERT_Load and CERT_GetKeyUsage implementations, which likely contain the actual overflow if any.",
+            "Stack trace is truncated and does not show exact crashing instruction address.",
+            "JNI environment behavior under fuzzing may differ from real application usage, affecting reachability of this crash path."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:40",
+          "llm_requests": 5,
+          "llm_tool_calls": 5,
+          "input_tokens": 68314,
+          "output_tokens": 1638
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Get_DER_Child",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Get_DER_Child",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below __memcpy is inside libUbikeyJni.so; need to inspect caller logic. Decompilation of Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage shows explicit malloc/memcpy based on a length from JNI env function pointer table.",
+            "The function obtains iVar2 = env->GetArrayLength(param_3); then casts to size_t __size. It then calls env->GetByteArrayElements (or similar) to get __src, allocates __size bytes via malloc, memset, and then memcpy(__s, __src, __size). Crash in __memcpy is therefore directly tied to __size and pointers __s/__src.",
+            "Potential issues: (1) iVar2 < 0 leading to huge size_t __size after cast, causing malloc failure (NULL) and memcpy with NULL dst; (2) env returning NULL for __src but code blindly memcpy; (3) integer truncation or misuse of env APIs is less likely because they use iVar2 and __size consistently. However, code calls memset(__s,0,__size) and memcpy(__s,__src,__size) before checking if __s == NULL, so NULL dst leads to immediate crash. This is a classic unchecked malloc return -> NULL deref, which is a memory safety bug, though typically DoS rather than code execution.",
+            "Source buffer __src might also be NULL; JNI GetByteArrayElements can return NULL on OOM or exceptions; code never tests __src. That leads to memcpy from NULL as well. Both pointers are fully under app control via JNI APIs; the attacker controls the byte array length and contents via Java, but cannot force malloc to partially succeed with small size etc. However, they can provide very large arrays to try to force malloc to fail and trigger NULL deref, creating a reliable process crash (DoS) if memory pressure conditions allow.",
+            "Because this is JNI code in a security library that would run in a regular app context, attacker here is likely an app user or caller controlling inputs (keys/certificates). The bug is directly in application-level native code, not harness-only: jGetKeyUsage will be invoked in real app flows with untrusted certificate data. Even though the immediate effect seen in fuzzing is crashes in __memcpy, the underlying bug is failure to check malloc/JNI result pointers and blindly using them. That is a real vulnerability (denial of service) but not clearly exploitable for RCE, as there is no OOB write/read, only NULL deref. CWE is improper handling of NULL pointers / OOM.",
+            "Other ASN.1 functions (Decode_DER_ASN1_ST, Get_DER_Child, Convert_ASN1_to_X509_CERT, CERT_Load) are imported through function pointers and not visible, so there might be deeper memory issues; but based solely on this crash and evidence, we only see the memcpy involving __s and __src with length equal to array size. There is no sign of size miscalculation or missing bounds checks for memcpy, so buffer overflow is unlikely unless the JNI length source is inconsistent with allocated size, which it is not: they use same __size.",
+            "Given all that, classify as a real but limited vulnerability: uncontrolled NULL dereference in native layer reachable from Java, leading to potential app crash/DoS via large or malformed input. Confidence is high because decompiled code is very clear. Severity is medium (local DoS) rather than high/critical. CWE could be CWE-476 (NULL pointer dereference) and possibly CWE-252 (Unchecked Return Value)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.93,
+          "reasons": [
+            "Decompiled Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage shows malloc(__size) return used before NULL check",
+            "Code calls memset(__s,0,__size) and memcpy(__s,__src,__size) without verifying __s or __src are non-NULL, so OOM or JNI failure yields NULL dereference in memcpy",
+            "__size comes directly from attacker-controlled Java byte array length, enabling large allocations to force OOM and trigger reproducible crash (DoS)"
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-252"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "address": "0x00117678",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nif (__s == (void *)0x0) {\n  local_448 = 0;\n} else {\n  ...\n}",
+              "note": "malloc result __s is used in memset/memcpy before being checked for NULL; __src is also unchecked."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage @ 0x00117678",
+            "CERT_Load @ 0x00111660",
+            "Convert_ASN1_to_X509_CERT @ 0x00110960",
+            "Decode_DER_ASN1_ST @ 0x001107b0",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add immediate NULL checks after malloc and JNI GetByteArrayElements/GetPrimitiveArrayCritical calls before using the returned pointers",
+            "Treat negative or excessively large array lengths as errors before casting to size_t and allocating",
+            "Add robust error propagation back to Java (e.g., throw exception) instead of dereferencing NULL and crashing"
+          ],
+          "assumptions": [
+            "JNI function pointers at offsets 0x558 and 0x5c0 correspond to GetArrayLength and GetByteArrayElements or equivalent",
+            "Attackers can influence the byte array passed as param_3 to jGetKeyUsage via Java-layer inputs (e.g., certificate data)",
+            "OOM or JNI failures that return NULL are possible under realistic device memory conditions"
+          ],
+          "limitations": [
+            "Exact JNI method identities for env table slots 0x558/0x5c0 are inferred, not labeled",
+            "Decompiled code for underlying CERT_* and ASN.1 functions is via function pointers and not visible, so deeper issues may exist",
+            "Fuzzing context does not prove reachability from production Java UI flows, though JNI signature suggests it is used"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a very large or specially crafted Java byte[] to UbikeyJni.jGetKeyUsage, causing native malloc/JNI calls to fail and return NULL, leading to crash",
+            "prerequisites": [
+              "Ability to execute or trigger UbikeyJni.jGetKeyUsage with attacker-controlled byte[] input",
+              "Device memory conditions that allow malloc/JNI to return NULL for the requested size"
+            ],
+            "exploit_pipeline": [
+              "From Java, obtain a reference to UbikeyJni.jGetKeyUsage (or the wrapper that calls it) and identify its byte[] parameter",
+              "Construct an excessively large byte[] payload (e.g., tens or hundreds of MB) and fill with arbitrary data",
+              "Invoke jGetKeyUsage with this large array repeatedly or under low-memory conditions to cause malloc/GetByteArrayElements to fail and return NULL",
+              "When native code dereferences the NULL pointer in memset/memcpy, the app process crashes, achieving a denial of service"
+            ],
+            "poc_commands": [
+              "adb shell am start -n <package>/<MainActivity> --es cert_path /sdcard/Download/large_cert.bin",
+              "adb push /path/to/large_cert.bin /sdcard/Download/large_cert.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/large_cert.bin"
+            ],
+            "notes": "Exact Java method name and activity are unknown; attacker would need to identify the Java wrapper exposing jGetKeyUsage. The core requirement is that user-controlled certificate/byte[] flows into this JNI method."
+          }
+        },
+        "statistics": {
+          "time": "00:00:45",
+          "llm_requests": 5,
+          "llm_tool_calls": 11,
+          "input_tokens": 31642,
+          "output_tokens": 2090
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top app frame below memcpy is Decode_DER_ASN1_ST @001221d0 where memcpy is called; need to inspect its args and dataflow.",
+            "Decompiled Decode_DER_ASN1_ST shows it parses DER ASN.1 from param_1 (DER buffer), allocates buffers based on parsed length local_34, then calls memcpy(dest = local_40[2], src = param_1 + (local_30+2), len = local_34).",
+            "local_34 is derived from DER length encoding in param_1[1..] possibly multi-byte; code specifically handles long-form length (high bit set) or short-form. No bounds checking against actual backing size of param_1; param_1 is treated as sufficiently large memory region.",
+            "Length computation: in long-form, local_34 is assembled by shifting bytes param_1[local_24+1] according to local_30; this can yield very large values; only checked is if (int)local_34 < 0 then reject, which is meaningless for unsigned length, and then malloc((int)local_34). Thus destination buffer is exactly size local_34 (potential int truncation risk for >INT_MAX but primary issue is memcpy may read past end of param_1 if the encoded length exceeds actual provided buffer).",
+            "Thus vulnerability is OOB read from attacker-provided param_1; ASAN/memcpy crash consistent with this. Fuzzer likely controlled DER bytes via JNI earlier. Need to confirm control path from JNI.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage interacts with Java env: it gets length via function pointer at *param_1+0x558, gets pointer to data __src via *param_1+0x5c0, allocates __s = malloc(__size), memcpy(__s,__src,__size) then passes __s and length iVar2 into BINSTR_SetData, CERT_Load(&local_440, auStack_438), etc. CERT_Load(param_1,param_2) immediately calls Decode_DER_ASN1_ST(*param_2).",
+            "Need to understand what BINSTR_SetData does; but CERT_Load second arg auStack_438 is some BINSTR object initialized by BINSTR_Create then populated with __s & length. CERT_Load @001369a4 decompiles to: it checks param_1!=0, then *param_1=0; lVar2 = Decode_DER_ASN1_ST(*param_2); so *param_2 is presumably the internal pointer to DER bytes; so attacker control flows directly into Decode_DER_ASN1_ST param_1, via JNI-provided key usage blob.",
+            "The JNI environment method giving length and pointer (likely GetByteArrayLength / GetByteArrayElements) indicates param_3 is Java byte[] or string passed from app/fuzzer; fuzzer controls its contents and length; there is no validation before Decode_DER_ASN1_ST; only memcpy copies exactly __size bytes from Java buffer into heap buffer __s; any malformed ASN.1 length in first bytes is accepted; Decode_DER_ASN1_ST only checks param_1!=0 and some trivial local_34<0 test but no bound vs __size.",
+            "Therefore, if DER claims length local_34 larger than actual __size-(local_30+2), memcpy reads past end of __s, causing heap OOB read and crash in __memcpy; classic unsafe parse bug. Also possible integer truncation of local_34 to int for malloc, but main issue is OOB read. This is memory safety vulnerability clearly influenced by untrusted input.",
+            "Reachability: In production, this JNI is a public API used by app to process certificates/keys; the DER data likely comes from keystore, file, or network. Malicious app or remote cert could trigger malformed DER; hence realistic. This is not a harness-only issue; harness just exposes it. No evidence of size validation in intermediate functions like BINSTR_SetData/CERT_Load/Decode_DER_ASN1_ST; we saw Decode directly uses param_1 pointer without checking length; BINSTR likely just wraps pointer/length; even if it stored length, CERT_Load ignores it.",
+            "Severity: OOB read from heap in native code parse; could allow info leak or crash via DoS. Without write, exploitation is usually lower than RCE, but can be used for limited info disclosure or ASLR bypass; for mobile app context, categorize as high-impact memory safety bug. CWE-125 (out-of-bounds read) and potentially CWE-190; but primary CWE-125 / 787-like. Confidence high because decompiled code clearly unsafe and matches crash in memcpy."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "Decode_DER_ASN1_ST performs memcpy with length derived from untrusted ASN.1 length field without any bound check against actual buffer size, causing heap out-of-bounds read",
+            "JNI method Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage passes attacker-controlled DER data (Java byte array) to CERT_Load/Decode_DER_ASN1_ST with no validation",
+            "Crash in __memcpy is consistent with over-long ASN.1 length leading to read past end of allocated buffer",
+            "Code path is reachable via JNI in realistic app usage (certificate/key parsing), not a harness-only artifact"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787",
+            "CWE-190"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "001221d0",
+              "file": "libUbikeyJni.so",
+              "snippet": "pvVar2 = malloc((long)(int)local_34);\nlocal_40[2] = (long)pvVar2;\n...\nmemcpy((void *)local_40[2],param_1 + (int)(local_30 + 2),(long)(int)local_34);",
+              "note": "Length local_34 derived from param_1 bytes; no check against actual size of param_1 buffer."
+            },
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "001221d0",
+              "file": "libUbikeyJni.so",
+              "snippet": "if ((int)local_34 < 0) {\n  Delete_ASN1(local_40);\n  local_40 = (long *)0x0;\n} else { ... }",
+              "note": "Ineffective validation; negative check on unsigned length is meaningless; large positive lengths allowed."
+            },
+            {
+              "function": "CERT_Load",
+              "address": "001369a4",
+              "file": "libUbikeyJni.so",
+              "snippet": "*param_1 = 0;\nlVar2 = Decode_DER_ASN1_ST(*param_2);",
+              "note": "CERT_Load forwards BINSTR internal pointer directly into Decode_DER_ASN1_ST without size validation."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage",
+              "address": "00117678",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nBINSTR_Create(auStack_438);\nBINSTR_SetData(__s,iVar2,auStack_438);\nCERT_Load(&local_440,auStack_438);",
+              "note": "Attacker-controlled Java data copied into __s and then passed as DER to CERT_Load/Decode_DER_ASN1_ST."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage @ 00117678",
+            "Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage @ 00117678 -> CERT_Load @ 001369a4",
+            "CERT_Load @ 001369a4 -> Decode_DER_ASN1_ST @ 001221d0",
+            "Decode_DER_ASN1_ST @ 001221d0 -> memcpy (libc)"
+          ],
+          "recommendations": [
+            "In Decode_DER_ASN1_ST, validate that the parsed length local_34 plus header (local_30+2) does not exceed the actual buffer size of param_1 before calling memcpy; reject or truncate otherwise.",
+            "Propagate and enforce explicit buffer length parameters through BINSTR/CERT_Load/Decode_DER_ASN1_ST instead of relying solely on encoded ASN.1 lengths.",
+            "Add robust ASN.1 parsing with overflow checks (including checking for excessive length, integer overflow on shifts, and maximum allowed certificate size) and augment with unit tests and fuzzing for malformed DER inputs."
+          ],
+          "assumptions": [
+            "param_3 in Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage corresponds to a Java byte array whose contents are attacker-controlled in some contexts (e.g., untrusted certificates).",
+            "BINSTR_SetData stores a pointer to __s without additional internal length enforcement used by CERT_Load, as CERT_Load directly dereferences *param_2.",
+            "Crash in __memcpy is due to OOB read from __s rather than some unrelated heap corruption earlier."
+          ],
+          "limitations": [
+            "Exact implementation of BINSTR_Create/BINSTR_SetData/CERT_GetKeyUsage not inspected; assumptions made based on how CERT_Load uses *param_2.",
+            "Stack trace for __memcpy not symbolized to precise offset, so association with shown memcpy is inferred by logic and crash description.",
+            "Threat model (who controls certificate data) depends on app usage patterns, which are not fully known."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Passing a malformed DER-encoded certificate/key blob into the UbikeyJni.jGetKeyUsage JNI method via its Java wrapper",
+            "prerequisites": [
+              "Ability to supply or influence the DER-encoded certificate or key processed by jGetKeyUsage (e.g., via imported file, network-delivered cert, or inter-app communication).",
+              "Target app must expose a Java API or component that ultimately calls UbikeyJni.jGetKeyUsage with untrusted data.",
+              "Attacker can craft arbitrary ASN.1 length fields in the supplied DER blob."
+            ],
+            "exploit_pipeline": [
+              "Craft a DER-encoded blob where the ASN.1 length field claims a very large value, exceeding the actual data size, while keeping the total Java byte array within reasonable app limits.",
+              "Deliver this blob to the application through a reachable vector (e.g., file import, custom URI, or IPC) that causes the Java side to pass it into the jGetKeyUsage wrapper, reaching Java_com_ubikey_jni_UbikeyJni_jGetKeyUsage.",
+              "When CERT_Load/Decode_DER_ASN1_ST parses the blob, it will compute an over-large local_34 and call memcpy on __s, reading past the allocated buffer and causing a crash in __memcpy, leading to denial of service and potentially leaking heap data in some environments.",
+              "Iterate payload adjustments (length bytes, size, alignment) to influence how far memcpy reads, potentially probing heap layout or causing adjacent-object reads if combined with additional side channels."
+            ],
+            "poc_commands": [
+              "adb push /path/to/malformed_cert.der /sdcard/Download/malformed_cert.der",
+              "adb shell am start -n <package>/<activity> --es cert_path \"/sdcard/Download/malformed_cert.der\"",
+              "adb logcat | grep -i UbikeyJni"
+            ],
+            "poc_files": [
+              "/sdcard/Download/malformed_cert.der"
+            ],
+            "notes": "PoC assumes existence of a Java wrapper that loads a certificate from a file path and passes its byte[] into UbikeyJni.jGetKeyUsage; actual activity/component names must be filled based on the real app. The malformed DER should specifically manipulate the length byte(s) following the ASN.1 tag to exceed the real buffer size."
+          }
+        },
+        "statistics": {
+          "time": "00:00:49",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 32310,
+          "output_tokens": 2771
+        }
+      }
+    ]
+  }
+}

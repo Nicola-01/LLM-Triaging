@@ -1,0 +1,279 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.qustodio.family.parental.control.app.screentime",
+      "min_sdk": 22,
+      "target_sdk": 32,
+      "version_name": "182.16.0",
+      "version_code": "1821600"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strchr_default",
+          "StackTrace": [
+            "strchr_default",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so": [
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is decodeBytes@00101b28 inside libtbxml.so; strchr_default in trace indicates crash during strchr/strpbrk/strstr usage, likely due to malformed XML buffer contents.",
+            "Decompiled Java_za_co_twyst_tbxml_TBXML_jniParse shows it allocates a state structure, then uses JNI GetArrayLength-like call via function pointer at *param_1+0x558 to get length of the byte[] argument, allocates (len+1) bytes, and fills it via another JNI function pointer (*param_1+0x640), equivalent to GetByteArrayRegion. This ensures a contiguous char buffer with size exactly len+1, no over-read or unterminated use prior to decodeBytes.",
+            "decodeBytes(param_1) uses *param_1 as a char* pointer into that allocated buffer, then drives a full XML tokeniser: searches for '<', parses comments, CDATA, element tags, attributes, and constructs a linked structure via nextAvailableElement/nextAvailableAttribute. It performs many strchr/strpbrk/strstr/strlen/memcpy/builtin_strncpy, modifying the buffer in-place and using multiple pointer variables (pbVar9, pbVar12, pbVar15, __s1, etc.).",
+            "Key for vulnerability: whether any of these pointer operations can walk out of the allocated buffer based purely on crafted input. decodeBytes repeatedly calls strchr/strstr/strpbrk with the current local_8 pointer, which always derives from positions within the same buffer. Termination conditions: if strchr/strpbrk/strstr returns NULL, the function returns (or jumps to a label) rather than dereferencing. Loops like `while (pcVar6 = strstr(pcVar6,\"]]>\") , pcVar6 != 0) ...` check result before use. That suggests reasonable defensive coding for searching within the same NUL-terminated region.",
+            "However, there is a subtlety: NUL termination. The JNI bridge allocates len+1 and copies exactly len bytes but does NOT explicitly write `((char*)pvVar3)[len]=0`. If the incoming byte[] from Java is not guaranteed to end with 0, buffer is not NUL-terminated. strchr/strpbrk/strstr/strlen will continue reading past the allocated bytes into heap until they hit a 0. That is classical out-of-bounds read (and subsequent writes via memcpy/strncpy may also overrun if lengths use those extended spans).",
+            "Given fuzz harness termination at strchr_default, this is consistent with heap OOB read: XML data without 0 byte causes unbounded scan. Because attacker controls the byte[] contents (jniParse([B) is called by KML loading with file/network data) and there is no validation or forced NUL termination in JNI or Java side (parse(String)/loadKml just pass bytes), the attacker can cause decodeBytes to read arbitrary-length past the buffer, leading to potential crash and information disclosure; with chained memcpy/builtin_strncpy that depend on strlen/strstr distances, this can escalate to heap corruption if source/destination overlap unboundedly.",
+            "This pattern is independent of the fuzz harness: same JNI path is used in real app via TBXML.parse(String) -> PluginKmlOverlay.loadKml -> ... -> TBXML.jniParse(byte[]). So the crash is a genuine, reachable memory safety bug (CWE-125/CWE-787).",
+            "Exploitability: at minimum, attacker can cause DoS by crafting KML/XML with no NUL byte in relevant region, causing OOB read on heap and potential SIGSEGV as seen with fuzz. Under some allocators this may not immediately crash but leaks memory contents or corrupts adjacent heap metadata via subsequent writes depending on how memcpy/builtin_strncpy behave. Given standard libc semantics, using strlen/strstr on unterminated buffers is a well-known primitive that can be weaponised, so classify as high severity with practical exploitability for DoS and potential further impact.",
+            "Therefore classify as vulnerable, high severity, with core flaw being missing explicit NUL termination of buffer before using C string APIs in decodeBytes. Confidence is high because we have direct decompiled code of JNI and decodeBytes and see the missing terminator."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.93,
+          "reasons": [
+            "JNI bridge allocates len+1 bytes for XML buffer but never writes the terminating NUL before passing to decodeBytes",
+            "decodeBytes uses C string functions (strchr/strstr/strpbrk/strlen) on this buffer assuming NUL termination, so crafted data without 0x00 causes out-of-bounds heap reads and subsequent unsafe writes via memcpy/strncpy",
+            "Crash occurs in strchr_default, consistent with OOB read from non-terminated buffer; call path is same as real app KML/XML parsing, not harness-only"
+          ],
+          "cwe_ids": [
+            "CWE-170",
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "file": "libtbxml.so",
+              "snippet": "puVar2 = (undefined8 *)calloc(1,0x38);\n iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // GetArrayLength\n *(int *)(puVar2 + 1) = iVar1;\n pvVar3 = calloc(1,(long)(iVar1 + 1));\n *puVar2 = pvVar3;\n (*pcVar5)(param_1,param_3,0,iVar1,pvVar3); // GetByteArrayRegion\n decodeBytes(puVar2);",
+              "note": "Allocates len+1 but does not set pvVar3[iVar1]=0 before decodeBytes, so buffer may not be NUL-terminated."
+            },
+            {
+              "function": "decodeBytes",
+              "address": "00101b28",
+              "file": "libtbxml.so",
+              "snippet": "local_8 = (byte *)*param_1;\n...\npcVar6 = strchr((char *)local_8,0x3c);\n...\npcVar7 = strstr(pcVar6,\"-->\");\n...\nsVar13 = strlen((char *)pbVar9);\n...\nmemcpy(pcVar6,pcVar6 + 9,((long)pcVar7 - (long)pcVar6) - 9);",
+              "note": "Multiple C string ops assume buffer is NUL-terminated; no length bounds are provided."
+            },
+            {
+              "function": "decodeBytes (thunk)",
+              "address": "00100f30",
+              "file": "libtbxml.so",
+              "snippet": "void decodeBytes(void){ (*(code *)PTR_decodeBytes_00112f60)(); }",
+              "note": "Indicates decodeBytes is central parsing routine; crash at strchr_default aligns with its use of strchr/strstr."
+            }
+          ],
+          "call_sequence": [
+            "TBXML.parse(String)",
+            "PluginKmlOverlay.loadKml(String)",
+            "PluginKmlOverlay.access$000(PluginKmlOverlay,String)",
+            "PluginKmlOverlay$1$1.run()",
+            "TBXML.jniParse(byte[])",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "decodeBytes",
+            "strchr_default"
+          ],
+          "recommendations": [
+            "In Java_za_co_twyst_tbxml_TBXML_jniParse, explicitly set ((char*)pvVar3)[iVar1] = '\\0' before calling decodeBytes so the buffer is always NUL-terminated",
+            "Audit all uses of decodeBytes and related parsing helpers to ensure they operate on validated, length-bounded buffers or are rewritten to use explicit length parameters instead of strlen/strchr on untrusted data",
+            "Add defensive bounds checks and unit tests using random and adversarial XML/KML inputs to catch future OOB reads/writes in this parser"
+          ],
+          "assumptions": [
+            "The JNI function pointer at *param_1+0x558 is equivalent to GetArrayLength and *param_1+0x640 to GetByteArrayRegion",
+            "No other code writes a NUL terminator into pvVar3 between calloc and decodeBytes",
+            "TBXML.jniParse(byte[]) receives attacker-controlled XML/KML data from files or network via parse(String)/loadKml"
+          ],
+          "limitations": [
+            "Exact XML/KML input sources in the production app are inferred from Java call graph, not fully enumerated",
+            "Heap layout and exact extent of over-read/writes depend on allocator behaviour and neighbouring allocations",
+            "Decompiler output may omit minor guard code, though none is visible for NUL termination"
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "malicious KML/XML content parsed through TBXML.jniParse(byte[])",
+            "prerequisites": [
+              "Attacker can supply or control a KML/XML file or string processed by PluginKmlOverlay.loadKml or TBXML.parse",
+              "Application runs on a device with standard libc where strlen/strchr on unterminated buffers can read past allocation"
+            ],
+            "exploit_pipeline": [
+              "Craft a KML/XML payload whose serialized bytes avoid 0x00 for a long stretch and contain complex nested tags/comments/CDATA to drive deep decodeBytes parsing",
+              "Deliver the payload to the target app via whichever mechanism it uses to load KML (e.g., from a file, URL, or IPC) so that TBXML.parse(String) is invoked and jniParse(byte[]) receives the bytes",
+              "When Java_za_co_twyst_tbxml_TBXML_jniParse copies the bytes into a heap buffer without NUL termination, decodeBytes runs a sequence of strchr/strstr/strlen searches past the allocated region, causing out-of-bounds reads and potential heap corruption",
+              "Observe the app crashing with SIGSEGV in strchr_default or related libc functions, demonstrating a reliable denial-of-service and potential starting point for more advanced heap exploitation"
+            ],
+            "poc_commands": [
+              "# Placeholder activity and file path; adjust to actual app components\nadb push crafted_kml.xml /sdcard/Download/crafted_kml.xml\nadb shell am start -n com.qustodio.family.parental.control.app.screentime/.MainActivity --es kml_path /sdcard/Download/crafted_kml.xml"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_kml.xml"
+            ],
+            "notes": "A minimal PoC payload can be a long ASCII string without any NUL bytes that includes at least one '<' to reach strchr calls; more complex nested constructs may be required to reach deeper memcpy/strlen paths that are more likely to crash."
+          }
+        },
+        "statistics": {
+          "time": "00:00:41",
+          "llm_requests": 3,
+          "llm_tool_calls": 4,
+          "input_tokens": 22113,
+          "output_tokens": 2332
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "strpbrk",
+          "StackTrace": [
+            "strpbrk",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so": [
+              "strpbrk",
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is decodeBytes in libtbxml.so, not the C library strpbrk itself. Crash reason is just labeled 'strpbrk', suggesting an invalid pointer passed to C library string search, likely from decodeBytes’ parsing of XML text.",
+            "Decompiled decodeBytes shows it parses an XML-like buffer in-place: searches for '<', comments, CDATA, then uses strpbrk in two main places: (1) to find next '<' or '>' in tag text, and (2) to find separators like space, '/', or newline. It performs many pointer walks and memcpys while rewriting the buffer and building an internal tree of elements/attributes.",
+            "Key inputs: decodeBytes takes param_1, whose first element (*param_1) is a pointer to the mutable buffer (local_8) holding XML. That buffer is allocated and filled in Java_za_co_twyst_tbxml_TBXML_jniParse (JNI entry).",
+            "Decompiled JNI function: it allocates a small context struct via calloc(1,0x38), then uses JNI function pointers from JNIEnv: at offset 0x558 likely GetArrayLength([B), stored to *(int*)(puVar2+1). Then it allocates pvVar3 = calloc(1, length+1). Then via function pointer at 0x640, likely GetByteArrayRegion, it copies the Java byte[] into pvVar3. So pvVar3 is a NUL-terminated clone of the input bytes. Then puVar2[0] = pvVar3, then decodeBytes(puVar2) is called. There is no validation or sanitization of contents; decodeBytes assumes it is well-formed XML-like text.",
+            "Thus, the attacker controls the entire contents of pvVar3 via Java byte[]. Because pvVar3 is allocated with length+1 and zero-initialized, basic out-of-bounds reads/writes from str/ mem* functions are mitigated as long as those functions rely on NUL termination within the buffer. However, decodeBytes does in-place rewrites and uses multiple strchr/strstr/strpbrk loops without explicit bounds checks beyond comparisons to pbVar9 (pointers found within buffer).",
+            "Crucially, local_8 is advanced based on search results, and pbVar9 is the result of strpbrk(pcVar8, \"<>\"). If strpbrk fails (returns NULL), decodeBytes returns cleanly. So any deref of pbVar9 occurs only when strpbrk succeeded. Many loops also compare iterators to pbVar9, so they should stay within discovered tag bounds.",
+            "Still, the crash is reported as happening inside strpbrk, which means strpbrk got an invalid pointer for its haystack or search set. The search set is always static literal \"<>\" or \" /\\n\", which is valid, so the haystack pointer must be invalid. That haystack originates from variables like pcVar8 or pcVar7 that are derived from earlier strchr/strstr results or manually incremented pointers, all starting from local_8 which comes from *param_1 (start of buffer). There are many complicated branches for CDATA, attributes, quotes, etc., and no explicit bounds checking except by comparison to pbVar9 (another internal pointer). It’s plausible that for malformed inputs missing terminators, some path increments pointers past the NUL terminator or beyond allocated buffer, eventually passing an invalid pointer to strpbrk, causing a crash.",
+            "However, calloc allocated length+1 bytes and set the last byte to 0. For most simple overruns scanning for '<' or '>' or '\"' or spaces, they will eventually hit the NUL terminator and stop. But there are nested loops that assume certain patterns like '<![CDATA[' and ']]>' and attribute formats with '=' and quoted values. Some loops use conditions like `if (pbVar9 <= __s1) goto LAB_00101da4;` to bail out if iterators cross pbVar9 (closing bracket) or end-of-tag. The parsing is defensive in many places, but not obviously proven safe; given the complexity, a memory-safety bug in this parser is very plausible.",
+            "Nonetheless, we must decide if this crash is a genuine vulnerability or harness/environmental. JNI side uses correct length and copies exactly that many bytes. Fuzzer can provide any arbitrary bytes via byte[] which is exactly what real app will get from KML files (PluginKmlOverlay.loadKml -> TBXML.parse(String) -> jniParse(byte[])). So taint from attacker input is real and route is realistic (KML from network or user). The parser working in-place on mutable buffer plus use of C string functions with untrusted content is classic source of exploitable bugs. The crash in strpbrk with no intervening allocator/sanitizer suggests an invalid haystack pointer from decodeBytes, which indicates memory corruption or invalid read. That’s a typical memory-safety vulnerability (CWE-787/CWE-119).",
+            "Because we do not see the exact crashing line, we can’t pinpoint a single memcpy with clearly wrong length; instead, we infer from complex pointer arithmetic and lack of comprehensive bounds checks. Since strpbrk is given an invalid pointer that came from within decodeBytes’s in-bounds buffer manipulations, it’s likely due to out-of-bounds pointer arithmetic, a classic bug. Exploitability: if attacker can craft XML/KML to cause decodeBytes to miscompute pointers, they can likely cause out-of-bounds reads and maybe writes (through subsequent memcpy/memcpy operations or assignments through those pointers), potentially leading to control over neighboring heap data. That is at least a high-severity memory corruption vulnerability.",
+            "Java call graph shows path from plugin.google.maps.PluginKmlOverlay.loadKml(String) -> TBXML.parse(String) -> jniParse([B). PluginKmlOverlay parses KML files, presumably from map overlays. Attackers could provide malicious KML to the app (e.g., via loading external URL or imported file) though exact mechanism isn’t decompiled here. Even if only local files, a malicious app or user could feed data. So attacker control over input is realistic.",
+            "Given available evidence, this looks like a real, potentially exploitable native parser bug triggered by malformed XML-like content, not a harness artifact. Confidence isn’t absolute because we don’t see exact OOB, but crash in strpbrk due to invalid pointer from complex parser that assumes structure strongly suggests a vulnerability, not just a benign abort.",
+            "Severity should be high because this is heap-based memory corruption in a widely-used parental-control app’s library, reachable from malicious KML or similar data. No evidence of trivial RCE yet, so not critical, but high is justified."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs inside libc strpbrk invoked by custom XML parser decodeBytes in libtbxml.so, indicating invalid pointer passed as haystack from app code rather than allocator/sanitizer abort.",
+            "decodeBytes performs complex in-place parsing using strchr/strstr/strpbrk and memcpy on a heap buffer fully controlled by attacker-supplied Java byte[], with no comprehensive bounds checks for malformed tag/CDATA/attribute patterns.",
+            "JNI entry Java_za_co_twyst_tbxml_TBXML_jniParse copies arbitrary Java byte[] directly into a mutable C buffer and calls decodeBytes without validation, so malformed XML/KML from realistic sources can trigger memory-safety issues (likely OOB read/write), giving at least DoS and potentially controllable heap corruption."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "decodeBytes",
+              "address": "00101b28",
+              "file": "libtbxml.so",
+              "snippet": "pbVar9 = (byte *)strpbrk(pcVar8,\"<>\");\nif (pbVar9 == (byte *)0x0) {\n  return;\n}\n...\n*pbVar9 = 0;",
+              "note": "strpbrk used on pointers derived from complex pointer arithmetic over attacker-controlled buffer; crash in strpbrk suggests haystack pointer can become invalid for malformed input."
+            },
+            {
+              "function": "decodeBytes",
+              "address": "00101b28",
+              "file": "libtbxml.so",
+              "snippet": "local_8 = (byte *)*param_1; ...\npcVar6 = strchr((char *)local_8,0x3c); ...\nlocal_8 = (byte *)(pcVar7 + -9);\nmemcpy(pcVar6,pcVar6 + 9,((long)pcVar7 - (long)pcVar6) - 9);\nmemcpy(local_8,pcVar7 + 3,\n       (size_t)(pcVar8 + (-((long)pcVar7 - (long)pcVar6) - (long)pcVar6) + -3));",
+              "note": "Parser rewrites attacker-controlled buffer in place via memcpy with lengths derived from pointer differences; malformed tags may break invariants and lead to OOB writes/invalid pointers."
+            },
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "address": "0010206c",
+              "file": "libtbxml.so",
+              "snippet": "puVar2 = (undefined8 *)calloc(1,0x38);\niVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // GetArrayLength\n*(int *)(puVar2 + 1) = iVar1;\npvVar3 = calloc(1,(long)(iVar1 + 1));\n*puVar2 = pvVar3;\n(*pcVar5)(param_1,param_3,0,iVar1,pvVar3); // GetByteArrayRegion\ndecodeBytes(puVar2);",
+              "note": "JNI entry copies entire Java byte[] into a heap buffer and immediately feeds it to the unsafe parser without any validation or bounds checking."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_za_co_twyst_tbxml_TBXML_jniParse @ 0010206c",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse @ 0010206c -> decodeBytes @ 00101b28",
+            "decodeBytes @ 00101b28 -> strpbrk @ 00100f40"
+          ],
+          "recommendations": [
+            "Add robust bounds checks in decodeBytes around all pointer arithmetic and string searches, ensuring iterators never advance beyond the allocated buffer and gracefully abort on malformed markup.",
+            "Avoid in-place parsing of attacker-controlled data; instead, use indices with explicit length tracking or switch to a well-tested XML/KML parser library.",
+            "Implement input validation in Java before invoking jniParse (e.g., limit maximum size, enforce encoding, and catch obviously malformed structures) and add defensive checks in JNI to verify allocation and parsing success before use."
+          ],
+          "assumptions": [
+            "The crash in strpbrk is due to an invalid haystack pointer originating from decodeBytes’ pointer arithmetic rather than a libc bug.",
+            "Attacker-controlled KML/XML data can reach TBXML.parse(String) in realistic app flows (e.g., via network or imported overlay file).",
+            "Decompiled functions reflect the production logic without significant obfuscation altering control flow."
+          ],
+          "limitations": [
+            "Exact crashing instruction within strpbrk and precise malformed input pattern are unknown, so specific OOB location cannot be pinpointed.",
+            "Java-side KML loading path (PluginKmlOverlay) was not decompiled here, so exact attacker control channel is inferred, not verified.",
+            "No sanitizer or ASAN logs are available to distinguish read vs write out-of-bounds or to measure overrun extent."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed KML/XML content fed into PluginKmlOverlay/TBXML.parse, causing native XML parser to mis-handle tags/CDATA/attributes.",
+            "prerequisites": [
+              "Ability to supply or influence KML/XML content processed by the app (e.g., loaded overlay, file import, or remote URL).",
+              "Target device running vulnerable version of com.qustodio.family.parental.control.app.screentime with libtbxml.so.",
+              "Knowledge or trial-and-error capability to craft malformed XML structures that stress CDATA/attribute parsing."
+            ],
+            "exploit_pipeline": [
+              "Craft a specially malformed XML/KML file with nested or unterminated CDATA sections and irregular attributes to drive decodeBytes through rarely tested branches that corrupt internal pointers.",
+              "Deliver this file to the app via its KML loading feature (e.g., as an overlay or configuration file) so that PluginKmlOverlay.loadKml(String) is invoked on attacker-controlled content.",
+              "When TBXML.parse(String) calls down to jniParse([B) and then decodeBytes, the malformed content causes out-of-bounds pointer arithmetic, leading to an invalid haystack pointer being passed to strpbrk and potentially heap memory corruption.",
+              "Iteratively refine the malformed payload to move from consistent app crashes (DoS) toward more controlled heap corruption, aligning overwritten data with allocator metadata or adjacent objects for possible code execution."
+            ],
+            "poc_commands": [
+              "# Copy crafted payload to device\nadb push /path/to/malicious_overlay.kml /sdcard/Download/malicious_overlay.kml\n\n# Launch app (activity name placeholder) and instruct tester to load the malicious overlay via UI\nadb shell am start -n com.qustodio.family.parental.control.app.screentime/.MainActivity",
+              "## If an exported intent or service accepts a KML path (placeholder; requires reverse engineering to fill in)\nadb shell am start -n com.qustodio.family.parental.control.app.screentime/.KmlImportActivity \\\n  --es kml_path \"/sdcard/Download/malicious_overlay.kml\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/malicious_overlay.kml"
+            ],
+            "notes": "Exploitability beyond denial-of-service requires further heap grooming and precise control of overwritten structures; current evidence confirms a native parser crash with attacker-controlled input but not yet full RCE."
+          }
+        },
+        "statistics": {
+          "time": "00:00:39",
+          "llm_requests": 3,
+          "llm_tool_calls": 7,
+          "input_tokens": 22423,
+          "output_tokens": 3264
+        }
+      }
+    ]
+  }
+}

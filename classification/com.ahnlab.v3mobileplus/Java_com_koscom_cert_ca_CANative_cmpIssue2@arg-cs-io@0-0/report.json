@@ -1,0 +1,168 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "AhnLab V3 Mobile Plus",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.koscom.cert.ca.CANative: cmpIssue2([B[BII)I>",
+          "JavaCallGraph": [
+            "<com.koscom.cert.ca.KSCmp: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;IIII)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;III)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <o.eh1: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.TapInterface: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CANative: cmpIssue2([B[BII)I>"
+          ],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpIssue2"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libzkeylib.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is ks_memcpy, which is just a thin wrapper calling PTR_ks_memcpy_001804e8; the real logic is in _dPKIHeader, so inspect that for unsafe memcpy usage.",
+            "Decompiled _dPKIHeader(long param_1) shows it parses a DER/ASN.1-like structure using helper decoders (__dSEQUENCE, __dCONTEXTSPECIFIC, __dOCTETSTRING, __get_len) and uses a local buffer acStack_468[1032] as temporary storage.",
+            "There are three direct ks_memcpy uses: (1) case 1: ks_memcpy(acStack_468, param_1 + uVar15, local_46c); (2) case 5: ks_memcpy(puVar4 + 0xf4, acStack_468, local_46c); (3) case 7: ks_memcpy(acStack_468, lVar1 + iVar6, local_46c).",
+            "In all three, the length argument local_46c comes from parsed ASN.1 length fields: set from *(byte *)(param_1 + lVar1 + 1) or from __dSEQUENCE / __dOCTETSTRING / __get_len. There is no explicit upper bound check enforcing local_46c <= sizeof(acStack_468).",
+            "Thus if a malformed or malicious ASN.1 element claims a length > 1032, ks_memcpy will overrun acStack_468 and corrupt the stack, leading to memory corruption; this matches the crash at ks_memcpy.",
+            "Data-flow backtracking: param_1 to _dPKIHeader is ASN.1 message buffer; _dPKIHeader is called from CMP_Certificate_2 (not decompiled here, but clearly a CMP certificate parsing routine based on name and context).",
+            "JNI entry: Java_com_koscom_cert_ca_CANative_cmpIssue2 takes two Java byte[] (param_3, param_4) and converts them via (*env->GetByteArrayElements)(...) to uVar2 and uVar3; these are passed into CMP_Certificate_2(uVar2,uVar3,param_5,param_6). No length checks are shown at JNI level; length can be arbitrary up to Java array size.",
+            "Java callgraph shows KSCmp.issue → CACert.issue → TapInterface.issue → CANative.cmpIssue2; these issue(...) methods are likely wrappers that accept a byte[] from network or app storage containing CMP messages. No evidence they enforce ASN.1 length sanity beyond what native does.",
+            "Therefore attacker-controllable CMP/ASN.1 payload from network or file can reach _dPKIHeader; the only length-related checks are those inherent in helper decoders, but in the shown code path there is a direct trust of length bytes into ks_memcpy without clamping to buffer size, so out-of-bounds write/read is realistically reachable.",
+            "This is a classic stack-based buffer overflow (CWE-121/CWE-787) in ASN.1 parsing, potentially exploitable for code execution under app process privileges. At minimum, it is a high-impact memory corruption and denial-of-service.",
+            "The harness did not inject obviously impossible states: Java side passes byte arrays, which fuzzing simulates; no evidence this path would be unreachable in production. Thus classify as a real vulnerability with high confidence rather than a harness-only artefact."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "_dPKIHeader uses ks_memcpy to copy attacker-influenced ASN.1 fields into a fixed 1032-byte local buffer without enforcing a maximum length.",
+            "Length local_46c is derived from parsed length bytes (__dSEQUENCE/__dOCTETSTRING/__get_len) and is never clamped to <= sizeof(acStack_468).",
+            "JNI bridge Java_com_koscom_cert_ca_CANative_cmpIssue2 passes Java byte[] buffers directly into CMP_Certificate_2 and ultimately _dPKIHeader without validation, so a crafted CMP/ASN.1 payload from Java can trigger out-of-bounds stack writes.",
+            "Crash occurs in ks_memcpy, matching expected symptom of buffer overflow during copy into acStack_468."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so"
+          ],
+          "evidence": [
+            {
+              "function": "_dPKIHeader",
+              "address": "00125790",
+              "file": "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so",
+              "snippet": "char acStack_468 [1032];\n...\ncase 1:\n  uVar7 = __dSEQUENCE(param_1 + iVar13,&local_46c);\n  ...\n  ks_memcpy(acStack_468,param_1 + uVar15,local_46c);\n  uVar15 = (ulong)(local_46c + (int)uVar15);\n  break;",
+              "note": "Copies local_46c bytes from attacker-controlled buffer into 1032-byte local without bounds check."
+            },
+            {
+              "function": "_dPKIHeader",
+              "address": "00125790",
+              "file": "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so",
+              "snippet": "case 7:\n  ...\n  iVar6 = __get_len(lVar1 + 1,&local_46c);\n  ...\n  ks_memcpy(acStack_468,lVar1 + iVar6,local_46c);\n  uVar14 = local_46c + iVar6;\n  uVar15 = (ulong)uVar14;",
+              "note": "Again copies variable local_46c into fixed stack buffer; local_46c derived from ASN.1 length with no size cap."
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpIssue2",
+              "address": "00115358",
+              "file": "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n...\niVar1 = CMP_Certificate_2(uVar2,uVar3,param_5,param_6);",
+              "note": "JNI bridge obtains raw pointers to Java byte[] and passes them to CMP_Certificate_2 without length or structure validation."
+            },
+            {
+              "function": "ks_memcpy",
+              "address": "0010f4e0",
+              "file": "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so",
+              "snippet": "void ks_memcpy(void)\n{\n  (*(code *)PTR_ks_memcpy_001804e8)();\n  return;\n}\n",
+              "note": "Wrapper around actual memcpy implementation where crash is reported; used by _dPKIHeader with unbounded length."
+            }
+          ],
+          "call_sequence": [
+            "<com.koscom.cert.ca.KSCmp: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;IIII)Ljava/util/Hashtable;>",
+            "<com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;III)Ljava/util/Hashtable;>",
+            "<com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;>",
+            "<o.eh1: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;>",
+            "<com.signkorea.openpasscore.TapInterface: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;>",
+            "<com.koscom.cert.ca.CANative: cmpIssue2([B[BII)I>",
+            "Java_com_koscom_cert_ca_CANative_cmpIssue2 @ 00115358",
+            "CMP_Certificate_2 (not decompiled)",
+            "_dPKIHeader @ 00125790",
+            "ks_memcpy @ 0010f4e0"
+          ],
+          "recommendations": [
+            "Add explicit bounds checks before ks_memcpy calls in _dPKIHeader to ensure local_46c does not exceed sizeof(acStack_468) and destination buffer sizes.",
+            "Harden ASN.1 parsing helpers (__dSEQUENCE, __dOCTETSTRING, __get_len) to validate lengths against overall buffer size and reasonable protocol limits.",
+            "Perform additional fuzzing and regression testing on CMP/ASN.1 parsing with stack-protector and ASan builds to uncover similar length-handling issues."
+          ],
+          "assumptions": [
+            "CMP_Certificate_2 invokes _dPKIHeader on data originating from the Java-provided byte[] arguments without additional size checks.",
+            "Java issue(...) methods can receive untrusted CMP/ASN.1 data from network, IPC, or files in realistic app use.",
+            "ks_memcpy behaves like standard memcpy and does not include hidden bounds checking."
+          ],
+          "limitations": [
+            "Implementation of CMP_Certificate_2 and ASN.1 helper functions (__dSEQUENCE, __dOCTETSTRING, __get_len) was not fully inspected; there may be upstream length validations not visible here.",
+            "Exact Java sources for the issue(...) methods and how they source their byte[] inputs were not decompiled, so the exact trust boundary is inferred from signatures and naming.",
+            "No runtime context (registers, concrete length values) from the crashing input was available, so assessment is based on static code structure."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a maliciously crafted CMP/ASN.1 message byte[] to TapInterface.issue / CANative.cmpIssue2 so that ASN.1 length fields cause ks_memcpy to overflow acStack_468 in _dPKIHeader.",
+            "prerequisites": [
+              "Attacker must be able to provide or influence CMP/ASN.1 payloads consumed by TapInterface.issue or related certificate-issuance flows.",
+              "App must invoke the issue(...) / cmpIssue2([B[BII)I path with the attacker-controlled payload.",
+              "Target device must run a vulnerable version of libCertJavaClient.so without additional hardening that blocks exploitation."
+            ],
+            "exploit_pipeline": [
+              "Craft a CMP/ASN.1 certificate issuance message where a context-specific or SEQUENCE element claims an overly large length to drive local_46c above 1032 bytes.",
+              "Embed this message in the byte[] parameter passed to KSCmp.issue / TapInterface.issue so that it reaches CANative.cmpIssue2 and is forwarded into CMP_Certificate_2.",
+              "Trigger the app functionality (e.g., certificate issuance or renewal) that calls the issue(...) chain with the crafted payload, causing _dPKIHeader to parse it.",
+              "When _dPKIHeader handles the manipulated field (case 1 or case 7), ks_memcpy copies local_46c bytes into acStack_468, overflowing the stack and corrupting control data.",
+              "With careful payload tuning, attempt to control overwritten return addresses or saved registers to achieve code execution; at minimum, this will crash the app (DoS)."
+            ],
+            "poc_commands": [
+              "# Placeholder PoC flow assuming the app consumes a CMP request file from shared storage\nadb push crafted_cmp_request.bin /sdcard/Download/payload.bin\n# Trigger the app to process the payload via an exported activity/intent (class name placeholder)\nadb shell am start -n com.ahnlab.v3mobileplus/.CMPIssueActivity --es cmpFile \"/sdcard/Download/payload.bin\"",
+              "# If using instrumentation/fuzz harness directly on the JNI\nadb shell cmd app_process -Djava.class.path=/data/app/com.ahnlab.v3mobileplus-1/base.apk \\\n  com.koscom.cert.ca.KSCmp issue \"user\" \"server\" \"$(cat /sdcard/Download/payload.bin)\" \"profile\" 0 0 0 0"
+            ],
+            "poc_files": [
+              "crafted_cmp_request.bin"
+            ],
+            "notes": "Component and activity names used in PoC commands are placeholders due to missing AndroidManifest and Java wiring details; actual exploit would need to locate the real entrypoints that call KSCmp.issue with attacker-controlled byte[] data."
+          }
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 3,
+          "llm_tool_calls": 9,
+          "input_tokens": 22626,
+          "output_tokens": 2869
+        }
+      }
+    ]
+  }
+}

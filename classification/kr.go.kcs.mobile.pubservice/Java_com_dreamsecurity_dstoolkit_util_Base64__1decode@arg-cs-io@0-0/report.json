@@ -1,0 +1,103 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.go.kcs.mobile.pubservice/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "모바일 관세청",
+      "package": "kr.go.kcs.mobile.pubservice",
+      "min_sdk": 23,
+      "target_sdk": 34,
+      "version_name": "1.0.281",
+      "version_code": "281"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strlen_default",
+          "StackTrace": [
+            "strlen_default",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.go.kcs.mobile.pubservice/lib/arm64-v8a/libDSToolkitV30Jni.so": [
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is strlen_default, called from Java_com_dreamsecurity_dstoolkit_util_Base64__1decode. We have the full decompilation of this JNI function, so follow mandatory steps there.",
+            "The only obvious unsafe operation matching the crash reason is the direct call to strlen(__s). A crash in strlen() usually indicates a bad pointer (NULL or invalid) or a non‑terminated string. Need to see how __s is derived.",
+            "__s is set as (char *)jbyteArray2cstr(param_1,uVar3). That helper presumably converts a Java byte[] (obtained via javaGetBytes) into a C string, including allocating a buffer and adding a NUL terminator. If jbyteArray2cstr can return NULL, then passing that to strlen is a clear bug. If it can return a pointer to a non‑terminated buffer, that’s also a bug.",
+            "Check whether this function validates __s before strlen. It does not: no NULL check, no length/termination check. That alone is a code defect.",
+            "Now need to check attacker influence: param_3 comes from the Java layer; fuzz harness passes arbitrary values to the Java bridge, which ultimately controls the byte[] contents and possibly whether javaGetBytes/jbyteArray2cstr succeed. In normal app use, untrusted data (e.g., base64 input) will be passed down; failures (e.g. memory allocation errors, unexpected types) could cause jbyteArray2cstr to return NULL. Given lack of validation, attacker could at least trigger a crash (DoS) by supplying inputs that cause these helpers to fail.",
+            "However, is there evidence of memory corruption beyond NULL deref? Crash reason is strlen_default; without ASan/UAF info, the most likely crash is a SIGSEGV on dereferencing a NULL or invalid pointer inside strlen, which is a read access. That’s memory safety but not obviously controllable beyond causing a crash. No memcpy/memmove in this function, BINSTR operations are via library calls and not visible here.",
+            "Mandatory memcpy analysis: this function does not call memcpy/memmove directly; it only calls into other toolkit functions: DSTK_BINSTR_SetData, Base64Decode, BinStr2ByteArray, etc. The crash site is before those (at strlen). Therefore the immediate problematic operation is the call to strlen with unchecked pointer.",
+            "Backwards data flow for __s: __s <- jbyteArray2cstr(env, javaGetBytes(env, param_3)). javaGetBytes likely extracts a jbyteArray or jstring from param_3. Its return value (uVar3) is fed directly; no checks. jbyteArray2cstr likely allocates and copies; if that fails or receives invalid Java object, it may return NULL. There is no constraint that removes attacker control; the Java side can pass arbitrary input, and in fuzzing we already see a crash, so path is reachable.",
+            "Security classification: According to the instructions, a pure local app crash (DoS) is not a security vulnerability unless it affects privileged services or causes a boot loop. This is a JNI helper in an app library; impact is app crash on malformed/unexpected input. No further evidence of overruns or UAF. Thus classify as non‑vulnerability from security perspective, but it is a real robustness bug.",
+            "CWE: if we were to label the bug pattern, it’s use of potentially NULL pointer in strlen (CWE-476) or improper handling of string lengths, but since we mark not a security vuln, we can omit CWE or keep it as reference while still flagging is_vulnerability=false.",
+            "Confidence is high because we see the exact code and the missing NULL check. Impact assessment per policy leads to non-vuln decision with high confidence."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.93,
+          "reasons": [
+            "Crash occurs in strlen called with __s from jbyteArray2cstr without any NULL or validity check",
+            "__s is derived from Java-controlled input, so attacker can trigger a crash but not clear memory corruption beyond a likely NULL dereference",
+            "Policy treats simple app crashes (local DoS) as non-security issues unless they affect privileged/system components, which is not the case here",
+            "No memcpy/memmove or other unsafe buffer operations are present around the crash site in the decompiled JNI function"
+          ],
+          "cwe_ids": [
+            "CWE-476"
+          ],
+          "severity": "low",
+          "affected_libraries": [
+            "libDSToolkitV30Jni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "file": "libDSToolkitV30Jni.so",
+              "snippet": "__s = (char *)jbyteArray2cstr(param_1,uVar3);\nsVar4 = strlen(__s);  // no NULL check before strlen\niVar2 = DSTK_BINSTR_SetData(__s,sVar4,aBStack_8a0);",
+              "note": "Direct call to strlen on pointer returned from helper; potential NULL deref leading to crash."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "strlen_default"
+          ],
+          "recommendations": [
+            "Add a NULL check on the result of jbyteArray2cstr before calling strlen and handle errors gracefully",
+            "Consider propagating allocation/conversion failures back to Java instead of crashing the native code",
+            "Review other JNI helpers for unchecked uses of pointers returned from Java conversion utilities"
+          ],
+          "assumptions": [
+            "jbyteArray2cstr can return NULL or an invalid pointer on error, consistent with crash in strlen",
+            "Library is used in an app context and does not run inside a privileged system service"
+          ],
+          "limitations": [
+            "Implementation of javaGetBytes and jbyteArray2cstr is not visible, so exact failure conditions are inferred",
+            "Exact signal/exception for strlen_default is not provided beyond the symbolic name"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:21",
+          "llm_requests": 2,
+          "llm_tool_calls": 1,
+          "input_tokens": 12377,
+          "output_tokens": 1341
+        }
+      }
+    ]
+  }
+}

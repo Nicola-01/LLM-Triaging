@@ -1,0 +1,107 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.go.minwon.m/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "정부24",
+      "package": "kr.go.minwon.m",
+      "min_sdk": 21,
+      "target_sdk": 34,
+      "version_name": "2.5.95",
+      "version_code": "186"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strlen_default",
+          "StackTrace": [
+            "strlen_default",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<kr.co.dcsc.coremds.dcsc.C02: aes_decode(Ljava/lang/String;)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<kr.co.dcsc.coremds.dcsc.S01$Thread_screen_capture_path$1: run()V> -> <kr.co.dcsc.coremds.dcsc.C02: aes_decode(Ljava/lang/String;)Ljava/lang/String;>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.go.minwon.m/lib/arm64-v8a/libDSToolkitV30Jni.so": [
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Process termination shows `strlen_default`, so likely a crash inside `strlen` due to invalid pointer or unterminated string.",
+            "Top app-level native frame is `Java_com_dreamsecurity_dstoolkit_util_Base64__1decode` in `libDSToolkitV30Jni.so`, which I already decompiled via MCP.",
+            "In the decompiled JNI, the critical sequence is: obtain `jbyteArray` via `javaGetBytes`, convert it to C-string via `jbyteArray2cstr`, then call `strlen(__s)` and `DSTK_BINSTR_SetData(__s, sVar3, ...)`.",
+            "The safety of `strlen(__s)` depends on `jbyteArray2cstr` semantics: does it guarantee NUL-termination? The code is not shown here, but typical helpers allocate `len+1` and append '\\0'. If the helper fails and returns NULL, then `strlen` on NULL is a null-deref (non-vuln).",
+            "The fuzzer harness likely passed arbitrary bytes/length; if `jbyteArray2cstr` doesn't append a terminator or uses the data length as-is without validation, `strlen` might read past allocated memory — an OOB read. However, there is no direct evidence of such a bug from the provided decompilation; more likely, the crash is due to NULL or invalid pointer from the harness, which JNI code does not defensively check.",
+            "The Java side (`C02.aes_decode`) *does not use this native Base64* at all; it uses `android.util.Base64`. The crashing JNI function `Java_com_dreamsecurity_dstoolkit_util_Base64__1decode` appears to belong to a different Java class (`dreamsecurity.dstoolkit.util.Base64`), not referenced in the given Java callgraph path.",
+            "The Java call graph from S01.Thread_screen_capture_path$1.run() -> C02.aes_decode() never enters this JNI method, so the fuzzer must be calling it directly from `fuzz_one_input`, bypassing real app flows.",
+            "Because no real app path to the JNI is shown, and the harness likely passes malformed `jbyteArray` (or something that makes `jbyteArray2cstr` invalid), the crash looks like a harness-only or environmental issue, not a proven exploit in normal use.",
+            "Without decompiling `jbyteArray2cstr` and `javaGetBytes`, I cannot demonstrate attacker-controlled overflow or similar; only a generic lack of NULL-check around `__s` before `strlen`, which would be a benign NULL-deref DoS at worst.",
+            "Given the instructions to default to non-vulnerability when evidence is insufficient, and considering the crash reason (strlen_default) with likely NULL/invalid pointer from fuzz harness, classify as Env/Harness / benign bug, low confidence of exploitability."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.25,
+          "reasons": [
+            "Crash occurs in strlen on pointer derived from JNI helper jbyteArray2cstr, but no evidence of OOB or corruption beyond potential NULL-deref.",
+            "Crashing JNI Base64 decode function is not used along the provided real Java call path (C02.aes_decode uses android.util.Base64 instead).",
+            "Fuzzer appears to be calling JNI directly with unrealistic inputs, making this primarily a harness/environment-triggered failure rather than a reachable vulnerability."
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "libDSToolkitV30Jni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "file": "libDSToolkitV30Jni.so",
+              "snippet": "__s = (char *)jbyteArray2cstr(param_1,uVar2);\nsVar3 = strlen(__s);",
+              "note": "Potential NULL or invalid pointer passed to strlen, but no direct proof of out-of-bounds or tainted-pointer misuse."
+            },
+            {
+              "function": "kr.co.dcsc.coremds.dcsc.C02.aes_decode",
+              "file": "classes2.dex",
+              "snippet": "return new String(cipher.doFinal(Base64.decode(str, 0)));",
+              "note": "Java aes_decode uses android.util.Base64, not the native JNI Base64 implementation that crashed."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_dreamsecurity_dstoolkit_util_Base64__1decode -> strlen_default"
+          ],
+          "recommendations": [
+            "Inspect and decompile helpers javaGetBytes and jbyteArray2cstr to confirm behavior and ensure they always return a valid, NUL-terminated buffer or clearly signal errors.",
+            "Add defensive NULL checks on __s before calling strlen and downstream routines to prevent harness-induced crashes.",
+            "Map actual Java usage of dreamsecurity.dstoolkit.util.Base64 to determine whether this JNI method is ever reached under normal app workflows."
+          ],
+          "assumptions": [
+            "Fuzz harness is directly invoking JNI with synthetic inputs that may not correspond to real Java-level usage.",
+            "jbyteArray2cstr might return NULL on error, leading to a null pointer dereference inside strlen.",
+            "The dreamsecurity.dstoolkit.util.Base64 JNI bridge is not on the critical, user-reachable path represented by C02.aes_decode in the provided call graph."
+          ],
+          "limitations": [
+            "Helpers javaGetBytes and jbyteArray2cstr were not decompiled here, so their exact safety guarantees are unknown.",
+            "Actual Java class using Java_com_dreamsecurity_dstoolkit_util_Base64__1decode was not inspected, so reachability from user-controlled data is not fully mapped.",
+            "Crash site disassembly of strlen_default itself is not shown, so the precise faulting address (NULL vs. OOB) is unknown."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:30",
+          "llm_requests": 2,
+          "llm_tool_calls": 4,
+          "input_tokens": 14516,
+          "output_tokens": 1378
+        }
+      }
+    ]
+  }
+}

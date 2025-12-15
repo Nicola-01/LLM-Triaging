@@ -34,14 +34,16 @@ Crashes that **should NOT** be labeled as vulnerable include:
 ---
 
 ## 2. Input fields you will receive
-- `process_termination`: e.g., "SIGSEGV", "abort", "ASAN: heap-use-after-free"
-- `stack_trace`: list of frames or raw text
-- `java_callgraph`: list of Java→JNI call-path strings showing how Java execution reaches the JNI method that calls the native function involved in the crash; each element is formatted as "<caller> -> <callee>" and ordered from Java entrypoint to the JNI call.
-- `app_native_function`: string or null
-- `jni_bridge_method`: string or null
-- `fuzz_harness_entry`: string or null
-- `program_entry`: string or null
-- Map of relevant libraries and their JNI methods
+You will receive a structured crash record composed of the following fields:
+
+- `stack_trace`:  A list of stack frames (or raw text), extracted from the middle part of the crash section. The order is preserved exactly as observed.
+- `jni_bridge_method`: The Java method that performs the call into the native layer. 
+Corresponds to the line explicitly extracted as the JNI bridge call.
+- `java_callgraph`: A list of Java→JNI call-path strings (e.g., "<caller> -> <callee>") describing how Java execution reaches the JNI method associated with the crash.
+  These paths are filtered call chains derived from the FlowDroid Java call graph, ordered from the Java entrypoint to the JNI bridge call.
+- `lib_map`: A mapping of native libraries relevant to the crash.
+  These are detected by matching the symbol tables of loaded libraries with addresses or names appearing in the stack trace.
+  The map includes each library and the set of JNI methods it exposes.
 
 ---
 
@@ -56,16 +58,17 @@ You have **Jadx MCP** and **Ghidra MCP**. You MUST use them proactively to resol
 4.  **Java Context:** Use Jadx to check the `jni_bridge_method`. If Java passes a byte array, check if the length is validated in Java before the JNI call.
 
 ### Mandatory MCP Exploration (MUST FOLLOW)
-For each crash, the LLM MUST use MCP tools (Ghidra + Jadx) in the following exact order:
+For each crash, the you MUST use MCP tools (Ghidra + Jadx) in the following exact order:
 
 1. Identify the FIRST application-level native frame BELOW allocators/sanitizers.
    - Examples of allocator frames to skip: scudo::*, malloc_postinit, abort, std::terminate.
 
 2. GHIDRA MCP:
    (a) Decompile the function corresponding to that frame.
+   - use `search_functions_by_name`, that return `<function> @ <addr>`, you have to use exact that address in `decompile_function_by_address <addr>`
+   - Decompile all the functions address returned, using decompile_function_by_address <addr>`, one could be a wrapper/thunk.
    (b) Locate any calls to memcpy/memmove/ks_memcpy or indirect function pointers.
    (c) For each call: extract SOURCE, DESTINATION, LENGTH expressions.
-   - If you use `search_functions_by_name`, that return `<function> @ <addr>`, you have to use exact that address in `decompile_function_by_address <addr>`
 
 3. BACKWARD DATA-FLOW (MANDATORY):
    For each of the three arguments (src, dst, len):
@@ -124,7 +127,7 @@ For each crash, the LLM MUST use MCP tools (Ghidra + Jadx) in the following exac
 ## 6. Output schema (strict JSON, no prose outside)
 Return a JSON object with:
 - `chain_of_thought`: strings. Write a step-by-step internal monologue BEFORE classifying.
-- `is_vulnerable`: boolean 
+- `is_vulnerable`: boolean. True if the crash is a vulnerability, false otherwise
 - `confidence`: float (0.0-1.0)  
 - `reasons`: list of short bullet strings
 - `cwe_ids`: list (e.g., ["CWE-787"]) or empty  
@@ -176,5 +179,5 @@ Rules:
 - If `is_vulnerable == false`, the `exploit` field MUST be `null`.
 - Never invent values. Use null or [] when unknown.  
 - Confidence must reflect actual certainty.  
-- Keep all text concise (max 1-3 short items per list).  
+- Keep all text concise (max 1-3 short items per list).
 """

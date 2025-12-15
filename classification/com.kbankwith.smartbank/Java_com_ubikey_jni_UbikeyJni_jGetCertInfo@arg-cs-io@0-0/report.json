@@ -1,0 +1,400 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.kbankwith.smartbank/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.kbankwith.smartbank",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "1.5.8",
+      "version_code": "554"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.stock.InterLock: GetCertInfo([B)[B>",
+          "JavaCallGraph": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;> -> <com.ubikey.stock.InterLock: GetCertInfo([B)[B>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Compute_ASN1_ST_ChildNum, which is pure app code in libUbikeyJni.so, not an allocator/sanitizer. We decompiled it and see it walks an ASN.1 buffer using a length from Compute_ASN1_ValueLength() and a backing pointer *(param_1+0x10). It increments an offset iVar6 until it equals total length iVar2, each time reading a tag byte, doing some checks, then advancing by 1 + length-size + value-length. There is a potential for logic bugs if helper functions misbehave, but the loop explicitly checks iVar6 == iVar2 and breaks; it does not write, only reads tag and length and returns a small int (child count). No obvious out-of-bounds write/read inside this function alone.",
+            "However, Compute_ASN1_ST_ChildNum is a helper used from Convert_ASN1_to_X509_TBS_CERT and in turn Convert_ASN1_to_X509_CERT and CERT_Load, which are used from the JNI entry Java_com_ubikey_jni_UbikeyJni_jGetCertInfo. jGetCertInfo takes a Java byte[] (JNI param_3), queries its length via a JNIEnv function pointer, obtains its contents with another JNIEnv call, allocates a buffer of that exact size, calloc/memset it, memcpy the content, then wraps it into a BINSTR and passes to CERT_Load. There is no validation that the passed certificate/ASN.1 is well-formed. That is normal for a parser: malformed input leading to a controlled abort might be just DoS, but if the parsing code does unsafe memory operations based on attacker-controlled lengths, that is a typical class of vulnerabilities.",
+            "The process termination string is Compute_ASN1_ST_ChildNum, not SIGSEGV or ASAN. This suggests the fuzzer reported a logical abnormal termination (maybe the symbol name of a custom abort/assert) rather than a concrete memory violation. We do not see any obvious crashing instruction in the decompiled Compute_ASN1_ST_ChildNum; returns are safe, and when encountering unsupported tag or -1 value length, the code jumps to switchD_caseD_7 which simply sets iVar3=0 and returns. No dereference of NULL param_1 because the function early-returns if param_1==0. The inner loop uses iVar6 as index, always checked against total length iVar2 before reading, so there is at least a top-level bound check. Helper functions Compute_ASN1_LengthSize and Compute_ASN1_ValueLength_from_LO are not decompiled, but from the call pattern they are given a pointer within the same buffer; if they handled arbitrary attacker data badly, that would be a separate issue, but we have no evidence from this crash.",
+            "In the JNI glue, there are several memcpy calls when constructing the output buffer local_1008[4096]. Each memcpy length uses (size_t & 0xff) of strlen of local strings, and offsets are accumulated in 8-bit-masked counters. This is potentially risky (truncating larger lengths to 0-255), but all sources are local stack buffers of fixed size (40 bytes, 1024 bytes, etc.) that are zero-initialized and populated by internal Get* helper functions. No attacker passes arbitrary length here; the only attacker influence is the certificate fields as parsed by CERT_Load. The JNI code never copies more than 255 bytes for each field, and the destination local_1008 is 4096 bytes, with rough upper bound on accumulated size: several fields of max 255 each plus some structuring bytes. That stays well within 4096. So even if CERT_Load wrote longer strings into those buffers, strncpy-like behavior or internal checks likely cap them, but we cannot confirm; still, the crash we are to triage is in Compute_ASN1_ST_ChildNum, earlier during parsing, not in memcpy on the output side.",
+            "Given the information, the most plausible interpretation is that malformed ASN.1 from the fuzzer caused CERT_Load to call Compute_ASN1_ST_ChildNum, which then returned or caused CERT_Load to detect inconsistency and abort with an error named after that function, or the crash reporting tool truncated the top of stack showing only Compute_ASN1_ST_ChildNum as termination reason. There is no visible unchecked pointer dereference, out-of-bounds access, or integer overflow directly connected to fuzzer-controlled data at the frame we examined. The high-level JNI & Java path simply forwards attacker bytes to a complex certificate parser, which can certainly have bugs, but this particular crash record does not give code-level evidence of a concrete memory-safety flaw. It aligns more with a benign failure or parser error (local DoS for malformed cert) discovered via fuzzing.",
+            "Therefore, I classify this crash as not clearly a vulnerability: at most it indicates robustness issues in ASN.1 parsing but we cannot substantiate exploitable memory corruption from the current decompiled code and crash context. Confidence is moderate that this specific crash is non-exploitable, since we see bounds checks on the index and safe returns on error; possible latent bugs may exist elsewhere (e.g., in helper functions) but are not evidenced here."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.6,
+          "reasons": [
+            "Top crashing frame Compute_ASN1_ST_ChildNum performs bounded reads over an ASN.1 buffer with a check `if (iVar6 == iVar2) break`, avoiding clear out-of-bounds access.",
+            "On tag/length inconsistencies, the function safely sets return value to 0 and exits; there is no write or assertion that would cause memory corruption.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jGetCertInfo correctly allocates a buffer equal to the Java byte[] length and copies it; subsequent memcpy operations for the output pack data from fixed-size local buffers into a 4096-byte buffer with per-field lengths masked to 0xff, so no obvious overflow at the crash site.",
+            "Crash reason label is a function name, not SIGSEGV/ASAN, suggesting a logical failure in parsing rather than a concrete memory-safety violation."
+          ],
+          "cwe_ids": [],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "address": "0011569c",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar2 = Compute_ASN1_ValueLength();\n... while (true) {\n  iVar3 = iVar7 + -1;\n  iVar6 = iVar4 + iVar5 + iVar6;\n  if (iVar6 == iVar2) break;\n  bVar1 = *(byte *)(*(long *)(param_1 + 0x10) + (long)iVar6);\n  ...\n  if (iVar5 == -1) goto switchD_0011573c_caseD_7;\n  iVar7 = iVar7 + 1;\n}\nreturn iVar3;",
+              "note": "Loop advances index with explicit equality check to total length; on error, returns 0."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "address": "00111174",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar5 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc((size_t)iVar5);\nmemset(__s,0,(size_t)iVar5);\nmemcpy(__s,__src,(size_t)iVar5);\n...\nCERT_Load(&local_1d38,&local_1d30);",
+              "note": "JNI copies Java byte[] into native buffer of matching size and passes to CERT_Load; no unsafe length manipulation here."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "address": "00111174",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "local_1008[0] = (byte)sVar6;\nmemcpy(local_1008 + 1,acStack_1c08,sVar6 & 0xff);\n...\nmemcpy(local_1008 + (iVar5 + 1),local_1c80,sVar12 & 0xff);",
+              "note": "Output packing uses per-field strlen lengths masked to 0xff into a 4096-byte buffer; sources are local fixed-size buffers."
+            }
+          ],
+          "call_sequence": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;>",
+            "<com.ubikey.stock.InterLock: GetCertInfo([B)[B>",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo @ 00111174",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Compute_ASN1_ST_ChildNum @ 0011569c"
+          ],
+          "recommendations": [
+            "Add strict length and structural validation for ASN.1 input in CERT_Load and related helpers, returning clear error codes on malformed data rather than relying on deeper parsing logic.",
+            "Augment fuzzing with sanitizers (ASan/UBSan) enabled on libUbikeyJni.so to detect any hidden memory violations in Compute_ASN1_* helper functions.",
+            "Add robust error propagation from Compute_ASN1_ST_ChildNum and Convert_ASN1_to_X509_* back to Java, treating malformed certificates as normal failures rather than crashes."
+          ],
+          "assumptions": [
+            "Process termination label \"Compute_ASN1_ST_ChildNum\" reflects a logical failure site, not necessarily a SIGSEGV at that instruction.",
+            "Helper functions Compute_ASN1_ValueLength, Compute_ASN1_LengthSize, and Compute_ASN1_ValueLength_from_LO behave reasonably and do not themselves contain hidden memory-safety bugs tied to this crash."
+          ],
+          "limitations": [
+            "Helpers like Compute_ASN1_ValueLength_* and CERT_Load were not decompiled, so hidden issues there cannot be fully ruled out.",
+            "The exact low-level crash type (e.g., SIGSEGV vs abort) is not provided, limiting precise triage of memory safety.",
+            "Java-side GetCertInfo implementation details beyond the call graph are not inspected; assumptions are made about it directly passing user-supplied certificate bytes."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:44",
+          "llm_requests": 5,
+          "llm_tool_calls": 6,
+          "input_tokens": 37501,
+          "output_tokens": 2487
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.stock.InterLock: GetCertInfo([B)[B>",
+          "JavaCallGraph": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;> -> <com.ubikey.stock.InterLock: GetCertInfo([B)[B>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame below allocators: crash is in __memcpy, next frame is Decode_DER_ASN1_ST in libUbikeyJni.so, so this is our starting function.",
+            "Decompiled Decode_DER_ASN1_ST: parses DER/ASN.1 structure from param_1 pointer, allocates header buffers and a data buffer of size __size, then calls memcpy(__dest, param_1 + iVar10, __size).",
+            "Key arguments: dst = __dest (malloc(__size)), src = param_1 + iVar10, len = __size. The allocation size and memcpy length are identical, so no overflow on destination; possible issue is that __size may exceed the actual remaining bytes in param_1 (out-of-bounds read) or come from malformed encoding.",
+            "Trace __size derivation: if the length byte (param_1[1]) has high bit set, it treats this as long-form length: it reads (uVar1 - 1) bytes from param_1 to construct uVar7 (the content length). It checks if (int)uVar7 < 0 then bails. Otherwise sets __size = (size_t)(int)uVar7 and starting offset iVar10 = uVar1 + 2. For short form, __size = (size_t)bVar2 (second byte) and iVar10 = 2. There is no check that param_1 actually has that many bytes available; param_1 is treated as a pointer to at least iVar10 + __size bytes.",
+            "Thus if caller provides a DER blob whose internal length field is larger than the actual buffer passed in, memcpy will read out of bounds from param_1. That is a classic OOB read (CWE-125).",
+            "Trace caller: CERT_Load(&local_1d38,&local_1d30) passes &local_1d30 to CERT_Load. CERT_Load calls Decode_DER_ASN1_ST(*param_2). Decompile of CERT_Load shows it does not pass a length, nor does Decode_DER_ASN1_ST get a length parameter. So Decode_DER_ASN1_ST has no way to know the true buffer size; it fully trusts the encoded length.",
+            "Trace source of *param_2 (the DER pointer) in Java_com_ubikey_jni_UbikeyJni_jGetCertInfo: BINSTR_Create(&local_1d30) and BINSTR_SetData(__s,iVar5,&local_1d30); previously __s is malloc(sVar16) and memcpy(__s,__src,sVar16); sVar16 is (size_t)iVar5 where iVar5 is result of (**(code **)(*param_1 + 0x558))(param_1,param_3) – JNIEnv->GetArrayLength for the incoming jbyteArray param_3. __src is JNIEnv->GetByteArrayElements or similar. So BINSTR_SetData is given base pointer __s and length iVar5 (full Java array).",
+            "We do not see BINSTR_SetData decompiled, but typical pattern: it likely stores pointer+length into a BINSTR structure. CERT_Load then passes &local_1d30, and Decode_DER_ASN1_ST is passed *param_2 (probably the pointer), but not the length; length may be stored in the BINSTR struct and used within Decode_DER_ASN1_ST, or not. However, observed Decode_DER_ASN1_ST signature is just (undefined1 *param_1), so it does not receive explicit length. It probably assumes the buffer is at least as long as encoded; if the encoded length exceeds actual buffer size, memcpy will read past end.",
+            "Since the test harness fuzzer supplies arbitrary byte arrays (JNI bridge GetCertInfo([B)[B), an attacker can control this DER blob, including internal length bytes, so can choose values like 0xff for length or long form lengths, inducing memcpy to read past __src buffer into heap, causing SIGSEGV in memcpy.",
+            "OOB read from attack-controlled length is a genuine memory-safety vulnerability. It is at least a denial-of-service (crash on malformed cert). Depending on allocator and ASLR, it might also permit limited information disclosure (reading heap bytes into ASN1 structure) but here memcpy destination is in heap too and not returned directly; still, crash alone is enough.",
+            "No evidence of bounds check between Java and native: JNIEnv GetArrayLength just gives the real size, there is no mitigation against a maliciously crafted internal length; this code expects well-formed X.509 certs. Also, this path appears to be production code (GetCertInfo on certificate), not fuzz-only, so reachable in real app when processing external certificates (e.g., smart card, token, or server cert).",
+            "Therefore classify as vulnerable, CWE-125 (Out-of-bounds read). Severity: medium to high. It causes denial-of-service with untrusted input; exploitability for data exfiltration less clear without seeing how decoded data is later used, so choose high-level DoS; conservatively rate severity high because a remote endpoint or untrusted file could crash the banking app repeatedly.",
+            "Call sequence from Java: <STLbuj: STLccc(Object,int,Object[])> -> <com.ubikey.stock.InterLock: GetCertInfo([B)[B> -> Java_com_ubikey_jni_UbikeyJni_jGetCertInfo -> CERT_Load -> Decode_DER_ASN1_ST -> memcpy.",
+            "Recommendations: In Decode_DER_ASN1_ST, take an explicit length parameter and enforce that iVar10 + __size <= total_len before memcpy; or have BINSTR pass its size and validate internal DER length against outer buffer. Also robust error handling when lengths inconsistent."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "memcpy in Decode_DER_ASN1_ST copies __size bytes from param_1+offset into a malloc(__size) buffer without knowing the actual size of the underlying buffer",
+            "__size is derived directly from attacker-controlled ASN.1 length fields in the DER certificate, with no upper bound or consistency check",
+            "The DER blob originates from a Java byte[] passed to GetCertInfo([B)[B, whose contents are attacker-controlled via fuzz harness / potential untrusted sources",
+            "This can cause an out-of-bounds read on heap/stack memory and crash (SIGSEGV in memcpy), yielding at least a denial-of-service vulnerability"
+          ],
+          "cwe_ids": [
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "00117718",
+              "file": "libUbikeyJni.so",
+              "snippet": "__dest = malloc(__size);\npuVar4[2] = __dest;\nif (__dest != (void *)0x0) {\n  memcpy(__dest,param_1 + iVar10,__size);\n  return puVar4;\n}",
+              "note": "Copies __size bytes from param_1+iVar10 into malloc(__size) with no bounds check on the source buffer length."
+            },
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "00117718",
+              "file": "libUbikeyJni.so",
+              "snippet": "if ((char)bVar2 < '\\0') {\n  uVar1 = bVar2 & 0x7f;\n  ...\n  do {\n    bVar2 = param_1[lVar9 + 1];\n    *(byte *)(puVar4[1] + lVar9) = bVar2;\n    ...\n    uVar7 = uVar7 | (uint)bVar2 << (ulong)uVar3;\n  } while (uVar8 != 0xfffffff8);\n  if ((int)uVar7 < 0) goto LAB_0011780c;\n  iVar10 = uVar1 + 2;\n  __size = (size_t)(int)uVar7;\n} else {\n  ...\n  __size = (size_t)bVar2;\n  iVar10 = 2;\n}",
+              "note": "__size (memcpy length) is derived from DER length bytes inside attacker-supplied buffer without verifying against actual buffer size."
+            },
+            {
+              "function": "CERT_Load",
+              "address": "001231f4",
+              "file": "libUbikeyJni.so",
+              "snippet": "*param_1 = 0;\nlVar3 = Decode_DER_ASN1_ST(*param_2);\nif (lVar3 == 0) { ... }",
+              "note": "CERT_Load passes only pointer *param_2 (no length) to Decode_DER_ASN1_ST, so that function cannot validate against real buffer size."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "address": "00111174",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar5 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\nsVar16 = (size_t)iVar5;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(sVar16);\nmemset(__s,0,sVar16);\nmemcpy(__s,__src,sVar16);\n...\nBINSTR_SetData(__s,iVar5,&local_1d30);\nCERT_Load(&local_1d38,&local_1d30);",
+              "note": "JNI bridge copies attacker-controlled Java byte[] into heap and passes it to CERT_Load/Decode_DER_ASN1_ST; there is no validation of internal ASN.1 lengths."
+            }
+          ],
+          "call_sequence": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;>",
+            "<com.ubikey.stock.InterLock: GetCertInfo([B)[B>",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo @ 00111174",
+            "CERT_Load @ 001231f4",
+            "Decode_DER_ASN1_ST @ 00117718",
+            "memcpy"
+          ],
+          "recommendations": [
+            "Refactor Decode_DER_ASN1_ST to accept both pointer and explicit buffer length, and ensure iVar10 + __size <= buffer_len before calling memcpy",
+            "Validate ASN.1/DER length fields (including long-form lengths) to reject messages where claimed content length exceeds the actual container length",
+            "Add robust error handling and fuzz testing around certificate parsing to ensure malformed inputs cannot crash the app"
+          ],
+          "assumptions": [
+            "BINSTR_SetData stores both pointer and length, but Decode_DER_ASN1_ST as seen uses only the pointer and assumes well-formed ASN.1",
+            "GetCertInfo([B)[B is reachable with attacker-controlled certificate bytes in real app usage (e.g., external certs from tokens, files, or network)"
+          ],
+          "limitations": [
+            "BINSTR_* implementations were not decompiled, so inner handling of lengths is inferred from Decode_DER_ASN1_ST prototype",
+            "Java-level source for InterLock.GetCertInfo was not inspected, so precise origin of certificate bytes is not fully known"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a malformed certificate byte array with oversized internal DER length fields to GetCertInfo([B)[B via the app's normal certificate handling path",
+            "prerequisites": [
+              "Attacker can cause the app to process a crafted certificate blob via GetCertInfo([B)[B (e.g., via external file, NFC/smart card, or network-driven workflow)",
+              "No input validation or normalization of certificate data before reaching native code"
+            ],
+            "exploit_pipeline": [
+              "Craft a DER-encoded certificate-like byte sequence where the length field in the ASN.1 header claims a very large content size but the actual array is much smaller",
+              "Deliver this crafted byte array to the application through the same mechanism that normally triggers InterLock.GetCertInfo([B)[B (e.g., upload/import cert, trigger smartcard operation)",
+              "The Java layer forwards the byte[] to the JNI bridge, which wraps it into BINSTR and calls CERT_Load/Decode_DER_ASN1_ST",
+              "Decode_DER_ASN1_ST computes __size from the malicious length field and calls memcpy(__dest,param_1+offset,__size), reading past the end of the buffer, causing a crash in memcpy"
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.bin /sdcard/Download/crafted_cert.bin",
+              "adb shell am start -n com.kbankwith.smartbank/.MainActivity --es cert_path /sdcard/Download/crafted_cert.bin  # assumes activity and extra used to load a certificate",
+              "adb logcat | grep UbikeyJni  # observe crash when app processes crafted_cert.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_cert.bin"
+            ],
+            "notes": "Exact triggering component and extra names are not known; PoC assumes there is an intent or workflow that reads a certificate file and passes its raw bytes to InterLock.GetCertInfo([B)[B."
+          }
+        },
+        "statistics": {
+          "time": "00:00:38",
+          "llm_requests": 3,
+          "llm_tool_calls": 9,
+          "input_tokens": 25726,
+          "output_tokens": 3034
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.stock.InterLock: GetCertInfo([B)[B>",
+          "JavaCallGraph": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;> -> <com.ubikey.stock.InterLock: GetCertInfo([B)[B>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is Decode_DER_ASN1_ST; termination in __memcpy suggests an out-of-bounds/oversized memcpy there.",
+            "Inspecting Decode_DER_ASN1_ST shows it parses ASN.1 DER length fields from attacker-controlled param_1 and then uses that to decide malloc size (__size) and memcpy length.",
+            "For short-form lengths (high bit of second byte clear), __size = (size_t)bVar2; memcpy uses that length from param_1 + 2; this is fine if the input buffer is actually at least that long, but the function has no buffer length parameter and performs no bounds check; it blindly trusts that a contiguous buffer of that size exists.",
+            "For long-form lengths (high bit set), it allocates a length-of-length field, copies those bytes, and reconstructs uVar7 as the content length; it rejects negative (sign bit set) values but otherwise accepts any non-negative 32-bit length. It then sets __size = (size_t)(int)uVar7 and memcpy's that many bytes from param_1 + iVar10 with no check against the real backing buffer size.",
+            "Thus, if caller passes a pointer into a smaller Java/fuzzer-provided byte array, Decode_DER_ASN1_ST can read past the end, causing __memcpy to crash and in principle arbitrary out-of-bounds read (and possibly write if other code used that data).",
+            "Backward to caller CERT_Load: it simply calls Decode_DER_ASN1_ST(*param_2); param_2 is a BINSTR created in Java_com_ubikey_jni_UbikeyJni_jGetCertInfo from the Java byte[] via BINSTR_SetData without any ASN.1 sanity checks. That BINSTR_SetData likely wraps the incoming DER blob directly; there is no length validation here.",
+            "At JNI entry Java_com_ubikey_jni_UbikeyJni_jGetCertInfo, the code uses JNI environment callbacks to get the length of the Java byte array and copy it with memcpy into a heap buffer of exactly that size. That initial memcpy is safe. The unsafe part is the later Decode_DER_ASN1_ST processing of that buffer, which treats the content as DER and trusts embedded length fields without bounds checks; the fuzzer (and real attacker) controls the buffer content via Java GetCertInfo([B)[B.",
+            "Therefore this is not a harness-only artifact: any caller that passes an untrusted or corrupted certificate blob into GetCertInfo can cause out-of-bounds read in native code. This is a classic lack of length validation on parsed length fields, leading to OOB read/write. Crash in memcpy is consistent with reading beyond the provided Java array backing store.",
+            "Severity: the demonstrated issue is at least a high-impact denial-of-service via app crash; depending on allocator and neighboring objects, it might enable info leak or further memory corruption, but with current evidence we conservatively classify as out-of-bounds read in memcpy (CWE-125) and potentially write if extended. Trigger is via Java method com.ubikey.stock.InterLock.GetCertInfo(byte[]), presumably reachable from app logic (e.g., handling certificates).",
+            "Exploitability: practical for DoS; PoC would be a specially crafted ASN.1 blob inside a byte[] passed to GetCertInfo, with the second byte (or long-form header) indicating a length larger than actual array size to force memcpy to run off the end."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.94,
+          "reasons": [
+            "Decode_DER_ASN1_ST parses ASN.1 length fields from attacker-controlled data and uses them directly as memcpy size without any buffer-length parameter or bounds check.",
+            "CERT_Load and Java_com_ubikey_jni_UbikeyJni_jGetCertInfo do not validate ASN.1 structure or constrain lengths, they just wrap and forward the blob from Java.",
+            "Crash occurs in __memcpy reading from param_1 + offset for __size bytes, which can exceed the underlying buffer if the DER length field is malicious, yielding a concrete out-of-bounds read (and process crash)."
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "00117718",
+              "file": "libUbikeyJni.so",
+              "snippet": "if ((char)bVar2 < '\\0') { ... uVar7 = uVar7 | (uint)bVar2 << (ulong)uVar3; ... if ((int)uVar7 < 0) goto LAB_0011780c; iVar10 = uVar1 + 2; __size = (size_t)(int)uVar7; }\n...\n__dest = malloc(__size);\npuVar4[2] = __dest;\nif (__dest != (void *)0x0) {\n  memcpy(__dest,param_1 + iVar10,__size);\n  return puVar4;\n}",
+              "note": "Length __size derived from ASN.1 length field with no check against available bytes in param_1; memcpy reads __size bytes from param_1 + iVar10."
+            },
+            {
+              "function": "CERT_Load",
+              "address": "001231f4",
+              "file": "libUbikeyJni.so",
+              "snippet": "*param_1 = 0;\nlVar3 = Decode_DER_ASN1_ST(*param_2);\nif (lVar3 == 0) { ... }",
+              "note": "CERT_Load simply forwards unvalidated BINSTR buffer into Decode_DER_ASN1_ST."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+              "address": "00111174",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar5 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\nsVar16 = (size_t)iVar5;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(sVar16);\nmemset(__s,0,sVar16);\nmemcpy(__s,__src,sVar16);\n...\nBINSTR_Create(&local_1d30);\nBINSTR_SetData(__s,iVar5,&local_1d30);\nCERT_Load(&local_1d38,&local_1d30);",
+              "note": "JNI method copies attacker-controlled Java byte[] into native buffer and passes into CERT_Load without DER length validation."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetCertInfo",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo -> BINSTR_SetData",
+            "Java_com_ubikey_jni_UbikeyJni_jGetCertInfo -> CERT_Load",
+            "CERT_Load -> Decode_DER_ASN1_ST",
+            "Decode_DER_ASN1_ST -> memcpy (__memcpy crash)"
+          ],
+          "recommendations": [
+            "Add robust bounds checking in Decode_DER_ASN1_ST: pass buffer length alongside param_1 and verify computed __size and header bytes do not exceed it before memcpy.",
+            "Reject ASN.1 structures with unreasonable or truncated length fields (e.g., limit maximum allowed size and verify against input buffer length in CERT_Load or higher-level code).",
+            "Consider using a well-tested ASN.1/DER parsing library instead of custom implementation and add fuzz tests around GetCertInfo(byte[]) to catch similar issues."
+          ],
+          "assumptions": [
+            "com.ubikey.stock.InterLock.GetCertInfo([B)[B is callable with attacker-controlled certificate blobs (e.g., from network or external storage).",
+            "BINSTR_SetData stores the full passed buffer without shrinking or revalidating internal ASN.1 lengths.",
+            "The crash in __memcpy corresponds to the memcpy call inside Decode_DER_ASN1_ST, as suggested by the stack trace."
+          ],
+          "limitations": [
+            "No direct visibility into BINSTR_* implementations to confirm they do not enforce additional bounds.",
+            "Exact Java call sites of GetCertInfo([B)[B are not inspected, so degree of external exposure is inferred.",
+            "We do not see allocator or sanitizer metadata; classification of impact as out-of-bounds read is based on memcpy source semantics."
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Passing a malicious ASN.1/DER-encoded certificate blob to com.ubikey.stock.InterLock.GetCertInfo([B)[B so that its internal length field exceeds the actual buffer size.",
+            "prerequisites": [
+              "Ability to feed arbitrary or corrupted certificate bytes into the app path that calls GetCertInfo(byte[]).",
+              "Target app built with vulnerable libUbikeyJni.so on a device without additional hardening that would block app crashes.",
+              "Knowledge of basic ASN.1 DER structure to craft inconsistent length fields."
+            ],
+            "exploit_pipeline": [
+              "Craft an ASN.1 DER blob whose initial tag and length bytes encode a very large positive length while the actual payload is much shorter.",
+              "Deliver this blob into the application so that it is passed as a byte[] argument to com.ubikey.stock.InterLock.GetCertInfo([B)[B (e.g., via importing a certificate or smartcard data).",
+              "When Java calls GetCertInfo, JNI copies the blob into native memory and calls CERT_Load, which invokes Decode_DER_ASN1_ST on the buffer.",
+              "Decode_DER_ASN1_ST computes __size from the malicious length field and calls memcpy(__dest, param_1 + offset, __size), reading past the end of the backing buffer, leading to __memcpy crash and process termination.",
+              "Optionally iterate payload sizes and lengths to probe memory layout and potentially gain info leak or more controlled behavior depending on surrounding allocations."
+            ],
+            "poc_commands": [
+              "# Push crafted DER blob to device\nadb push payload.der /sdcard/Download/payload.der\n\n# Launch the vulnerable app activity that ultimately calls GetCertInfo(byte[])\n# NOTE: replace <PACKAGE>/<ACTIVITY> with actual values once known\nadb shell am start -n com.kbankwith.smartbank/.MainActivity --es cert_path /sdcard/Download/payload.der",
+              "# If there is a test harness or debug interface that directly invokes GetCertInfo(byte[]), use instrumentation to call it with payload.der bytes.\n# Placeholder for instrumentation-based PoC:\nadb shell \"am instrument -w -e class com.ubikey.stock.InterLockTest#testGetCertInfoWithMaliciousDer com.kbankwith.smartbank.test/androidx.test.runner.AndroidJUnitRunner\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.der"
+            ],
+            "notes": "The exact exported component and parameter names are placeholders; tester must identify the real path by inspecting Java code and manifest. The core requirement is to reach GetCertInfo(byte[]) with a short buffer whose internal ASN.1 length encodes a much larger size."
+          }
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 25130,
+          "output_tokens": 2558
+        }
+      }
+    ]
+  }
+}

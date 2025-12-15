@@ -1,0 +1,1382 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.tencent.mm/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "WeChat",
+      "package": "com.tencent.mm",
+      "min_sdk": 23,
+      "target_sdk": 29,
+      "version_name": "8.0.43",
+      "version_code": "2480"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: from stack, Java_com_tencent_mars_zstd_Zstd_compressUsingDict is JNI entry, ZSTD_compress_usingDict is wrapper thunk, ZSTD_compressEnd deeper. Crash exact instruction unknown but likely inside real ZSTD implementation behind function pointer PTR_ZSTD_compress_usingDict_001a9c10 or in ZSTD_compressEnd. However, per rules, first frame below allocators/sanitizers is JNI entry or ZSTD_compress_usingDict in this lib. We have decompiled both.",
+            "Decompiled JNI function Java_com_tencent_mars_zstd_Zstd_compressUsingDict. It uses JNIEnv function pointers via param_1 (JNIEnv* vtable) to: get length of byte arrays param_3 and param_8 (input and dict), get their elements via GetPrimitiveArrayCritical (offset 0x6f0), then calls ZSTD_createCCtx, then ZSTD_compress_usingDict(uVar6, lVar3 + param_4, (long)(iVar1 - param_4), lVar4 + param_6, (long)param_7, lVar5, (long)iVar2, param_9). Afterward frees context and releases arrays.",
+            "Key potential vulnerability is bounds: it computes src pointer as lVar3 + param_4 and src size as (iVar1 - param_4). iVar1 is full input array length from JNI. param_4 is an int argument from Java (probably srcOffset). There is no validation that param_4 is in [0, iVar1]. If param_4 > iVar1, then (iVar1 - param_4) is negative, but cast to long yields large positive; passed as size to ZSTD_compress_usingDict, which likely interprets as size_t, potentially enormous. Source pointer is lVar3 + param_4: if param_4 > length, pointer points beyond buffer returned by GetPrimitiveArrayCritical. That can cause out-of-bounds read or segfault inside ZSTD implementation when it reads up to provided size. Similarly, dict pointer lVar4 + param_6 with size param_7 (int) is unchecked vs dictionary array length (unknown but from param_5). For dictionary array, JNI code fetches length into iVar2 for param_8 array, but that is used as dict size; yet param_7 appears to be dictSize argument (int) and is passed directly without comparing with length of param_5 or param_8. However, second length iVar2 is length of param_8, which is passed as seventh argument size of dict buffer for ZSTD; param_7 is third argument after dict offset. Wait: call is ZSTD_compress_usingDict(uVar6, dst, dstCapacity, src, srcSize, dict, dictSize, compressionLevel). Given common zstd signature: ZSTD_compress_usingDict(ctx, dst, dstCapacity, src, srcSize, dict, dictSize, compressionLevel). So mapping: dst = lVar3 + param_4? No, reading: uVar6,lVar3 + param_4,(long)(iVar1 - param_4),lVar4 + param_6,(long)param_7,lVar5,(long)iVar2,param_9. That suggests treating first array (param_3) as destination buffer, with capacity (iVar1 - param_4); second array (param_5) as source, starting at offset param_6 with size param_7; third array (param_8) as dictionary with full length iVar2. That matches typical JNI pattern where same buffer reused. Vulnerability still: dst pointer uses offset param_4 and capacity (iVar1 - param_4) with no bounds check; src and dict use param_6/param_7 offsets and lengths with no check against array lengths. So either source or destination can be out-of-bounds from JNI side, leading to memory corruption within native library.",
+            "Need to trace each argument back. In JNI func: iVar1 from JNIEnv->GetArrayLength(param_3); param_4 is direct JNI int argument (from Java). No transformation or validation seen. Similarly param_6 and param_7 are direct Java-provided ints. iVar2 from GetArrayLength(param_8). There are no bounds checks or comparisons between offsets/lengths and array sizes. Therefore user-controlled Java side can pass arbitrary integers which the native function trusts.",
+            "The actual crash stack shows ZSTD_compressEnd and ZSTD_compress_usingDict. Our exported ZSTD_compress_usingDict is a tiny thunk calling through function pointer PTR_ZSTD_compress_usingDict_001a9c10 into bundled zstd code, probably from upstream library. That code likely assumes its buffer and size arguments are valid per zstd API and will perform reads/writes up to supplied capacities; if they exceed actual JNI array backing store, out-of-bounds read/write happen. Crash reason is unknown (??), but consistent with memory safety issue from invalid buffer/size computed from unvalidated offsets. There is clear code-level unsafe behavior independent of allocator; even if fuzz harness uses unrealistic values, Java code in production could too if it exposes JNI directly or via higher-level API taking offsets/lengths.",
+            "Fuzzer entry is fuzz_one_input calling JNI directly; but JNI code is exactly same as production. Harness may be passing extreme offset/length combinations, but such combinations are not ruled out in production unless Java wrapper validates. We do not see Java side here, but JNI itself must be robust; currently it is not. Therefore classify as vulnerability, CWE-787 (out-of-bounds write) and/or CWE-125 (out-of-bounds read) / CWE-119. Impact likely high (memory corruption in native compression code); exploitability theoretical-to-practical depending on usage. Confidence high because direct reasoning from code: unchecked offsets and lengths propagate into native memcpy-like operations inside zstd.",
+            "Allocator involvement: not directly visible; top two ?? frames likely malloc/ASAN or internal zstd functions like ZSTD_compressEnd. Regardless, our required mandatory steps: we identified first app-level frame (JNI method), decompiled it, found call to indirect function, resolved its interface by known zstd signature, and did backward dataflow of dst, src, len arguments. Each originates from untrusted JNI parameters (param_4, param_6, param_7) and array lengths; no validation. Therefore unsafe. Severity: high; confidence ~0.92.",
+            "Call sequence from fuzzer/main to vulnerable region: main -> fuzz_one_input (harness) -> Java_com_tencent_mars_zstd_Zstd_compressUsingDict -> ZSTD_compress_usingDict (thunk) -> PTR_ZSTD_compress_usingDict_001a9c10 (actual zstd implementation) -> ZSTD_compressEnd. JNI bridge is clearly part of app library libwechatzstd.so. Affected library: libwechatzstd.so only.",
+            "Exploit plan: attacker would need ability to supply input data and offsets/lengths used by compression routine, e.g., via messaging content or files compressed by app. They could manipulate Java-level parameters (either directly if API is public, or indirectly if app derives offsets from controllable fields) to cause offset beyond array end or large size, leading to zstd reading/writing out of bounds. PoC on device: call same JNI via app wrapper with crafted arrays and offsets (e.g., offset > array length). Without Java code, we propose generic adb shell am start command placeholder. Note assumptions and limitations accordingly."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "JNI bridge Java_com_tencent_mars_zstd_Zstd_compressUsingDict computes buffer pointers using attacker-controlled offsets (param_4, param_6) without bounds checking against JNI array lengths",
+            "It passes potentially negative or oversized capacities (iVar1 - param_4, param_7) directly into ZSTD_compress_usingDict, which expects valid sizes and will read/write up to those values, enabling out-of-bounds access",
+            "Crash stack involves ZSTD_compress_usingDict and ZSTD_compressEnd, consistent with memory corruption inside zstd due to invalid buffer/size arguments from the unvalidated JNI wrapper"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "0x00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // len of array param_3\n...\nuVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(\n    uVar6,\n    lVar3 + param_4,              // dst pointer offset into param_3\n    (long)(iVar1 - param_4),      // dstCapacity, unchecked\n    lVar4 + param_6,              // src pointer offset into param_5\n    (long)param_7,                // srcSize, unchecked\n    lVar5,\n    (long)iVar2,\n    param_9);\n",
+              "note": "No checks that param_4 and param_6 are within array bounds or that (iVar1 - param_4) and param_7 are non-negative and <= actual lengths."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "address": "0x00106cc0",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void) {\n  (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)();\n}\n",
+              "note": "Wrapper calls into actual zstd implementation via function pointer, which assumes valid buffers and sizes."
+            }
+          ],
+          "call_sequence": [
+            "main",
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 0x00109a40",
+            "ZSTD_compress_usingDict @ 0x00106cc0",
+            "PTR_ZSTD_compress_usingDict_001a9c10 (zstd internal)",
+            "ZSTD_compressEnd"
+          ],
+          "recommendations": [
+            "In Java_com_tencent_mars_zstd_Zstd_compressUsingDict, validate that param_4 and param_6 are within [0, arrayLength] and that (iVar1 - param_4) and param_7 are non-negative and do not exceed the remaining array space before calling ZSTD_compress_usingDict",
+            "Return an error code (e.g., ZSTD_error_srcSize_wrong or custom) when invalid offsets/lengths are detected instead of invoking the zstd compressor",
+            "Add defensive assertions or size checks around JNI input parameters and consider using size_t-safe casting to avoid negative-to-large conversions"
+          ],
+          "assumptions": [
+            "param_3, param_5, and param_8 are Java byte[] objects passed from higher-level app code with attacker-influenced content and offsets",
+            "ZSTD_compress_usingDict has the standard zstd signature and interprets length arguments as size_t, reading/writing up to those sizes",
+            "Java-side code does not fully sanitize offsets/lengths before calling the native method, or future changes might bypass such validation"
+          ],
+          "limitations": [
+            "Exact crash signal and address inside zstd are unknown (stack frames marked ?? above zstd functions)",
+            "Full Java call graph and API exposure for the Zstd class are not available, so practical exploit paths depend on app-specific usage",
+            "Details of the internal zstd implementation behind PTR_ZSTD_compress_usingDict_001a9c10 are not visible, though standard behavior is assumed"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Crafted inputs to Java_com_tencent_mars_zstd_Zstd_compressUsingDict with out-of-range offsets/lengths",
+            "prerequisites": [
+              "Ability to execute or influence Java code that calls Zstd.compressUsingDict with attacker-controlled byte arrays and offset/length parameters",
+              "App uses this JNI bridge in a context reachable from untrusted data (e.g., message compression, file upload)"
+            ],
+            "exploit_pipeline": [
+              "Identify Java API in the app that wraps Java_com_tencent_mars_zstd_Zstd_compressUsingDict and accepts byte[] plus offset/length parameters derived from attacker input",
+              "Supply inputs that cause offset parameters (param_4 or param_6) to exceed the corresponding array lengths or make lengths (param_7) inconsistent, leading to invalid buffer/size pairs in native code",
+              "Trigger compression through normal app functionality, causing ZSTD_compress_usingDict to operate on out-of-bounds pointers and sizes",
+              "Observe app crashes or memory corruption; refine offsets and lengths to seek controlled out-of-bounds writes for potential code execution"
+            ],
+            "poc_commands": [
+              "adb shell am start -n <package>/<SomeActivity> --es mode \"compressDictTest\" --es payload \"/sdcard/Download/payload.bin\" --ei offset 2147483647 --ei length 2147483647",
+              "adb push /path/to/crafted_payload.bin /sdcard/Download/payload.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact Java method name and Activity are unknown; replace <package>/<SomeActivity> and extras with the app-specific entry point that ultimately calls the JNI method. The core requirement is passing byte[] buffers with offsets/lengths that exceed their actual size so that (iVar1 - offset) underflows or offset > length, leading to zstd reading/writing past the end of the JNI array."
+          }
+        },
+        "statistics": {
+          "time": "00:00:47",
+          "llm_requests": 6,
+          "llm_tool_calls": 9,
+          "input_tokens": 38259,
+          "output_tokens": 3184
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "ZSTD_compressBlock_fast",
+          "StackTrace": [
+            "ZSTD_compressBlock_fast",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_fast",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level frame: stack shows ZSTD_compressBlock_fast → ?? → ?? → ZSTD_compressEnd → ZSTD_compress_usingDict → Java_com_tencent_mars_zstd_Zstd_compressUsingDict → fuzz_one_input → main. First non-wrapper application frame below is Java_com_tencent_mars_zstd_Zstd_compressUsingDict; we decompiled it.",
+            "JNI function obtains three Java byte arrays via JNIEnv calls: param_3 (src buffer), param_5 (dict), param_8 (dst buffer). It gets their lengths (iVar1, iVar2) and base pointers (lVar3, lVar4, lVar5). It then calls ZSTD_createCCtx, then ZSTD_compress_usingDict(uVar6, lVar3 + param_4, (iVar1 - param_4), lVar4 + param_6, param_7, lVar5, iVar2, param_9). Afterward it frees context and releases arrays.",
+            "Critical: JNI bridge does not perform any bounds checks ensuring that Java-supplied offsets param_4 (src offset), param_6 (dict offset), and param_7 (dict size) are within the respective array lengths. It passes (iVar1 - param_4) as src size and param_7 as dict size directly. If param_4 > iVar1, this underflows or produces negative length; similarly, param_6/param_7 can exceed dict length.",
+            "ZSTD_compress_usingDict is just an imported function pointer wrapper. That means actual implementation is external (likely bundled zstd). We cannot see its internal bounds checking here. However, the top crash frame is ZSTD_compressBlock_fast, which is inside the same lib and fully decompiled. This function uses many pointer arithmetic operations across param_4 … param_4+param_5; param_5 is the block size given by higher-level zstd routines, derived from the input buffer length.",
+            "Within ZSTD_compressBlock_fast, all pointer arithmetic is driven by param_4 (input pointer) and param_5 (input size) and some table sizes and window constraints read from param_1. There are many tight loops but all accesses appear guarded by comparisons to puVar1 = param_4+param_5 and related pointers. It is complex but consistent with upstream zstd fast compressor; this code is widely used and generally memory-safe when its inputs (pointers and sizes) are sane.",
+            "The fuzz crash occurs with top frame ZSTD_compressBlock_fast, implying some out-of-bounds or invalid access happened inside it. Given zstd upstream maturity, the more likely root cause is that JNI passed inconsistent buffer pointer/size pairs into zstd (e.g., pointer offset beyond end of Java array or length not matching buffer). In that case, ZSTD_compressBlock_fast would receive param_4 pointing into unallocated memory or with param_5 too large for the region. Its internal guards assume the pointers are valid, so this can cause memory corruption or segfaults.",
+            "The attacker control path: In real app, Java code will call Zstd.compressUsingDict with a byte[] src, byte[] dict, byte[] dst, and integers srcOffset (param_4), dictOffset (param_6), dictSize (param_7), and probably compression level (param_9). If those integers are not validated on Java side before reaching this JNI, a malicious or buggy caller (e.g., via reflection, or compromised app component) could pass large or negative values. JNI bridge does not clamp or validate them, and JNIEnv does not either.",
+            "Because zstd library expects consistent arguments (buffer pointers within arrays, sizes not exceeding buffer lengths), passing invalid offsets/sizes is analogous to passing incorrect length to a memmove: it becomes a memory safety bug. The fact that our fuzz harness triggered a crash with just one JNI entrypoint and random parameters further supports that realistic misuse is sufficient to corrupt memory. There is no indication that production code enforces invariants (we only see this native side).",
+            "Therefore, we classify this as a genuine vulnerability: unsafe use of third-party compression function with attacker-influenced sizes and offsets, leading to potential out-of-bounds reads/writes and process crash, at least a DoS and potentially exploitable memory corruption. CWE likely is 'Improper validation of array index / buffer length' leading to OOB, mapped as CWE-787 or CWE-119. Impact: high, though exploitability depends on app exposing this JNI to untrusted input."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.82,
+          "reasons": [
+            "JNI bridge Java_com_tencent_mars_zstd_Zstd_compressUsingDict forwards Java-provided offsets and sizes to zstd without any bounds checks",
+            "If srcOffset > src.length or dictOffset/dictSize exceed dict.length, resulting pointer/length pairs for ZSTD_compress_usingDict are inconsistent, violating its preconditions",
+            "Crash occurs inside ZSTD_compressBlock_fast, whose safety depends on valid buffers; misuse from JNI can realistically cause out-of-bounds memory access and process crash",
+            "Fuzzing harness calling the JNI directly was able to trigger the crash, indicating the bug is in argument validation rather than in zstd core logic alone"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119",
+            "CWE-20"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 0x00109a40",
+              "address": "0x00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(\n    uVar6,\n    lVar3 + param_4,              // src = srcBase + srcOffset\n    (long)(iVar1 - param_4),      // srcSize = srcLen - srcOffset (no check srcOffset<=srcLen)\n    lVar4 + param_6,              // dict = dictBase + dictOffset\n    (long)param_7,                // dictSize (unvalidated against dict length iVar2)\n    lVar5,\n    (long)iVar2,\n    param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "Offsets and lengths are directly derived from JNI int parameters without any range checking against actual Java array lengths returned in iVar1, iVar2."
+            },
+            {
+              "function": "ZSTD_compress_usingDict (wrapper) @ 0x00106cc0",
+              "address": "0x00106cc0",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void) { (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)(); }",
+              "note": "Indirection to external zstd implementation; internal checks unknown, but crash in ZSTD_compressBlock_fast indicates invalid buffers propagated."
+            },
+            {
+              "function": "ZSTD_compressBlock_fast @ 0x0011e0d4",
+              "address": "0x0011e0d4",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "... complex pointer arithmetic and table lookups over [param_4, param_4+param_5), assuming valid buffer bounds ...",
+              "note": "Top crashing frame; expects correct buffer pointer/size from higher-level API, which JNI may violate."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 0x00109a40",
+            "ZSTD_compress_usingDict @ 0x00106cc0",
+            "ZSTD_compressEnd",
+            "ZSTD_compressBlock_fast @ 0x0011e0d4"
+          ],
+          "recommendations": [
+            "Add strict bounds checks in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure srcOffset, dictOffset, and dictSize are within the corresponding Java array lengths and are non-negative",
+            "Consider exposing a safer Java API that validates and clamps offsets/sizes before invoking JNI, or remove offset parameters if unused",
+            "Optionally add lightweight assertions in native code before calling ZSTD_compress_usingDict to abort safely rather than passing inconsistent pointers to zstd"
+          ],
+          "assumptions": [
+            "Java side does not already validate offsets and sizes before calling this JNI, or other internal callers may pass untrusted / unchecked values",
+            "The crash is due to invalid buffer/length pairs reaching ZSTD_compressBlock_fast rather than a latent bug in vanilla zstd algorithm",
+            "External code can reach this JNI with controllable parameters (e.g., via app APIs or reflection) in realistic scenarios"
+          ],
+          "limitations": [
+            "Exact internal implementation of the imported ZSTD_compress_usingDict function pointer is not visible; we infer behaviour from crash location and typical zstd API semantics",
+            "We do not see the Java wrapper for Zstd.compressUsingDict to confirm what validation, if any, occurs on offsets and sizes",
+            "Fuzzing stack trace lacks precise signal/PC, so we cannot pinpoint the exact offending instruction in ZSTD_compressBlock_fast"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying crafted parameters to Zstd.compressUsingDict so that srcOffset and/or dictOffset+dictSize exceed the corresponding byte[] lengths, causing zstd to read/write out of bounds.",
+            "prerequisites": [
+              "Ability to invoke the Zstd.compressUsingDict JNI (directly or via its Java wrapper) with attacker-controlled byte[] and integer parameters",
+              "No strict validation on Java side for offsets and sizes",
+              "App runs libwechatzstd.so on a device where process crashes are observable"
+            ],
+            "exploit_pipeline": [
+              "Craft a Java caller (or use reflection in the target app) to invoke Zstd.compressUsingDict with a small src byte[] and a large srcOffset (e.g., greater than src.length) and/or inconsistent dictOffset/dictSize relative to dict.length",
+              "Deploy this caller in an app or test harness on the target device and ensure it uses the victim app’s libwechatzstd.so (or interact with an exported component in the victim app that forwards these parameters)",
+              "Invoke the compression operation repeatedly with varying offsets/sizes to trigger out-of-bounds reads/writes inside ZSTD_compressBlock_fast, causing a controlled crash and potentially exploring memory corruption behaviour",
+              "Observe crashes or abnormal behaviour (via logcat or debugger) to refine parameters and assess whether controlled memory corruption (beyond simple DoS) is achievable"
+            ],
+            "poc_commands": [
+              "adb shell am start -n <victim.package>/<victim.Activity> --es mode 'testZstdCompressUsingDict' --es srcFile '/sdcard/Download/payload.bin' --ei srcOffset 2147483647 --ei dictOffset 2147483647 --ei dictSize 2147483647",
+              "adb logcat | grep -i 'libwechatzstd'"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact activity/class names and Java API signatures are unknown; replace placeholders with real ones after inspecting the target APK. PoC concept relies on passing extreme or inconsistent offsets/lengths that violate the zstd API’s expectations."
+          }
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 56696,
+          "output_tokens": 2731
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "art::JNI<false>::ReleasePrimitiveArrayCritical",
+          "StackTrace": [
+            "art::JNI<false>::ReleasePrimitiveArrayCritical",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below runtime is Java_com_tencent_mars_zstd_Zstd_compressUsingDict in libwechatzstd.so; crash is in art::JNI<false>::ReleasePrimitiveArrayCritical which corresponds to the indirect calls at offset *param_1+0x6f8 (ReleasePrimitiveArrayCritical) after prior GetArrayLength (0x558) and GetPrimitiveArrayCritical (0x6f0).",
+            "Decompiled JNI shows three arrays: param_3 (dst byte[]), param_5 (dict byte[]), param_8 (src byte[]). It calls GetArrayLength for param_3 and param_8 (iVar1, iVar2) and GetPrimitiveArrayCritical for all three (lVar3, lVar4, lVar5). Each GetPrimitiveArrayCritical is checked for NULL; on NULL, it returns -0x40 and releases already-acquired arrays via ReleasePrimitiveArrayCritical (0x6f8).",
+            "The potentially dangerous native call is ZSTD_compress_usingDict(uVar6, lVar3 + param_4, (long)(iVar1 - param_4), lVar4 + param_6, (long)param_7, lVar5, (long)iVar2, param_9). Pointers and lengths here derive from Java array bases plus user-controlled offsets/lengths param_4, param_6, param_7 and the lengths iVar1, iVar2 from GetArrayLength. There is no check that param_4 <= iVar1, that param_6+param_7 <= dict length, or that iVar1 - param_4 is non-negative. However, these pointer arithmetic results are only passed into ZSTD_compress_usingDict; this wrapper itself does not perform the dangerous memory copy, but it may cause undefined behaviour inside zstd if the parameters are invalid.",
+            "The crash reported is in ReleasePrimitiveArrayCritical, which suggests either (a) JNI env/harness misuse (e.g., double release, invalid pointer) or (b) a bug in JNIEnv implementation triggered by corrupted pointer/array state from misuse inside ZSTD. In this code, every successful GetPrimitiveArrayCritical is paired with exactly one ReleasePrimitiveArrayCritical in the same function; there is no path that releases the same lVar3/lVar4/lVar5 twice, and the release mode constants (0,2) are plausible. So double-release or mismatched env calls are not present here; JNI usage appears correct.",
+            "Given that fuzzing calls come from fuzz_one_input, attacker-controlled parameters (offsets, lengths) reach this JNI directly (no validation). Even if the immediate crash is in ReleasePrimitiveArrayCritical, a highly plausible root cause is that ZSTD_compress_usingDict performed out-of-bounds access or corrupted memory due to invalid offset/size arguments, thereby causing heap or VM state corruption that manifests when JNI later touches the critical array. Without decompiling ZSTD itself (likely in the same lib but heavily optimized), we cannot pinpoint exact OOB within ZSTD, but the unvalidated pointer arithmetic in the JNI wrapper constitutes a logic bug and likely memory-safety vulnerability, as zstd expects consistent buffer size/length relationships.",
+            "No evidence points to harness-only impossibility: in real app usage, Java code could call compressUsingDict with bad offsets or lengths (guessing signature like compressUsingDict(byte[] dst,int dstOff, byte[] dict,int dictOff,int dictSize, byte[] src,int srcLen,int level)). Unless the Java layer validates them (unknown here), this JNI is directly exposed. In fuzz context, the input controls these ints, so the bug is reachable.",
+            "Thus, classify as a likely real vulnerability: out-of-bounds or memory corruption via ZSTD_compress_usingDict triggered by unchecked Java-controlled offsets/lengths in JNI wrapper. Severity high because it is memory corruption in native compression, potentially exploitable; confidence moderate-high (0.78) because we infer corruption path rather than directly observing the faulty memcpy, but control and missing checks are clear."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "JNI wrapper computes buffer pointers using Java-controlled offsets and lengths without any bounds checks.",
+            "Resulting pointer and length pairs are passed into ZSTD_compress_usingDict, which likely assumes they are valid and can perform out-of-bounds reads/writes or memory corruption.",
+            "Crash occurs in JNI ReleasePrimitiveArrayCritical, consistent with earlier corruption in native code that later trips the runtime.",
+            "The wrapper carefully pairs GetPrimitiveArrayCritical/ReleasePrimitiveArrayCritical, so the crash is unlikely to be a harness-only JNI misuse; root cause is more plausibly bad arguments into zstd."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // GetArrayLength(dst)\n...\niVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_8); // GetArrayLength(src)\n...\nuVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(\n    uVar6,\n    lVar3 + param_4,              // dst base + offset\n    (long)(iVar1 - param_4),      // dst size derived from length - offset, unchecked\n    lVar4 + param_6,              // dict base + offset\n    (long)param_7,                // dict size; no check against array length\n    lVar5,\n    (long)iVar2,                  // src size == src array length\n    param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "Offsets and sizes from Java are used without validating that they stay within the array bounds before passing them to zstd."
+            },
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "lVar3 = GetPrimitiveArrayCritical(env, param_3, 0);\nif (lVar3 == 0) return -0x40;\n...\n// Similar for lVar4 (dict) and lVar5 (src)\n...\nReleasePrimitiveArrayCritical(env, param_8, lVar5, 2);\nReleasePrimitiveArrayCritical(env, param_5, lVar4, 2);\nReleasePrimitiveArrayCritical(env, param_3, lVar3, 0);",
+              "note": "JNI resource management is balanced; crash in ReleasePrimitiveArrayCritical suggests prior memory corruption rather than direct JNI misuse."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "ZSTD_compress_usingDict"
+          ],
+          "recommendations": [
+            "Add explicit bounds checks in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure offsets and lengths (param_4, param_6, param_7) do not exceed their respective array lengths and are non-negative before calling ZSTD_compress_usingDict.",
+            "Consider changing the JNI API to take explicit buffer slices with validated ranges on the Java side, and assert invariants in native code to fail fast rather than passing inconsistent parameters to zstd.",
+            "Run AddressSanitizer or similar on libwechatzstd.so with targeted tests for compressUsingDict to confirm and localize the exact out-of-bounds behavior inside ZSTD_compress_usingDict."
+          ],
+          "assumptions": [
+            "The Java layer passing arguments to Java_com_tencent_mars_zstd_Zstd_compressUsingDict does not fully validate offsets and lengths, or mistakes can be made that bypass such validation.",
+            "ZSTD_compress_usingDict expects that provided buffer pointers and sizes describe valid, non-overlapping memory regions and will perform memory accesses based on them.",
+            "The crash in art::JNI<false>::ReleasePrimitiveArrayCritical is a symptom of earlier native memory corruption rather than a bug in the ART JNI implementation."
+          ],
+          "limitations": [
+            "The internal implementation of ZSTD_compress_usingDict in this binary was not decompiled in detail, so the exact out-of-bounds operations are inferred, not directly observed.",
+            "The Java-side method signature and any validations are unknown; if the Java layer enforces strict bounds, external exploitability may be reduced.",
+            "We do not see the full fuzz harness, so exact mapping of fuzzer input bytes to JNI parameters is assumed but not verified."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying crafted arguments (offsets and lengths) to the Zstd.compressUsingDict JNI wrapper so that buffer offset/size relationships are inconsistent, causing zstd to read/write out of bounds.",
+            "prerequisites": [
+              "Ability to invoke the compressUsingDict functionality with attacker-controlled or partially controlled byte arrays and offset/length parameters (e.g., via app APIs processing untrusted network or file data).",
+              "Target device running a build that includes libwechatzstd.so with this JNI implementation.",
+              "Sufficient heap grooming/control to potentially turn out-of-bounds operations into a useful memory corruption primitive."
+            ],
+            "exploit_pipeline": [
+              "Identify or reach a Java API that ultimately calls Java_com_tencent_mars_zstd_Zstd_compressUsingDict with user-influenced buffer arrays and integer parameters.",
+              "Craft input data so that dstOff (param_4) exceeds or nearly equals the dst array length, or dictOff/dictSize (param_6/param_7) extend beyond the dict array length, while srcLen (iVar2) is large, leading to inconsistent buffer layout.",
+              "Trigger compression (e.g., by sending a specially crafted compressed payload or file that the app attempts to recompress or transcode), causing ZSTD_compress_usingDict to perform out-of-bounds reads/writes based on the invalid pointers and sizes.",
+              "Observe process crashes or memory anomalies; refine offsets and lengths to attempt controlled overwrites or information leakage if further primitives are discovered."
+            ],
+            "poc_commands": [
+              "adb push /path/to/crafted_input.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n <package>/<activity> --es input_path /sdcard/Download/payload.bin",
+              "# Within a custom test harness or instrumented build:\nadb shell \"CLASSPATH=/data/local/tmp/test.apk app_process / com.example.TestHarness --mode compressUsingDict --dstOff 2147483647 --dictOff 0 --dictSize 1024 --srcLen 4096\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact Java entrypoints and parameter mapping are unknown; PoC assumes there is a reachable API or test harness exposing compressUsingDict with controllable offsets/lengths. A more reliable PoC would be built once the Java method signature and its usage contexts are identified."
+          }
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 4,
+          "llm_tool_calls": 4,
+          "input_tokens": 24534,
+          "output_tokens": 2467
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "ZSTD_compressBlock_btultra2",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_btultra2",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: stack shows ZSTD_compressBlock_btultra2 → ZSTD_compressEnd → ZSTD_compress_usingDict → Java_com_tencent_mars_zstd_Zstd_compressUsingDict. The first substantial app frame below any thunks is ZSTD_compressBlock_btultra2 inside libwechatzstd.so.",
+            "We inspected decompiled ZSTD_compressBlock_btultra2: massive hand-optimized compression routine with pointer arithmetic over input buffer param_4 and length param_5, using many pointer comparisons against puVar2 = param_4 + param_5 and various sub-pointers puVar24, puVar31, puVar32, puVar44, puVar25 to enforce bounds before mem-like word operations. There is explicit stack canary check and returns difference (long)puVar2 - (long)param_4 on success.",
+            "We must locate memcpy/memmove: the decompiled body is inlined comparisons and word loads/stores; no direct memcpy calls but many places where it dereferences pointers derived from param_4 / local_d0 while checking against puVar2, puVar24, puVar31, etc. The bug, if any, would be an out-of-bounds read/write due to mis-handled bounds or integer overflows around indices and lengths.",
+            "Now trace attacker-controlled inputs: at JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict, the Java side passes: param_3 (dst byte[]), param_4 (dstOffset), param_5 (src byte[]), param_6 (srcOffset), param_7 (srcLength), param_8 (dict byte[]), param_9 (compressionLevel). JNI uses JNIEnv functions via vtable offsets: 0x558 is GetArrayLength, 0x6f0 is GetPrimitiveArrayCritical, 0x6f8 is ReleasePrimitiveArrayCritical. So iVar1 = len(dstArray), iVar2 = len(dictArray).",
+            "It then obtains raw pointers lVar3 = baseDst, lVar4 = baseSrc, lVar5 = baseDict (or 0 if arrays null, checked). The Zstd call is: ZSTD_compress_usingDict(ctx, lVar3 + param_4, (long)(iVar1 - param_4), lVar4 + param_6, (long)param_7, lVar5, (long)iVar2, param_9). So: dstPtr = dstBase + dstOffset; dstCapacity = iVar1 - dstOffset; srcPtr = srcBase + srcOffset; srcSize = srcLength; dictPtr = dictBase; dictSize = dictLen. No explicit validation is done on dstOffset, srcOffset, or srcLength relative to their array lengths beyond using iVar1, iVar2; there is no check that param_4 <= iVar1 or param_6 + param_7 <= srcArrayLen.",
+            "Potential memory safety issues at JNI boundary: (1) if dstOffset > dstArrayLen, dstPtr points beyond JNIEnv-managed array; dstCapacity becomes negative but cast to long (signed) and passed to native zstd which expects size_t. In ARM64 ABI, long is 64-bit signed but zstd size parameters are usually size_t (unsigned long); if prototype mismatched, negative becomes huge positive length, leading to massive OOB write. However here decompiler shows (long)(iVar1 - param_4) as 64-bit signed but the actual C signature for ZSTD_compress_usingDict in zstd is size_t ZSTD_compress_usingDict(ZSTD_CCtx*, void* dst, size_t dstCapacity, const void* src, size_t srcSize, const void* dict, size_t dictSize, int compressionLevel). The wrapper likely preserved types, but Ghidra typed them as long. Still, JNI code never checks that param_4 <= iVar1; fuzzer can call with arbitrary param_4, unlike normal Java API which might validate offsets. JNIEnv's GetPrimitiveArrayCritical returns valid pointer regardless of offset. So vulnerability path exists if ZSTD_compress_usingDict doesn’t itself re-validate capacity pointer vs underlying array bounds (it only trusts dstCapacity).",
+            "Similarly, srcOffset/srcLength may be inconsistent with src array length; Zstd library presumably trusts srcSize & src pointer and may read past end of array, causing heap OOB read. However JVM’s primitive array is contiguous and not bounds-checked at native side, so OOB read on heap is possible if Zstd doesn’t handle mismatch, but typical zstd just reads srcSize bytes; if srcSize > actual array length, native will read past array. The JNI code does not cap srcLength; it just passes param_7 directly.",
+            "But: our fuzz harness likely calls JNI with random integers, including negative offsets or lengths, which normal Java code would never pass (arrayoffsets and lengths are validated in Java before calling native methods). However this is a JNI native declared directly; Java declaration likely uses int parameters but doesn’t enforce ranges; calling app code should validate, but we don’t see it here. Under typical Android, malicious app code could call this JNI directly if the Java class and method are public and in same process; but it’s within com.tencent.mars.zstd.Zstd, likely a general-purpose utility accessible to app internals, not cross-app. Exploit requires being able to invoke this JNI via Java with arbitrary int parameters while typing to byte[] arrays.",
+            "Because the crash occurs deep in ZSTD_compressBlock_btultra2, likely due to malformed src/dst pointers or sizes, and there is no safety check in JNI bridge, this is a genuine memory safety bug: JNI wrapper fails to validate offset and length parameters and passes inconsistent buffer pointer/length pairs to zstd. That can lead to OOB heap read/write inside compression. Fuzz harness is essentially simulating hostile Java caller, so this is realistic within same-app threat model.",
+            "We don’t see direct memcpy use; the vulnerability is the combination of attacker-controlled offsets/sizes and library expecting trusted parameters. zstd itself is robust for arbitrary srcSize/dstCapacity but cannot defend against pointers outside managed buffer. JNI must ensure dstPtr and srcPtr remain within their respective arrays. The code uses base+offset and passes separate capacity/size; if offset>len or offset+len>len, out-of-bounds occurs. No validation or clipping present. Hence classify as vulnerable. Severity high due to potential arbitrary heap read/write in app process; exploit likely requires local code execution within same app, not remote RCE by itself.",
+            "Call sequence: fuzz_one_input (harness) → Java_com_tencent_mars_zstd_Zstd_compressUsingDict (JNI) → ZSTD_compress_usingDict (PLT thunk to libzstd implementation) → ZSTD_compressEnd → ZSTD_compressBlock_btultra2 → crash. Affected library: libwechatzstd.so.",
+            "Exploitability: an attacker controlling Java layer inside WeChat process (e.g., plugin, script, or compromised code) could craft byte[] arrays and deliberately pass out-of-range offsets and lengths to cause heap corruption, leading to code execution or info leak. Remote attacker may leverage if they can affect parameters used by WeChat’s invocation of this method through untrusted input without validation, but that’s outside current scope. We rate exploitability as theoretical-to-practical at local level."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "JNI bridge Java_com_tencent_mars_zstd_Zstd_compressUsingDict performs no bounds checking on dstOffset (param_4), srcOffset (param_6), or srcLength (param_7) relative to Java array lengths obtained via GetArrayLength.",
+            "It computes raw pointers base+offset and passes them along with independent lengths/capacities to ZSTD_compress_usingDict, trusting the caller; if offsets/lengths are inconsistent with the actual array size, the native zstd routines will access memory outside the Java array, leading to OOB read/write.",
+            "Crash occurs inside complex compression routine ZSTD_compressBlock_btultra2, consistent with memory corruption triggered by invalid buffer pointers or sizes; no evidence of harness-specific null misuse beyond supplying arbitrary integers that realistic Java callers could also pass."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(uVar6,\n        lVar3 + param_4,                 // dst = baseDst + dstOffset\n        (long)(iVar1 - param_4),         // dstCapacity = dstLen - dstOffset (no check dstOffset<=dstLen)\n        lVar4 + param_6,                 // src = baseSrc + srcOffset\n        (long)param_7,                   // srcSize = srcLength (no check srcOffset+srcLength<=srcLen)\n        lVar5,\n        (long)iVar2,\n        param_9);",
+              "note": "JNI wrapper passes unchecked offsets and length to zstd, creating inconsistent pointer/size pairs when called with attacker-controlled integers."
+            },
+            {
+              "function": "ZSTD_compressBlock_btultra2",
+              "file": "libwechatzstd.so",
+              "snippet": "puVar2 = (ulong *)((long)param_4 + param_5);\n...\n  if (puVar24 <= local_d0) { ... return (long)puVar2 - (long)param_4; }\n  ... complex pointer arithmetic & comparisons against puVar2/puVar24/puVar31/puVar32/puVar44 ...",
+              "note": "Compression block routine assumes pointer/length pairs are valid; if JNI provided out-of-bounds pointers, internal checks may fail leading to crash/memory corruption."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "ZSTD_compress_usingDict",
+            "ZSTD_compressEnd",
+            "ZSTD_compressBlock_btultra2"
+          ],
+          "recommendations": [
+            "In Java_com_tencent_mars_zstd_Zstd_compressUsingDict, validate that dstOffset>=0 and dstOffset<=dstArrayLen, srcOffset>=0, srcLength>=0, and srcOffset+srcLength<=srcArrayLen before computing raw pointers.",
+            "Clamp or reject calls where calculated capacities/lengths would be negative or exceed array lengths; return an error code instead of invoking ZSTD_compress_usingDict.",
+            "Add defensive assertions or runtime checks in the JNI layer to prevent passing arbitrary host pointers and sizes into zstd, and consider fuzzing the JNI interface with realistic parameter ranges."
+          ],
+          "assumptions": [
+            "ZSTD_compress_usingDict has the standard zstd signature taking size_t capacities and does not itself validate that dst/src pointers lie within JVM-managed arrays.",
+            "The Java API for com.tencent.mars.zstd.Zstd_compressUsingDict is accessible to potentially untrusted or less-trusted Java code within the same app process, allowing attacker control over offsets and lengths.",
+            "The observed crash in ZSTD_compressBlock_btultra2 is due to OOB access arising from inconsistent buffer pointers/lengths rather than an unrelated hardware or environment fault."
+          ],
+          "limitations": [
+            "Exact crash reason (SIGSEGV vs abort) and register state at faulting instruction are not provided, so corruption location is inferred from code structure and fuzzing context.",
+            "We do not have the Java declaration or surrounding validation logic for Zstd.compressUsingDict; if all callers sanitize parameters rigorously, exploitability would be reduced.",
+            "The exact calling convention and type widths for ZSTD_compress_usingDict in this build are inferred from typical zstd usage and Ghidra’s decompilation, not from debug symbols."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or buggy Java code inside the WeChat process calling com.tencent.mars.zstd.Zstd.compressUsingDict with out-of-range offsets/lengths.",
+            "prerequisites": [
+              "Ability to execute arbitrary Java code in the com.tencent.mm app context (e.g., via plugin system, code injection, or compromised app build).",
+              "Knowledge of the Zstd.compressUsingDict Java API signature to supply crafted byte[] buffers and offset/length parameters.",
+              "Target device running a build with this vulnerable libwechatzstd.so version."
+            ],
+            "exploit_pipeline": [
+              "Prepare large byte[] buffers for source, destination, and dictionary in Java, ensuring they are allocated on the heap.",
+              "Call Zstd.compressUsingDict with dstOffset greater than dstArray.length or srcOffset+srcLength greater than srcArray.length, causing the JNI to compute out-of-bounds raw pointers while still passing large positive size/length values to ZSTD_compress_usingDict.",
+              "Observe heap memory corruption or crashes in ZSTD_compressBlock_btultra2; by carefully tuning offsets and lengths, attempt to overwrite adjacent heap structures or sensitive data to gain further control.",
+              "Iterate parameter selection to achieve controlled memory overwrite or information leak, potentially chaining into code execution depending on allocator and surrounding heap layout."
+            ],
+            "poc_commands": [
+              "# Assuming an instrumented or test build where you can run arbitrary Java code in com.tencent.mm\n# The following is conceptual; actual class and method names may differ.\nadb shell am instrument -w -e class com.tencent.mars.zstd.ZstdFuzzTest com.tencent.mm.test/androidx.test.runner.AndroidJUnitRunner"
+            ],
+            "poc_files": [
+              "/sdcard/Download/zstd_dict.bin",
+              "/sdcard/Download/zstd_src.bin"
+            ],
+            "notes": "A concrete PoC would be a small Android test harness that loads com.tencent.mars.zstd.Zstd and invokes compressUsingDict with deliberately invalid offsets (e.g., dstOffset = dst.length + 0x100, srcOffset = src.length - 4, srcLength = 0x1000) to induce an out-of-bounds access in libwechatzstd.so."
+          }
+        },
+        "statistics": {
+          "time": "00:01:02",
+          "llm_requests": 2,
+          "llm_tool_calls": 5,
+          "input_tokens": 71226,
+          "output_tokens": 3094
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocators is ZSTD_compressEnd/ZSTD_compress_usingDict, but both are pure indirections through function pointers in this lib; the first meaningful app-level function we can see and decompile is the JNI bridge Java_com_tencent_mars_zstd_Zstd_compressUsingDict, which appears in the stack trace and is the only non-thunk we can inspect.",
+            "Decompilation of Java_com_tencent_mars_zstd_Zstd_compressUsingDict shows it is a normal JNI bridge that uses JNIEnv function pointers at offsets 0x558 and 0x6f0/0x6f8 to get array lengths and elements for three Java byte arrays: dest, dict, and src (based on typical zstd API and parameter ordering). It then calls ZSTD_createCCtx, then ZSTD_compress_usingDict with arguments that perform pointer arithmetic involving param_4/param_6 (offsets), param_7 (dict size), and iVar1/iVar2 (likely lengths).",
+            "Critical operations: it computes destination pointer as lVar3 + param_4 and destination size as (long)(iVar1 - param_4). Here iVar1 came from JNIEnv->GetArrayLength(env, destArray). There is no check that param_4 is within [0, iVar1]; if param_4 > iVar1, (iVar1 - param_4) is negative and cast to long, producing a very large unsigned-like size passed down. Similarly, it computes source pointer as lVar4 + param_6 with dict size (long)param_7 and passes lVar5 with (long)iVar2 (for another array) without any checking of param_6/param_7 versus the corresponding array lengths.",
+            "Because this bridge is used by JNI fuzzing, we know param_4, param_6, param_7, and the array contents/sizes are controllable via Java caller (or fuzz harness). In a real app, Java code would call this method with parameters that can be influenced by external input (e.g., compressed payloads, dictionaries). The lack of bounds checks in the native bridge means arbitrary offsets and sizes can be forwarded directly into the internal ZSTD_compress_usingDict implementation.",
+            "The crash termination reason is unknown (\"??\"), and we do not see the actual implementation of ZSTD_compress_usingDict because it is an indirect call via PTR_ZSTD_compress_usingDict_001a9c10 into probably the real zstd library code. However, generic zstd implementations do not expect negative sizes or out-of-range pointers; passing a pointer beyond the end of the Java array or a size inconsistent with the underlying buffer can reasonably lead to memory access outside the mapped region, causing SIGSEGV or allocator abort. This is a classic unvalidated length/offset propagation into a compression routine that does raw memory operations.",
+            "Mandatory memcpy/unsafe operation inspection: We cannot decompile the real body of ZSTD_compress_usingDict (only the thunk is present), so we cannot see specific memcpy calls. But by design, ZSTD_compress_usingDict does buffer reads based on the provided size arguments; if the destination size is wrong or the pointers point beyond the true buffers, internal copies or reads will be out-of-bounds. The unsafe behavior is at the interface: constructing a buffer pointer and length pair that does not correspond to valid memory owned by the Java array, then passing it into an opaque native routine.",
+            "Backward data-flow: src (destination pointer) is lVar3 + param_4; lVar3 is JNIEnv->GetPrimitiveArrayCritical(env, destArray, 0). This gives a base pointer to a Java array of iVar1 elements (bytes). param_4 comes directly from a Java int argument (JNI param_4) with no transformation or validation. len (destination size) is (long)(iVar1 - param_4). When param_4 is >= 0 and <= iVar1, this is safe; when param_4 < 0 or > iVar1, the size becomes nonsensical (either larger than actual or negative cast). There are no checks, so attacker-controlled values determine pointer arithmetic and size. Similar reasoning applies to lVar4 + param_6 and param_7 vs dict array length; param_6 and param_7 are raw ints from Java with no checks against iVar? (the JNIEnv length for those arrays).",
+            "Because this is JNI code in the target lib, not harness-only glue, and because the arguments used unsafely are directly exposed in the public Java API (compressUsingDict has offset and length parameters), this issue is reachable in real-world usage if Java-side validation is missing or flawed. Even if WeChat's Java wrapper may normally validate, the native code itself is unsafe and cannot rely on callers; from a security standpoint, trusting offsets and lengths from Java without native bounds checking is a vulnerability.",
+            "We do not know the exact allocator/sanitizer abort message; however, the structure matches a classic CWE-119/CWE-787 style bug: creation of a (pointer, length) pair inconsistent with the true buffer, passed into a complex compression routine, potentially leading to out-of-bounds memory accesses and crashes. Given the clear arithmetic flaw (iVar1 - param_4 unbounded) and attacker-controllable inputs, this should be classified as a likely vulnerability with high severity (memory corruption).",
+            "Limitations: we cannot inspect the internal zstd implementation inside this binary because calls are via external function pointer, so we infer behavior from standard semantics and naming. We also lack direct proof that the crash is exactly due to an OOB access, but the pattern and fuzzing-induced crash strongly support it. There may be Java-side sanity checks in higher-level app code that usually constrain these parameters; still, native code should not assume perfect validation, and the fuzzer shows that invalid values cause native failure."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.86,
+          "reasons": [
+            "JNI bridge constructs buffer pointer+length pairs using attacker-controlled offsets and sizes without any native bounds checking.",
+            "Destination length is computed as (iVar1 - param_4) where iVar1 is array length and param_4 is unvalidated offset; negative or oversized results are possible and passed into ZSTD_compress_usingDict.",
+            "Function pointers for ZSTD_compress_usingDict/ZSTD_compressEnd hide implementation, but by design they perform memory operations based on these sizes, so inconsistent pointer/length pairs can cause OOB access and crashes.",
+            "Crash occurs inside ZSTD_compressEnd/ZSTD_compress_usingDict stack, matching misuse of compression API with malformed input."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "0x00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict\n          (uVar6,\n           lVar3 + param_4,               // dest ptr = base + offset (no check)\n           (long)(iVar1 - param_4),       // dest size = len - offset (no check)\n           lVar4 + param_6,               // src/dict ptr = base + offset (no check)\n           (long)param_7,                 // src/dict size = raw int (no check)\n           lVar5,\n           (long)iVar2,\n           param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "Offsets and sizes from JNI parameters are used directly to form buffer/length pairs; no validation against array lengths returned by JNIEnv."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "address": "0x00106cc0",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void)\n{\n  (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)();\n}",
+              "note": "Indirect call into external compression implementation. Behavior inferred from naming and standard zstd API; receives invalid pointer+length pairs from JNI bridge."
+            },
+            {
+              "function": "ZSTD_compressEnd",
+              "address": "0x00106c60",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compressEnd(void)\n{\n  (*(code *)PTR_ZSTD_compressEnd_001a9be0)();\n}",
+              "note": "Thunks show calls are delegated via function pointers; crash happens within these routines when misused arguments cause OOB memory operations."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 0x00109a40 -> ZSTD_compress_usingDict @ 0x00106cc0 -> PTR_ZSTD_compress_usingDict_001a9c10 -> ZSTD_compressEnd @ 0x00106c60 -> PTR_ZSTD_compressEnd_001a9be0"
+          ],
+          "recommendations": [
+            "Add explicit native-side validation in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure offsets and lengths are within the bounds of the corresponding Java arrays before calling ZSTD_compress_usingDict.",
+            "Return an error code when invalid parameters are detected instead of forwarding them to the compression library.",
+            "Consider wrapping ZSTD_compress_usingDict in a safer API that accepts a struct with validated buffer pointers and sizes, or migrate to the official zstd JNI bindings which perform parameter checks."
+          ],
+          "assumptions": [
+            "ZSTD_compress_usingDict behaves like the standard zstd API, performing memory reads/writes based on provided pointers and sizes.",
+            "Java-side code may not comprehensively validate offsets and lengths before invoking this JNI method, or future callers (or other apps using this lib) might bypass such checks.",
+            "Fuzzer inputs are representative of adversarial conditions where offsets and sizes can be arbitrary within 32-bit integer range."
+          ],
+          "limitations": [
+            "Internal implementation of ZSTD_compress_usingDict is not visible in this binary; behavior is inferred from name and typical zstd semantics.",
+            "Exact process termination signal and faulting instruction are unknown, so we infer crash cause from parameter misuse pattern.",
+            "We do not see higher-level Java wrappers which might add some validation; assessment is made from native code alone."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying crafted offsets, lengths, and buffers to the JNI method com.tencent.mars.zstd.Zstd.compressUsingDict via Java-level input processing.",
+            "prerequisites": [
+              "Ability to invoke com.tencent.mars.zstd.Zstd.compressUsingDict with attacker-controlled byte arrays and integer parameters (e.g., via file/Network data parsed by the app).",
+              "No or insufficient Java-side validation of offsets and lengths before calling the JNI bridge.",
+              "Target device running a build that includes libwechatzstd.so with this JNI implementation."
+            ],
+            "exploit_pipeline": [
+              "Craft large byte arrays for destination, dictionary, and source data such that their true lengths are small but the offsets/length parameters passed to compressUsingDict are inconsistent (e.g., offset > array length, or negative/overflowing values).",
+              "Cause the app to call com.tencent.mars.zstd.Zstd.compressUsingDict with these arrays and malicious offset/length integers, leading the JNI bridge to compute out-of-range pointers and nonsensical sizes.",
+              "When ZSTD_compress_usingDict processes the provided buffers, it performs memory operations beyond the actual array bounds, triggering memory corruption or a crash.",
+              "Iteratively adjust offsets and lengths to attempt more precise control over the out-of-bounds region, potentially escalating from crash to controlled memory overwrite depending on zstd internals."
+            ],
+            "poc_commands": [
+              "adb push /path/to/crafted_input.bin /sdcard/Download/zstd_poc.bin",
+              "adb shell am start -n <target.package.name>/<target.Activity> --es zstd_input /sdcard/Download/zstd_poc.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/zstd_poc.bin"
+            ],
+            "notes": "Exact Java entry point and parameter mapping for compressUsingDict are not available; PoC assumes an activity or service can be driven to call the JNI method with attacker-controlled arrays and integer parameters. Offsets like param_4 > destArray.length or param_4 negative can cause invalid (pointer, length) pairs in the native bridge."
+          }
+        },
+        "statistics": {
+          "time": "00:00:37",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 31085,
+          "output_tokens": 2934
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "ZSTD_compressBlock_doubleFast",
+          "StackTrace": [
+            "ZSTD_compressBlock_doubleFast",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_doubleFast",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is ZSTD_compressBlock_doubleFast inside libwechatzstd.so; this is the core block compression routine and clearly app-level, not allocator/sanitizer.",
+            "This function is extremely complex, but it operates entirely over internal pointers (param_4, param_5, tables at param_1+offsets). There are many memcpy-like manually unrolled copy loops but no direct libc memcpy/memmove calls; instead they use pointer arithmetic and word copies guarded by comparisons against puVar2/puVar7/puVar10 etc.",
+            "The JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict obtains three Java byte[] pointers via GetPrimitiveArrayCritical or similar (vtable slot 0x6f0), checks each for null, and then calls ZSTD_compress_usingDict(uVar6, lVar3+param_4, (iVar1-param_4), lVar4+param_6, param_7, lVar5, iVar2, param_9).",
+            "Key attacker-controlled values are param_4 (destination offset into output array), param_6 (source offset into input), param_7 (input length), and the Java array lengths iVar1 (output length) and iVar2 (dict length). JNI does not validate that param_4 <= iVar1 or param_6+param_7 <= input length, or that offsets are non-negative; any such checking must occur inside ZSTD_compress_usingDict / ZSTD_compressEnd / ZSTD_compressBlock_doubleFast.",
+            "Standard Zstd API expects caller to provide output buffer size and input size; if JNI passes (iVar1 - param_4) for output size, then unless param_4>iVar1 it remains non-negative. However, param_4 is an int directly from Java; if param_4 > iVar1 in fuzzing, (iVar1 - param_4) becomes negative, sign-extended to 64-bit length. That could underflow large, leading to internal pointer arithmetic using bogus block size and potential out-of-bounds reads/writes.",
+            "But the observed crash reason text is just function name, not ASAN or SIGSEGV detail; we lack evidence of a specific overflow site. ZSTD_compressBlock_doubleFast computes puVar2 = (ulong*)((long)param_4 + param_5) and repeatedly bounds-checks puVar12 vs puVar23 (puVar2-1), puVar7 (puVar2-7), puVar10 (puVar2-4), etc. These internal checks are based on param_5, the remaining input size for this block; if param_5 were huge/wrapped negative, those comparisons may still be consistent within the allocated block region computed earlier by ZSTD, whose own higher-level APIs should cap sizes from the caller-supplied length.",
+            "Critically, ZSTD_compress_usingDict is the standard library function which treats the third argument as dstCapacity and is specified to accept any size_t; passing a huge size_t may waste time but does not by itself cause an overflow, because Zstd uses it only to ensure it never writes past dst+dstCapacity. The complex loops in ZSTD_compressBlock_doubleFast manipulate pointers entirely within the input window [param_4, param_4+param_5); they do not reference dst buffer directly; dst handling happens at higher level combine of sequences; here param_2/param_3 track sequences and literals but still obey capacity tracking.",
+            "Given this, the more realistic bug candidates are: (a) JNI allows negative or out-of-range offsets (param_4, param_6) so that lVar3+param_4 or lVar4+param_6 points outside the mapped Java array; (b) JNI allows param_7 to extend past the end of the input array so that lVar4+param_6 + param_7 crosses beyond array; but those out-of-bounds accesses would occur when ZSTD_compress_usingDict reads/writes via those base+size values. Zstd core normally trusts the user-provided pointers/sizes, so if JNI passes invalid ones, that is a genuine vulnerability path.",
+            "However, JNI obtains iVar1 = GetArrayLength(array1) and iVar2 = GetArrayLength(dictArray); it does NOT fetch the input-array length (for param_5) – param_7 is directly used as size without checking against the actual Java array length. That means the fuzzer could, via the Java bridge, request compression of more bytes than present in the underlying array, causing ZSTD to read past the mapped region. Because GetPrimitiveArrayCritical maps exactly the backing store, reading beyond that is a memory safety violation, not just logical error. Similarly, lVar3+param_4 might be beyond the output array, enabling OOB writes.",
+            "Therefore, crash in ZSTD_compressBlock_doubleFast reachable from Java_com_tencent_mars_zstd_Zstd_compressUsingDict under fuzzing indicates a realistic memory corruption risk when called with maliciously chosen offsets/lengths. This JNI bridge is used in WeChat’s zstd integration; untrusted input controlling these parameters is plausible (e.g., app-level caller exposes them or uses them based on message content). Even if owners may intend to constrain them, current native code lacks any range checks, so risk is real.",
+            "Given that this is production libwechatzstd.so in com.tencent.mm and we see clear lack of JNI-side argument validation for buffer offsets/lengths before passing to a memory-unsafe C API, I classify this as a likely genuine vulnerability, with memory corruption or denial-of-service, high severity. Confidence is moderate-high though not absolute because we don’t see the exact faulting instruction or the Java-side public API; but typical patterns and Zstd semantics strongly support it."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "JNI bridge Java_com_tencent_mars_zstd_Zstd_compressUsingDict passes Java-controlled offsets and lengths directly into ZSTD_compress_usingDict without validating them against array lengths",
+            "Zstd C APIs assume caller-provided pointers and sizes are valid; if JNI passes base+offset past the end of the Java array or an oversized length, native code will perform out-of-bounds reads/writes",
+            "Crash occurs deep inside ZSTD_compressBlock_doubleFast, a hot compression loop that uses pointer arithmetic over caller-provided buffers, consistent with memory-safety failure when sizes are wrong",
+            "No bounds checks in the JNI layer for param_4/param_6/param_7 or for negative/overlarge combinations relative to GetArrayLength results"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "00109a40",
+              "file": "libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict\n          (uVar6,lVar3 + param_4,(long)(iVar1 - param_4),\n           lVar4 + param_6,(long)param_7,\n           lVar5,(long)iVar2,param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "JNI directly uses Java-provided offsets/lengths without checking that param_4/param_6/param_7 are in-range for the Java arrays."
+            },
+            {
+              "function": "ZSTD_compressBlock_doubleFast",
+              "address": "00113254",
+              "file": "libwechatzstd.so",
+              "snippet": "puVar2 = (ulong *)((long)param_4 + param_5);\n...\nif (puVar12 < puVar23) { ... copy/compare loops using puVar2, puVar7, puVar10, puVar30, puVar31 }",
+              "note": "Core compression loop relies on param_4 pointer and param_5 size from higher layers; incorrect base/size propagates into complex pointer arithmetic."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 00109a40",
+            "ZSTD_compress_usingDict",
+            "ZSTD_compressEnd",
+            "ZSTD_compressBlock_doubleFast @ 00113254"
+          ],
+          "recommendations": [
+            "Add explicit validation in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure param_4 and param_6 are non-negative and less than or equal to their respective array lengths, and that param_6 + param_7 does not exceed the input array length",
+            "Reject or clamp calls where (iVar1 - param_4) is negative or smaller than the minimum required output size; consider using size_t-safe casting and checks before calling ZSTD_compress_usingDict",
+            "Add defensive assertions or bounds checks around Zstd API calls, or migrate to the officially maintained libzstd with its recommended wrappers and error-handling patterns"
+          ],
+          "assumptions": [
+            "The crash is due to invalid pointer/length combinations rather than an internal logic bug in libzstd itself",
+            "Java side allows an attacker or untrusted data to influence param_4, param_6, and param_7, at least indirectly",
+            "ZSTD_compress_usingDict implementation in this build follows typical libzstd behavior (trusting inputs, not clamping sizes)"
+          ],
+          "limitations": [
+            "Exact crashing instruction and CPU exception (SIGSEGV vs other) are not provided",
+            "Java call graph is empty, so we do not know the precise public API surface or input validation above JNI",
+            "We have not decompiled ZSTD_compress_usingDict in this binary; reasoning is based on standard Zstd patterns and the decompiled block compressor"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed usage of Zstd JNI compression with out-of-range offsets/lengths",
+            "prerequisites": [
+              "Attacker can cause app to call the Zstd compression wrapper with chosen offsets/lengths (param_4, param_6, param_7) or with data that influences them",
+              "Target device runs WeChat version embedding this libwechatzstd.so without additional Java-side validation",
+              "App permits compression of attacker-controlled buffers (e.g., messages, attachments, or custom data) via this JNI"
+            ],
+            "exploit_pipeline": [
+              "Craft input or interaction that causes the Java layer to invoke compressUsingDict with an output offset (param_4) greater than the output array length or an input range (param_6, param_7) extending past the end of the input array",
+              "Trigger compression so JNI maps arrays via GetPrimitiveArrayCritical and passes lVar3+param_4, lVar4+param_6, and param_7 into ZSTD_compress_usingDict without bounds checks",
+              "Zstd compression proceeds into ZSTD_compressBlock_doubleFast, using the invalid base/size to perform pointer arithmetic and block processing",
+              "During these loops, the compressor reads from or writes to memory beyond the mapped Java arrays, potentially corrupting heap or triggering a crash",
+              "Observe process crash or memory corruption; refine parameters to explore controlled overwrite/read potential"
+            ],
+            "poc_commands": [
+              "adb push crafted_input.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n com.tencent.mm/.SomeActivity --es input_path /sdcard/Download/payload.bin --ei offset 2147483600 --ei dictOffset 0 --ei length 4096"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact Java entry method and activity name are unknown; PoC command uses placeholders. A real exploit would require identifying the Java API that exposes compressUsingDict and how it maps its arguments to param_4/param_6/param_7."
+          }
+        },
+        "statistics": {
+          "time": "00:00:51",
+          "llm_requests": 5,
+          "llm_tool_calls": 6,
+          "input_tokens": 75751,
+          "output_tokens": 2688
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "ZSTD_compressBlock_lazy2_extDict",
+          "StackTrace": [
+            "ZSTD_compressBlock_lazy2_extDict",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_lazy2_extDict",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top frame is ZSTD_compressBlock_lazy2_extDict in libwechatzstd.so; this is internal zstd block compressor with huge inlined match-finding; crash reason text is just function name, but given fuzzing context and complexity, likely a memory bug, not an intentional abort.",
+            "Per mandatory steps, first app-level native frame below allocators is this same ZSTD_compressBlock_lazy2_extDict; we decompiled it and inspected for memcpy/memmove: there is no explicit memcpy, but there is extensive manual pointer arithmetic and copying loops between param_4/output buffer and param_1 state’s windows. The core safety invariant is that puVar36, puVar1, puVar51, puVar22, puVar30, puVar31 etc never cross bounds; these use values ultimately derived from (a) frame fields like *(uint*)(param_1+0x18/0x1c/0x24/0xbc/c0/c4/0x200) and (b) the input/output buffer pointers/lengths passed from callers.",
+            "Need to determine whether those values can be influenced by attacker. Next up frame is ZSTD_compressEnd (not yet decompiled but in same lib), then ZSTD_compress_usingDict (a PLT-style stub via function pointer PTR_ZSTD_compress_usingDict_001a9c10), then JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict, then fuzz_one_input/main. JNI method is decompiled: it computes Java byte[] lengths (iVar1, iVar2) via (*env->GetArrayLength) for src and dict arrays, obtains raw array pointers via GetPrimitiveArrayCritical-like function at vtable+0x6f0, and passes them into ZSTD_compress_usingDict.",
+            "Key call: ZSTD_compress_usingDict(uVar6, lVar3 + param_4, (long)(iVar1 - param_4), lVar4 + param_6, (long)param_7, lVar5, (long)iVar2, param_9). Here: lVar3 is base of src array, param_4 is Java int offset into src; iVar1 is total src length; so srcSize = iVar1 - param_4. Similarly, lVar4 + param_6 and param_7 define dict pointer+size; lVar5 and iVar2 for destination? Actually ZSTD_compress_usingDict prototype is (ZSTD_CCtx*, void* dst, size_t dstCapacity, const void* src, size_t srcSize, const void* dict, size_t dictSize, int compressionLevel). But here the ordering is (ctx, lVar3+param_4, (iVar1-param_4), lVar4+param_6, param_7, lVar5, iVar2, param_9). So lVar3+param_4 is dst, with capacity (iVar1-param_4); lVar4+param_6 is src, length param_7; lVar5 is dict buffer, size iVar2. That implies user-controllable values param_4, param_6, param_7 (offsets and src size) and arrays lengths (iVar1, iVar2) feed directly into core compressor. There is no bounds checking in JNI: it does not validate that param_4 <= iVar1, that param_6+param_7 <= dict length, or that dstCapacity is sufficiently large for compressed data.",
+            "Because the harness fuzzes Java side, param_4/param_6/param_7 may be arbitrary (incl negative or > length) but in Java signature they are int; JNI code uses them without checks in pointer arithmetic and as length/size_t. For example, dst pointer = lVar3 + param_4; if param_4<0 this underflows before base of JNI array; if param_4>iVar1 it points past end. Similarly src pointer can point outside legitimate buffer; dict pointer is lVar5 (no offset) but dictSize = iVar2 (valid). These malformed parameters are then given to zstd core, which expects valid pointers and lengths; its internal match-finding code (ZSTD_compressBlock_lazy2_extDict) will read/write beyond provided buffers, leading to undefined behaviour and crashes like seen here. This is a classic trust boundary issue between JNI binding and library API: JNI wrapper must enforce preconditions expected by zstd but fails.",
+            "Need to distinguish between harness-only vs realistic app behaviour. In normal WeChat usage, Java side will likely call compressUsingDict with sane offsets and lengths (e.g., 0 or within array bounds), so app UI might not expose these raw ints to untrusted parties. However, the JNI signature suggests this API is part of public SDK (com.tencent.mars.zstd.Zstd); a malicious app using same library could call it with arbitrary parameters, but that’s not a security boundary if library is not exported cross-app. More relevant: attacker-controlled data (compressed input/dict contents) also flows into compressor; but here crash appears from invalid buffer metadata rather than just compressed content. Even with valid metadata, zstd itself should handle arbitrary contents safely; but zstd is mature and this particular internal function is from reference implementation. The crash could still stem from zstd bug triggered by pathological content+dict, but we lack concrete evidence (no memcpy overflows, no obvious unchecked size vs end pointer aside from trusting passed capacity and srcSize).",
+            "Because the JNI wrapper demonstrably fails to validate offsets/lengths before converting to raw pointers and size_t, and ZSTD API docs require that those be valid, the wrapper introduces a potential out-of-bounds access vulnerability. The fuzz harness exercising arbitrary param_4/param_6/param_7 exposed it. Whether this is realistic depends on who controls those ints in production. The class name com.tencent.mars.zstd.Zstd suggests an API possibly callable from app Java code; within same process, a compromised or malicious plugin could cause memory corruption, but that’s not a privilege escalation, more a stability issue. Yet by our definition, memory corruption reachable from untrusted input (e.g. if offsets derive from lengths of attacker-supplied arrays, or remote content controlling parameters) is a vulnerability.",
+            "Assessing CWE: core issue is missing bounds check on array index/offset before using it to form native pointer, leading to out-of-bounds read/write inside zstd; that maps to CWE-119/CWE-787. Severity: high in terms of memory corruption within app; could be used for RCE if attacker controls enough structure, but here exploitation path is non-trivial and requires ability to call JNI with bad integers. Confidence high because we see explicit lack of validation and unsafe trust in JNI, plus internal function clearly assumes inputs in range; the crash termination referencing ZSTD_compressBlock_lazy2_extDict aligns with such corruption. Thus I classify as vulnerable, likely high severity but not critical due to same-process constraints.",
+            "Call sequence on native side: fuzz_one_input -> Java_com_tencent_mars_zstd_Zstd_compressUsingDict -> ZSTD_compress_usingDict (function pointer) -> ZSTD_compressEnd/ZSTD_compressBlock_lazy2_extDict. We do not have exact ZSTD_compress_usingDict implementation, only a pointer stub, but ZSTD_compressBlock_lazy2_extDict clearly uses param_4/output pointer (param_2[3], param_4 base, etc.) and src/dict windows based on state fields that ultimately derive from the top-level dstCapacity/srcSize/dictSize. Therefore the taint path from JNI parameters into memory accesses is present, with no intermediate sanitisation inside C library beyond its own expectation that sizes are correct. That is enough to attribute vulnerability to JNI wrapper and library usage rather than pure harness fault.",
+            "Limitations: we didn’t see the exact crash PC or registers, so cannot pin exact out-of-bounds location; ZSTD_compressBlock_lazy2_extDict is huge and hand-unrolled, making specific index check hard to audit; we also don’t know Java-level API exposure or whether WeChat ever calls compressUsingDict with attacker-chosen offsets. But the structural bug (no bounds checking on offsets vs array length in JNI) is objectively present irrespective of crash details."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "JNI wrapper Java_com_tencent_mars_zstd_Zstd_compressUsingDict computes native pointers by adding unvalidated Java int offsets (param_4, param_6) to GetPrimitiveArrayCritical bases and passes resulting pointers and lengths directly to ZSTD_compress_usingDict.",
+            "There are no checks that param_4 <= inputArrayLength or param_6 + param_7 <= dictArrayLength, so negative or oversized offsets allowed by Java side produce pointers outside the actual arrays, violating ZSTD’s API preconditions.",
+            "The deep internal compressor ZSTD_compressBlock_lazy2_extDict performs extensive pointer arithmetic and copying based solely on these buffer pointers and sizes; with invalid metadata it can read/write out of bounds, explaining crashes in this frame.",
+            "This constitutes a memory corruption risk (out-of-bounds read/write) originating from attacker-controllable parameters at the JNI boundary, with no intermediate sanitisation."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "0x00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict\n              (uVar6,lVar3 + param_4,(long)(iVar1 - param_4),\n               lVar4 + param_6,(long)param_7,\n               lVar5,(long)iVar2,param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "No validation that param_4/param_6 are within [0, arrayLength]; length iVar1 - param_4 can underflow or be inconsistent with pointer."
+            },
+            {
+              "function": "ZSTD_compressBlock_lazy2_extDict",
+              "address": "0x00137a64",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "... complex pointer arithmetic over param_4 (output) and internal windows, assuming valid buffer pointers and sizes ...",
+              "note": "Function is large inlined match-finder; any invalid buffer metadata from caller can lead to OOB reads/writes here."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "address": "0x00106cc0",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void)\n{\n  (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)();\n}",
+              "note": "Wrapper to real implementation; arguments from JNI are forwarded unmodified via calling convention."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 00109a40",
+            "ZSTD_compress_usingDict @ 00106cc0",
+            "ZSTD_compressEnd",
+            "ZSTD_compressBlock_lazy2_extDict @ 00137a64"
+          ],
+          "recommendations": [
+            "In Java_com_tencent_mars_zstd_Zstd_compressUsingDict, validate that 0 <= param_4 <= iVar1 and 0 <= param_6 and 0 <= param_7 and param_6 + param_7 <= dictLength before computing native pointers; reject or clamp invalid values.",
+            "Consider changing the JNI API to take explicit long sizes and perform safe checked casts to size_t, returning an error instead of calling ZSTD when arguments are inconsistent.",
+            "Add defensive assertions or bounds checks in native wrapper code around ZSTD_compress_usingDict to ensure dstCapacity and srcSize are non-negative, within array limits, and sized according to zstd’s documented constraints."
+          ],
+          "assumptions": [
+            "The JNI method is callable with arbitrary param_4/param_6/param_7 from some Java context during fuzzing, and similar misuse could occur in real app flows if not guarded by higher-level checks.",
+            "ZSTD_compress_usingDict expects that dst/src/dict pointers and sizes obey normal C buffer rules and will not itself revalidate bounds against any higher-level Java arrays.",
+            "Crash observed in ZSTD_compressBlock_lazy2_extDict is caused by invalid buffer metadata rather than unrelated internal zstd logic bug."
+          ],
+          "limitations": [
+            "Exact crashing instruction and register state at time of fault are not available, so specific OOB offset cannot be pinpointed.",
+            "The visibility of com.tencent.mars.zstd.Zstd.compressUsingDict to untrusted components in production WeChat is unknown; exposure may be limited to internal callers.",
+            "Real-world exploitability for code execution would require careful heap grooming and knowledge of WeChat’s process layout, which has not been analysed here."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Java-side call into com.tencent.mars.zstd.Zstd.compressUsingDict with malicious offsets and array sizes",
+            "prerequisites": [
+              "Ability to execute arbitrary Java code in the WeChat process or any app bundling this JNI library.",
+              "Knowledge of the JNI method signature and access to com.tencent.mars.zstd.Zstd.compressUsingDict or equivalent wrapper.",
+              "Control over input/dictionary byte[] contents and offset/length integers."
+            ],
+            "exploit_pipeline": [
+              "Craft large Java byte[] buffers for destination, source, and dictionary using attacker-controlled data.",
+              "Invoke Zstd.compressUsingDict (or JNI equivalent) with param_4 or param_6 set negative or larger than the corresponding array length, and param_7 chosen so that srcSize or dstCapacity becomes inconsistent (e.g., iVar1 - param_4 underflows or src pointer lies outside array).",
+              "The JNI wrapper computes out-of-bounds native pointers and calls ZSTD_compress_usingDict; zstd’s internal match-finding (ZSTD_compressBlock_lazy2_extDict) then reads/writes outside the allocated Java arrays’ pinned region.",
+              "Iterate and refine parameters to achieve controlled heap corruption (e.g., overwriting neighboring native objects), potentially leading to application crash or, with further shaping, code execution.",
+              "Wrap these steps in an Android app that links against the same native library or reuses WeChat’s process if plugin architecture allows."
+            ],
+            "poc_commands": [
+              "adb shell am start -n <victim.package>/<MainActivity> --es mode 'zstd-test' --es payload '/sdcard/Download/payload.bin' --es dict '/sdcard/Download/dict.bin' --ei offset -16 --ei dictOffset 0 --ei srcLen 1024",
+              "adb push crafted_app.apk /sdcard/Download/ && adb install -r /sdcard/Download/crafted_app.apk"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin",
+              "/sdcard/Download/dict.bin"
+            ],
+            "notes": "Exact Java class/method used in production may differ; PoC assumes a reachable wrapper around Java_com_tencent_mars_zstd_Zstd_compressUsingDict exposing offsets and lengths. Replace <victim.package>/<MainActivity> with actual identifiers once known."
+          }
+        },
+        "statistics": {
+          "time": "00:00:51",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 84796,
+          "output_tokens": 3578
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is ZSTD_compressEnd / ZSTD_compress_usingDict in libwechatzstd.so, with process termination in __memcpy, which strongly suggests an internal memcpy in the zstd implementation overran a buffer or used invalid pointers.",
+            "Decompilation of ZSTD_compressEnd and ZSTD_compress_usingDict in this binary shows they are thin trampolines through function pointers PTR_ZSTD_compressEnd_001a9be0 and PTR_ZSTD_compress_usingDict_001a9c10, so the actual logic (including memcpy) resides in an embedded zstd library code not directly visible here. However, the JNI entry is decompiled and clearly performs pointer arithmetic and passes sizes into ZSTD_compress_usingDict.",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict obtains three direct byte-array pointers via a JNI-like function pointer (**(code **)(*param_1 + 0x6f0)) and their lengths via another function pointer (**(code **)(*param_1 + 0x558)). It then computes output pointer 'lVar3 + param_4' and passes size '(long)(iVar1 - param_4)' to ZSTD_compress_usingDict, along with dictionary pointer 'lVar4 + param_6' and size '(long)param_7'. There is no explicit bounds check ensuring that 'param_4' is within [0,iVar1] or that 'param_6 + param_7' stays within the dictionary buffer. Likewise, nothing checks that param_7 is consistent with the JNI-provided dictionary array length iVar2; they are passed independently.",
+            "Because param_4, param_6, and param_7 are direct JNI parameters controlled by the Java caller, and no validation is done in this native wrapper, a Java caller (or the fuzz harness) can supply values that cause ZSTD_compress_usingDict to receive out-of-bounds pointers or bogus lengths. Inside zstd, these will be used for reads/writes and memcpy-like operations and can lead to heap/stack corruption or invalid-address memcpy, consistent with the observed crash in __memcpy.",
+            "The fuzzing harness uses fuzz_one_input → Java_com_tencent_mars_zstd_Zstd_compressUsingDict, so this path is actually reachable from arbitrary Java-side inputs. In a real app, if the Java API exposes these parameters (buffer, offsets, length, dict, dictOffset, dictSize, etc.) without stricter Java-layer validation, a malicious caller (e.g., via untrusted file data or IPC) could trigger the same condition. Even if Java normally validates, the native code itself is unsafe because it trusts those parameters completely.",
+            "Given that zstd's C API expects well-formed pointers and sizes, and the native wrapper does not enforce them, the crash almost certainly arises from an out-of-bounds access or invalid pointer inside zstd, making this a real memory safety vulnerability rooted in the JNI wrapper's lack of argument validation rather than a mere harness artifact.",
+            "Impact-wise, this is at least high severity: attacker-controlled offsets and lengths applied to JNI Get*ArrayElements-style buffers passed to a compression library can enable out-of-bounds reads and possibly writes, with potential for information disclosure or code execution depending on exact zstd behavior and allocator layout. The available evidence (crash in __memcpy during compression) aligns strongly with CWE-787 (out-of-bounds write) or CWE-125 (out-of-bounds read); since memcpy is often writing, CWE-787 is the more conservative classification."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "JNI wrapper Java_com_tencent_mars_zstd_Zstd_compressUsingDict performs unchecked pointer arithmetic (lVar3 + param_4, lVar4 + param_6) based on attacker-controlled Java parameters.",
+            "Sizes passed to ZSTD_compress_usingDict use unvalidated expressions like (iVar1 - param_4) and param_7, with no comparison against actual buffer lengths, enabling out-of-bounds regions.",
+            "Crash occurs in __memcpy during ZSTD_compressEnd/ZSTD_compress_usingDict, consistent with memory corruption or invalid memory access due to these unsafe pointers and sizes.",
+            "The path is reachable from fuzz_one_input via the JNI method, and no intermediate validation is observed in native code."
+          ],
+          "cwe_ids": [
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict\n              (uVar6,lVar3 + param_4,(long)(iVar1 - param_4),\n               lVar4 + param_6,(long)param_7,\n               lVar5,(long)iVar2,param_9);",
+              "note": "lVar3 and lVar4 are base pointers to Java arrays; param_4, param_6, and param_7 come directly from Java and are not bounds-checked."
+            },
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "address": "00109a40",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n...\nif (lVar3 != 0) {\n  lVar4 = (**(code **)(*param_1 + 0x6f0))(param_1,param_5,0);\n  ...\n}",
+              "note": "iVar1 is likely output buffer length derived from Java array; (iVar1 - param_4) is used without verifying that param_4 <= iVar1."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "address": "00106cc0",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void)\n{\n  (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)();\n}",
+              "note": "Thin trampoline to internal zstd implementation where memcpy is executed; combined with invalid pointers/lengths from JNI, this leads to the memcpy crash."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict @ 00109a40",
+            "ZSTD_compress_usingDict @ 00106cc0",
+            "ZSTD_compressEnd @ 00106c60",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add strict bounds checks in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure offsets and lengths (param_4, param_6, param_7) are within the actual Java array lengths before computing lVar3 + param_4 and lVar4 + param_6.",
+            "Propagate and enforce size invariants matching the zstd API expectations (e.g., dstSize, srcSize, dictSize) and return an error to Java rather than calling ZSTD_compress_usingDict when arguments are invalid.",
+            "Consider wrapping the underlying zstd API in safer helpers that take explicit buffer objects and validated sizes to avoid repeating this pattern in other JNI bindings."
+          ],
+          "assumptions": [
+            "param_3, param_5, and param_8 are Java byte arrays, and (**(code **)(*param_1 + 0x6f0)) behaves like GetPrimitiveArrayCritical/GetByteArrayElements.",
+            "iVar1 and iVar2 returned via (**(code **)(*param_1 + 0x558)) correspond to the lengths of the Java arrays passed in, typical of JNI array helpers.",
+            "fuzz_one_input models realistic Java caller capabilities to supply arbitrary offsets and lengths, similar to untrusted input in production if not validated in Java."
+          ],
+          "limitations": [
+            "The actual zstd implementation behind PTR_ZSTD_compress_usingDict_001a9c10 is not decompiled here, so exact memcpy call site and whether it can write or only read out-of-bounds is inferred.",
+            "Java-level API definitions and any Java-side validation of arguments are not visible, so the ease of external exploitation depends on how this JNI is exposed in the app."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious Java caller or untrusted data controlling parameters to Zstd.compressUsingDict JNI binding.",
+            "prerequisites": [
+              "Ability to invoke the Zstd.compressUsingDict JNI method (directly or via app API).",
+              "Control over buffer contents, offsets, and dictionary parameters passed into the JNI method."
+            ],
+            "exploit_pipeline": [
+              "Craft Java or IPC-level input that results in a call to Zstd.compressUsingDict with a valid output byte array but an offset param_4 close to or beyond its length, and/or dictionary parameters param_6/param_7 that exceed the dict array size.",
+              "Ensure that the underlying zstd compression context is created and that ZSTD_compress_usingDict is called with these invalid pointers/lengths, as done in the JNI wrapper.",
+              "Leverage the resulting out-of-bounds memory access in __memcpy during compression to cause a controlled crash (DoS) or, with careful heap layout and repeated calls, attempt to corrupt adjacent heap structures for further exploitation.",
+              "Iterate and refine parameter choices (offsets, lengths, buffer sizes) based on crashes and memory layout observations to turn the OOB access into a more deterministic primitive (e.g., relative overwrite or information leak)."
+            ],
+            "poc_commands": [
+              "adb push /path/to/crafted-client.apk /data/local/tmp/crafted-client.apk",
+              "adb shell pm install -r /data/local/tmp/crafted-client.apk",
+              "adb shell am start -n <crafted.client.pkg>/<crafted.client.MainActivity> --es mode \"trigger_zstd_compress_dict_bug\"",
+              "# Within crafted-client, call into the app’s Zstd.compressUsingDict wrapper with oversized offset/length arguments, e.g., dstOffset > dst.length or dictOffset+dictSize > dict.length."
+            ],
+            "poc_files": [
+              "/path/to/crafted-client.apk"
+            ],
+            "notes": "Concrete PoC would be implemented as a small Android app or test harness that calls the JNI method with mismatched offsets and lengths, reproducing the crash in __memcpy observed under fuzzing."
+          }
+        },
+        "statistics": {
+          "time": "00:00:40",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 31111,
+          "output_tokens": 2537
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "ZSTD_compressBlock_btultra_extDict",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_btultra_extDict",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level frame: ZSTD_compressBlock_btultra_extDict is the deep internal zstd block compressor; above it are ZSTD_compressEnd and ZSTD_compress_usingDict (thunks into bundled zstd). Below it is the JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict which is clearly application native code. Crash termination is unknown (\"??\"), but stack shows this function at or near the top, so I treat it as the relevant frame.",
+            "Check for memcpy/memmove etc in decomplied functions: Java_com_tencent_mars_zstd_Zstd_compressUsingDict just calls ZSTD_createCCtx, ZSTD_compress_usingDict, ZSTD_freeCCtx and releases JNI arrays; no memcpy there. ZSTD_compress_usingDict is a thin PLT-style thunk calling an imported implementation; same for ZSTD_compressEnd. ZSTD_compressBlock_btultra_extDict is a huge inlined implementation of an advanced zstd compression strategy, with a lot of pointer arithmetic and memcmp-like logic, but notably no direct calls to memcpy/memmove—it manually compares words/bytes by pointer walking.",
+            "Because ZSTD_compress_usingDict is a thunk through PTR_ZSTD_compress_usingDict_001a9c10, the actual compressor implementation comes from another object file or linked zstd library inside the same .so. However, the block compressor implementation is present and inlined, so we can reason about how src/dst/length are bounded.",
+            "Understand JNI entry’s parameter usage: Java_com_tencent_mars_zstd_Zstd_compressUsingDict gets JNIEnv, jbyteArray/jbyteBuffer pointers and sizes (param_4 input size, param_6 dictOffset?, param_7 dictSize, etc). It queries array lengths via (*env+0x558), obtains raw pointers via (*env+0x6f0), and carefully checks for null: if any GetPrimitiveArrayCritical/ GetDirectBufferAddress returns 0, it returns a specific error code (0xffffffffffffffc0). It computes the destination pointer and size as `dst = lVar3 + param_4`, `dstSize = iVar1 - param_4`. Here iVar1 is the Java array length for the output buffer, so `iVar1 - param_4` is the number of bytes remaining after a header or prefix. This is a potential underflow if param_4 > iVar1, but that function is only passed to ZSTD_compress_usingDict as a size parameter; the implementation of ZSTD_compress_usingDict is assumed to handle `dstCapacity` as a size_t and will detect/return error if capacity is too small or negative when cast. However, negative `iVar1 - param_4` becomes a huge unsigned length; if the callee treats it as size_t without further validation, this could be dangerous. Need to judge whether this is realistic or already validated elsewhere.",
+            "Check how fuzz harness can influence values: fuzz_one_input is the fuzz entry; zstd JNI method takes arbitrary values for param_4/param_6/param_7/param_9 from Java side. In production, the Java wrapper is expected to ensure param_4 <= output array length and similarly for other offsets. In the harness, these checks may not exist, so fuzz can supply arbitrary ints and cause underflow in `iVar1 - param_4`. So the taint is real: attacker/fuzzer-controlled ints used to compute `dst` and `dstCapacity` passed to native zstd compressor.",
+            "But the observed top-of-stack function is ZSTD_compressBlock_btultra_extDict, which uses internal state `param_1` (a compression context) plus block pointers `param_2` (sequence store / output ranges), `param_4` (source window pointer), `param_5` (blockSize), `param_6` (dictionary size or window size). These are all set inside ZSTD_compress_usingDict in response to the provided `dst`, `dstCapacity`, `src`, `srcSize`, dict pointer/size, etc. Its massive body is full of pointer bounds checks such as computing limit pointers `puVar2 = param_4 + param_5`, `puVar33 = puVar2 - 1`, `puVar62` initialized to at least param_4+1, and loops that consistently compare working pointers to `puVar2`,`puVar33`,`puVar68` (puVar2-7), etc. There are explicit early-exit conditions (break to LAB_00170814) when reaching the end of input. There is stack canary check at the bottom with __stack_chk_fail in abnormal path; if fuzz triggers a mismatch, it likely indicates overrunning local arrays, but in this function all arrays holding sequence data are allocated from the compression context and indexed with bounds derived from sizes/limits and internal counters; no obvious linear overflow like `memcpy` without bound checks. The code is standard zstd 1.3+ btultra implementation, which is widely used and fuzzed upstream.",
+            "Given that the process termination is unknown and we only know that this function is on the stack, it’s plausible the crash is from some sanitizer or abort inside upstream zstd (e.g., assertion failed or intentional bounds check). However, with no evidence of an ASan report, SIGSEGV address, or concrete OOB load/store, we can’t assert memory-safety corruption. The enormous complexity of the function itself does mean bugs are possible, but we must not mark as vulnerable based only on complexity.",
+            "Function-pointer implementation check: ZSTD_compress_usingDict is an indirect call to PTR_ZSTD_compress_usingDict_001a9c10; that pointer is not resolved here, but as part of bundled zstd, it will call into a standard zstd implementation that expects well-formed arguments. Absence of symbol body doesn’t in itself imply vulnerability, only that we cannot inspect its internal validation. But upstream zstd APIs document that they validate dstCapacity and return specific error codes for size_t overflows or too small buffers.",
+            "Backward data-flow for dst,len: len argument into internal block compressor corresponds to block size (param_5) derived from src size, not from dstCapacity. Overly small dstCapacity should cause higher-level compressor to emit an error or stop before entering this function, not to overflow here; block functions typically operate on src/input windows only and fill symbol sequences into pre-sized structures, then a separate entropy encoding step writes to dst using bounds-checked bitstreams. In this decompiled body, writes go via param_2 sequence store and other context-managed buffers; again, no direct writes to user-supplied dst pointer.",
+            "Given fuzz harness context: this is JNI fuzzing with arbitrary ints into compressUsingDict. Likely failure can be: passing mismatched pointers/sizes, incorrect dictionary ref (param_8 pointer) leading to null or invalid dictionary; zstd will likely detect and return error or possibly assert. But the harness uses direct JNI raw pointer APIs that rely on JVM guarantees. If fuzz passes bogus jobjects (not real arrays), GetPrimitiveArrayCritical may fail or return weird addresses, but this is harness-only; real Java env won’t pass non-array objects here. However in the decompiled JNI, param_3,param_5,param_8 are expected to be JNI references, not raw pointers. Fuzzing them as 64-bit integers may violate JNI preconditions and cause crash in the JVM or JNI layer, not in app code.",
+            "Given: LibraryMap shows only libwechatzstd.so; no evidence the crash is a different harness library. We see no ASan annotations or calls around this function; the stack guard is local but success/fail of __stack_chk_fail is not shown. Without process termination data or faulting address, and without a clearly unbounded memcpy/array index from tainted input, the safest classification is that this crash is likely environmental (JNI misuse via fuzz harness or unrealistic parameters), not a proven exploitable bug in the compressor. It’s also quite possible that upstream zstd’s complex code is correct but user-supplied sizes were nonsense.",
+            "Thus: I conclude we do NOT have concrete evidence of a genuine vulnerability. There’s a theoretical concern around `iVar1 - param_4` underflow in Java_com_tencent_mars_zstd_Zstd_compressUsingDict, but we lack proof that ZSTD_compress_usingDict treats that as size_t without checking, and upstream zstd is known to validate capacities. Given high prior of zstd correctness and low information about actual fault, mark as non-vulnerable with low-to-medium confidence in that judgment, and note potential but unproven issue."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Crash site (ZSTD_compressBlock_btultra_extDict) is a very complex internal zstd function without clear unbounded writes or memcpy from untrusted data; it uses extensive pointer limit checks and a stack canary.",
+            "JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict does arithmetic on attacker-controlled offsets but only passes them as sizes/pointers into the well-tested zstd API; any underflow in iVar1 - param_4 is not clearly shown to cause memory corruption in this binary.",
+            "Fuzzer harness likely calls the JNI with unrealistic jobject/array arguments and arbitrary integers, outside of normal JNI usage guarantees, so many crash modes would be harness/environmental rather than app-level vulnerabilities.",
+            "No concrete evidence (ASan report, bad address, clearly out-of-bounds memcpy) tying tainted input to an actual memory safety violation; complexity alone is not enough to assert a vulnerability."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(uVar6, lVar3 + param_4, (long)(iVar1 - param_4),\n                                lVar4 + param_6, (long)param_7, lVar5, (long)iVar2, param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "JNI calculates dst pointer and size from Java array length and offset, then calls into zstd. Potential underflow in (iVar1 - param_4) is not proven exploitable here."
+            },
+            {
+              "function": "ZSTD_compressBlock_btultra_extDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "... very long function using puVar2 = (ulong *)((long)param_4 + param_5); bounds checks like if (puVar33 <= puVar62) break; and stack canary check via __stack_chk_fail() ...",
+              "note": "Internal zstd block compressor with many pointer comparisons and no obvious tainted-length memcpy/memmove operations."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void) { (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)(); }",
+              "note": "Thin thunk into upstream zstd implementation; we cannot see internal checks here, but upstream library is widely tested."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "ZSTD_compress_usingDict -> PTR_ZSTD_compress_usingDict_001a9c10",
+            "ZSTD_compressEnd",
+            "ZSTD_compressBlock_btultra_extDict"
+          ],
+          "recommendations": [
+            "Treat this crash as likely harness/JNI misuse; adjust fuzz harness to respect JNI calling conventions (real jbyteArray objects, valid offsets within buffer lengths).",
+            "Add explicit range checks in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure offsets do not exceed array lengths before computing (iVar1 - param_4).",
+            "If crashes persist under realistic inputs, re-run with ASan/instrumentation and capture exact faulting address and condition to reassess potential zstd bugs."
+          ],
+          "assumptions": [
+            "Upstream zstd implementation behind PTR_ZSTD_compress_usingDict_001a9c10 performs standard capacity validation and does not blindly trust a negative length cast to size_t.",
+            "The fuzz harness may be invoking the JNI entry with values and jobjects that violate normal JVM/JNI contracts, leading to crashes that wouldn’t occur in production.",
+            "The observed stack trace corresponds to a single thread executing compression, without concurrent mutations of the compression context."
+          ],
+          "limitations": [
+            "Process termination type and faulting address are unknown, so we cannot link the crash to a specific invalid read/write.",
+            "The body of the actual ZSTD_compress_usingDict implementation (behind the function pointer) is not visible here; we infer behaviour from upstream zstd but cannot prove it for this build.",
+            "No ASan or detailed crash diagnostics were provided, limiting certainty about whether any subtle OOB access occurs deep in ZSTD_compressBlock_btultra_extDict."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:19",
+          "llm_requests": 4,
+          "llm_tool_calls": 6,
+          "input_tokens": 134981,
+          "output_tokens": 2972
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "ZSTD_compressBlock_btultra2",
+            "??",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressBlock_btultra2",
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level frame: JNI frame Java_com_tencent_mars_zstd_Zstd_compressUsingDict, allocator/sanitizer not shown, so this is root for taint. Next frame down is ZSTD_compress_usingDict then ZSTD_compressBlock_btultra2 where heavy compression happens.",
+            "Decompiled JNI: it obtains three Java byte arrays via JNIEnv function pointers, with GetArrayLength (offset 0x558) and GetPrimitiveArrayCritical (0x6f0)-style calls, then passes pointers/lengths to ZSTD_compress_usingDict. Critically, it does pointer arithmetic: dst = lVar3 + param_4, src = lVar4 + param_6, and sizes (iVar1 - param_4), param_7, iVar2. param_4/6/7 are Java-side int parameters coming from attacker/fuzzer with no native-side validation, so dst/src pointers can be misaligned or remaining length negative.",
+            "JVM GetPrimitiveArrayCritical / GetArrayLength guarantee that lVar3..5 point to actual Java array backing stores and iVar1/iVar2 are their lengths. However, JNI wrapper does not check that param_4 <= iVar1, param_6+param_7 <= dict array length, or that dictionary size param_7 matches actual dict buffer. So out-of-bounds regions or inconsistent sizes can be passed into ZSTD_compress_usingDict.",
+            "ZSTD_compress_usingDict compresses from src buffer into dst using dictionary pointer+size. Inside it, ZSTD_compressBlock_btultra2 is a complex match finder reading input and dictionary buffers based on length parameters. Decompiled btultra2 shows extensive pointer arithmetic and comparisons bounded by param_4 (src) and param_5 (src size). The function clearly assumes these describe a valid, contiguous input + dictionary history window; it does not itself re-validate dictionary pointer/length or Java-origin offsets. So if JNI wrapper passes inconsistent or out-of-bounds sizes (relative to actual Java arrays), btultra2 can read/write beyond Java array, causing memory corruption or crash.",
+            "Given the fuzz crash stack ends inside ZSTD_compressBlock_btultra2 with unknown signal, and there is no sanitizer frame, the likely cause is memory corruption from invalid buffer/lengths. The JNI wrapper is trivially controllable via Java and lacks bounds checks, so this is a genuine vulnerability. It is not harness-only: Mars Zstd JNI is used in WeChat; apps could pass untrusted data buffer/offsets from network or file. Even if higher layers are supposed to be well-formed, nothing in native enforces it, so malformed usage leads to native memory safety bug.",
+            "Severity: potential out-of-bounds read/write on Java heap via native code, possibly arbitrary R/W relative to array base depending on values. That is at least high severity memory corruption. Exploitability: practical in principle if attacker controls the Java arguments (e.g., via crafted message processed by WeChat using this API). But exact exploit steps depend on app’s exposure and argument wiring, which we don’t see, so keep exploitability as theoretical/practical hybrid, but overall vulnerability is clear.",
+            "CWE: Out-of-bounds Read/Write (CWE-787 / CWE-125) due to missing validation of attacker-controlled offsets and lengths at JNI boundary."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "JNI wrapper Java_com_tencent_mars_zstd_Zstd_compressUsingDict forwards attacker-controlled offsets/lengths directly into ZSTD_compress_usingDict without bounds checks",
+            "Offsets param_4/param_6 and sizes (iVar1 - param_4), param_7 can desynchronize pointers from actual Java array bounds, violating Zstd’s assumptions",
+            "Deep compression routine ZSTD_compressBlock_btultra2 heavily trusts these buffer parameters and performs complex pointer arithmetic; incorrect sizes can cause out-of-bounds memory access leading to crash or corruption",
+            "Crash occurs inside ZSTD_compressBlock_btultra2 when fuzzing this JNI, consistent with memory-safety violation rather than clean error handling"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(\n  uVar6,\n  lVar3 + param_4, (long)(iVar1 - param_4),\n  lVar4 + param_6, (long)param_7,\n  lVar5, (long)iVar2, param_9);\n// no checks that param_4/param_6/param_7 fit within iVar1/iVar2 Java array lengths",
+              "note": "JNI passes user-controlled offsets/lengths straight into compression without validation"
+            },
+            {
+              "function": "ZSTD_compressBlock_btultra2",
+              "address": "0x00147964",
+              "file": "libwechatzstd.so",
+              "snippet": "long ZSTD_compressBlock_btultra2(long ctx,long *seqStore,uint *rep,ulong *ip,ulong srcSize)\n{\n  ... // very large function with manual pointer arithmetic and match-finding\n  // assumes ip..ip+srcSize, history, and dict ranges are valid; no Java-level bounds checks\n}\n",
+              "note": "Complex pointer math assumes caller-provided buffers/sizes are consistent; misuse from JNI can cause OOB"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_tencent_mars_zstd_Zstd_compressUsingDict -> ZSTD_compress_usingDict -> ZSTD_compressEnd -> ZSTD_compressBlock_btultra2"
+          ],
+          "recommendations": [
+            "Add strict bounds checks in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure offsets (param_4,param_6) and sizes (param_7) keep all pointers within their respective Java array lengths",
+            "Return an error code when parameters are invalid instead of calling ZSTD_compress_usingDict",
+            "Consider adding defensive assertions or length checks inside ZSTD_compress_usingDict when used from untrusted JNI contexts"
+          ],
+          "assumptions": [
+            "Java-side code or fuzz harness can supply arbitrary ints for offsets and dictionary size parameters",
+            "ZSTD_compress_usingDict and ZSTD_compressBlock_btultra2 do not re-validate buffer bounds relative to Java arrays",
+            "The crash observed is due to memory access violations from invalid buffer parameters, consistent with the complex pointer logic in btultra2"
+          ],
+          "limitations": [
+            "Exact crash instruction and signal are not provided, so exact corruption pattern is inferred from code structure",
+            "We do not see higher-level Java call graph, so exposure to untrusted inputs in production depends on WeChat’s usage of this JNI method"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed buffer offsets/lengths passed via Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "prerequisites": [
+              "Attacker can influence parameters to Zstd.compressUsingDict (data buffer, dict buffer, offsets, sizes) in a WeChat or similar app",
+              "App uses libwechatzstd JNI without additional Java-side validation on offsets/lengths",
+              "Target device runs the vulnerable libwechatzstd.so version"
+            ],
+            "exploit_pipeline": [
+              "Craft input data that, when parsed by the app, leads to a Java call into Zstd.compressUsingDict with oversized or negative-equivalent offsets/lengths (e.g., param_4 > dataArray.length, param_6+param_7 > dictArray.length)",
+              "The JNI bridge computes lVar3 + param_4 / lVar4 + param_6 and passes inconsistent buffer pointers and sizes to ZSTD_compress_usingDict",
+              "ZSTD_compressBlock_btultra2 uses these invalid parameters in its match-finding loops, performing out-of-bounds reads/writes on the Java heap",
+              "Leverage the resulting memory corruption to either crash the process (DoS) or, with careful tuning and knowledge of heap layout, achieve information disclosure or potential code execution"
+            ],
+            "poc_commands": [
+              "adb push crafted_input.bin /sdcard/Download/zstd_payload.bin",
+              "adb shell am start -n <wechat.package/.SomeActivity> --es fuzz_input /sdcard/Download/zstd_payload.bin",
+              "adb logcat | grep -i zstd"
+            ],
+            "poc_files": [
+              "/sdcard/Download/zstd_payload.bin"
+            ],
+            "notes": "Exact Java entrypoint and argument mapping are unknown; PoC assumes an exported or reachable component that accepts an input file and eventually routes to Zstd_compressUsingDict with controllable parameters."
+          }
+        },
+        "statistics": {
+          "time": "00:00:43",
+          "llm_requests": 4,
+          "llm_tool_calls": 3,
+          "input_tokens": 80352,
+          "output_tokens": 1926
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "??",
+            "ZSTD_compressEnd",
+            "ZSTD_compress_usingDict",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so": [
+              "ZSTD_compressEnd",
+              "ZSTD_compress_usingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "Java_com_tencent_mars_zstd_Zstd_compressUsingDict"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first native frame below memset/memcpy: the stack shows __memcpy -> ?? -> ZSTD_compressEnd -> ZSTD_compress_usingDict -> Java_com_tencent_mars_zstd_Zstd_compressUsingDict. The first app frame below libc is ZSTD_compressEnd / ZSTD_compress_usingDict, both in libwechatzstd.so.",
+            "Decompiled ZSTD_compressEnd and ZSTD_compress_usingDict: both are thin wrappers that just indirect-call through function pointers PTR_ZSTD_compressEnd_001a9be0 and PTR_ZSTD_compress_usingDict_001a9c10. Therefore the interesting logic is in the real ZSTD implementation, not visible here (likely another object or same binary region but not symbolised). However we must still analyze the JNI entry Java_com_tencent_mars_zstd_Zstd_compressUsingDict as required.",
+            "Decompiled Java_com_tencent_mars_zstd_Zstd_compressUsingDict: it obtains two Java arrays/buffers via function pointers at *param_1+0x558 (probably GetArrayLength) and *param_1+0x6f0 (probably GetByteArrayElements / GetPrimitiveArrayCritical / GetDirectBufferAddress). It does three such address acquisitions: lVar3 for param_3 (dst), lVar4 for param_5 (src), lVar5 for param_8 (dict). It checks each returned pointer for NULL and bails with error -0x40 if any is NULL, which is good.",
+            "Then: iVar1 = length for param_3 (dst length). param_4 is an int offset into dst. So dst pointer passed to ZSTD_compress_usingDict is lVar3 + param_4 and the available size is (iVar1 - param_4). There is no explicit check that param_4 <= iVar1, so length (iVar1 - param_4) can become negative if offset > length, which when cast to (long) will become a huge positive size due to sign extension. This is a classic signedness bug that directly affects a size parameter to a compression routine that internally calls memcpy, as shown by crash in __memcpy.",
+            "Similarly src buffer pointer: lVar4 + param_6, with length (long)param_7. No explicit checks that param_6 + param_7 <= src buffer length. Same for dict buffer: lVar5 with (long)iVar2 as dict size, where iVar2 is length of param_8; here no offset so only length is used, which is fine, but they never validate that param_7 (source size) or param_6 offset are bounded by src buffer length. However the immediate crash ties to memcpy inside zstd core at compressEnd, which likely uses the output buffer size (iVar1 - param_4) to limit writes. If that value is wrong due to integer underflow, zstd will believe it can write much more than the actual Java buffer region, causing an out-of-bounds write and memcpy crash.",
+            "Taint/backwards trace: param_4, param_6, param_7, param_9 are direct JNI parameters (likely coming from Java-level arguments in the public API). Since this crash comes from a fuzz harness that can control Java inputs, these ints are attacker-controlled in the fuzz context. In a real app, they would come from upper-layer code; if any API is exposed to untrusted data (e.g., network/file), they are derived from attacker-controllable sizes. There is no validation in this JNI wrapper of offsets/sizes beyond NULL pointer checks, so the attacker can pass arbitrarily large or inconsistent offsets that trigger OOB in ZSTD_compress_usingDict.",
+            "We don’t see the exact implementation of ZSTD_compress_usingDict from the pointer, but Zstd upstream APIs assume that dstCapacity (here iVar1 - param_4) correctly describes how many bytes the destination buffer can take. Violating that leads to undefined behavior and possible heap/stack corruption. The memcpy crash indicates a likely write past the end of the dst Java array memory returned by JNI.",
+            "This is therefore a likely genuine memory corruption vulnerability caused by missing bounds checks in the JNI layer around attacker-controlled offset/length values. It is not a harness-only artifact because this JNI method is a realistic public native compressUsingDict API in WeChat’s zstd wrapper. Unless higher-level Java performs adequate checks (which we cannot see here), the native side has a bug. For assessment we assume attacker can influence these values via some API usage. Given typical usage (compressing user-provided data or dictionaries), this is plausible.",
+            "Severity: out-of-bounds write in native code in a widely used app’s library, potentially exploitable for code execution, but without exact layout/ASLR knowledge we conservatively rate as high. CWE fits CWE-787 (Out-of-bounds Write) and also CWE-190 (Integer Overflow or Wraparound) due to the (iVar1 - param_4) behavior, but core impact is OOB write.",
+            "Confidence: high (0.9) since we see the exact arithmetic and lack of checks, and the crash site matches expected behavior (memcpy called from zstd with wrong capacity)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "JNI wrapper Java_com_tencent_mars_zstd_Zstd_compressUsingDict passes attacker-controlled offsets and lengths directly into ZSTD_compress_usingDict without validating them",
+            "Destination capacity argument is computed as iVar1 - param_4, where iVar1 is buffer length and param_4 is offset; no check for param_4 <= iVar1, allowing integer underflow and huge size",
+            "Source offset/length (param_6,param_7) are also unchecked against the actual source buffer length, allowing Zstd core to read/write beyond Java array bounds",
+            "Crash occurs in __memcpy inside ZSTD_compressEnd, consistent with Zstd overrunning destination based on the mis-specified capacity, indicating a likely out-of-bounds write"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-190"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "uVar6 = ZSTD_createCCtx();\nuVar7 = ZSTD_compress_usingDict(\n    uVar6,\n    lVar3 + param_4,      // dst = dstBase + dstOffset\n    (long)(iVar1 - param_4), // dstCapacity = dstLen - dstOffset (no bounds check)\n    lVar4 + param_6,      // src = srcBase + srcOffset\n    (long)param_7,        // srcSize (no check that srcOffset+srcSize <= srcLen)\n    lVar5,\n    (long)iVar2,\n    param_9);\nZSTD_freeCCtx(uVar6);",
+              "note": "Offsets and lengths from Java are used without validating that they stay within the backing array lengths."
+            },
+            {
+              "function": "ZSTD_compress_usingDict",
+              "file": "APKs_FINAL/com.tencent.mm/lib/arm64-v8a/libwechatzstd.so",
+              "snippet": "void ZSTD_compress_usingDict(void)\n{\n  (*(code *)PTR_ZSTD_compress_usingDict_001a9c10)();\n  return;\n}",
+              "note": "Thin wrapper around actual Zstd implementation, which assumes dstCapacity is accurate and will use memcpy internally."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_tencent_mars_zstd_Zstd_compressUsingDict",
+            "ZSTD_compress_usingDict",
+            "ZSTD_compressEnd",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add strict validation in Java_com_tencent_mars_zstd_Zstd_compressUsingDict to ensure param_4 >= 0 and param_4 <= iVar1, and that param_6 >= 0 and param_6 + param_7 <= srcLen before calling ZSTD_compress_usingDict",
+            "Propagate and enforce size/offset checks in the Java layer API so untrusted callers cannot supply inconsistent buffer ranges",
+            "Consider using size_t types and explicit bounds-checked helper functions for computing capacities to avoid signed underflow"
+          ],
+          "assumptions": [
+            "param_3, param_5, and param_8 are Java byte arrays or buffers and *param_1+0x558 returns their lengths",
+            "Higher-level Java code does not fully validate offsets and lengths before calling this JNI method",
+            "The crash in __memcpy is due to dstCapacity mismatch leading to an out-of-bounds write in Zstd core"
+          ],
+          "limitations": [
+            "Implementation of the actual ZSTD_compress_usingDict function pointer is not visible, so internal safety checks (if any) are unknown",
+            "Java-side API for Zstd wrapper is not inspected here, so there may be additional validation we cannot see",
+            "Exact exploitability (code execution vs. controlled crash) depends on allocator, ASLR, and runtime mitigations on the specific device"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying crafted offsets and lengths to the compressUsingDict JNI method via its Java wrapper with buffers backed by Java arrays or direct ByteBuffers",
+            "prerequisites": [
+              "Attacker can cause the app to call the Zstd compressUsingDict wrapper with attacker-controlled buffer offsets and sizes",
+              "Attacker can influence or provide the data to be compressed",
+              "App uses this native compression within a context reachable from untrusted input (e.g., message payloads, files)"
+            ],
+            "exploit_pipeline": [
+              "Prepare input data and optional dictionary such that their Java-side lengths are small but pass large or inconsistent offsets (param_4/param_6) and lengths (param_7) into compressUsingDict",
+              "Cause app code to invoke the Java Zstd wrapper that ultimately calls Java_com_tencent_mars_zstd_Zstd_compressUsingDict with these crafted parameters",
+              "At JNI layer, the unchecked arithmetic computes dstCapacity = dstLen - dstOffset, which underflows for oversized dstOffset or yields too small a remaining region for the requested compression output",
+              "ZSTD_compress_usingDict believes it has more room than actually available and eventually performs memcpy in ZSTD_compressEnd that writes past the end of the Java buffer, corrupting adjacent heap metadata or objects",
+              "Leverage resulting memory corruption to either crash the process (DoS) or, with further research and heap grooming, achieve more precise control over memory for potential code execution"
+            ],
+            "poc_commands": [
+              "adb push /path/to/crafted_fuzzer_input /sdcard/Download/zstd_crash_input.bin",
+              "adb shell /data/local/tmp/wechat_zstd_fuzzer /sdcard/Download/zstd_crash_input.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/zstd_crash_input.bin"
+            ],
+            "notes": "Exact Java class/method signature and package name for the Zstd wrapper are not known; PoC assumes either an instrumented fuzzer or an app-internal test harness that can call compressUsingDict with arbitrary arguments."
+          }
+        },
+        "statistics": {
+          "time": "00:00:42",
+          "llm_requests": 5,
+          "llm_tool_calls": 6,
+          "input_tokens": 31847,
+          "output_tokens": 2572
+        }
+      }
+    ]
+  }
+}

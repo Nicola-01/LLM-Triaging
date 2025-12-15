@@ -1,0 +1,613 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.kt.ktauth/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.kt.ktauth",
+      "min_sdk": 23,
+      "target_sdk": 33,
+      "version_name": "02.01.43",
+      "version_code": "89"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "RSKSW_HMAC",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_hmac",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "RSKSW_HMAC",
+              "Java_com_raonsecure_crypto_KSNative_hmac",
+              "Java_com_raonsecure_crypto_KSNative_hmac"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is RSKSW_memcpy where crash is reported. This is an app-level optimized memcpy implementation, not an allocator or sanitizer, so it is the first function to analyze.",
+            "Decompiled RSKSW_memcpy shows a manual byte/word copy loop with parameters (dest, src, len). It copies either byte-by-byte (for overlapping or short regions) or in 16-byte chunks plus a tail. There are no internal bounds checks; it trusts that dest/src point to valid buffers of at least len bytes, which is normal for memcpy-like functions.",
+            "Next frame up the stack is RSKSW_HMAC, which calls RSKSW_memcpy(auStack_20c, param_5, param_6). Here auStack_20c is a fixed 512-byte local buffer. The length argument is param_6 (a 32‑bit value) and the source pointer is param_5, both supplied by the caller. No bounds check is performed against the 512‑byte size before calling memcpy.",
+            "Still in RSKSW_HMAC: immediately before memcpy, local_c is set to param_6 and then passed as &local_210 to KSC_HMAC. That suggests param_6 is some kind of key/data length provided by the caller and is not derived from internal constants. The only validation RSKSW_HMAC performs is checking param_3 and param_1 for NULL and optionally constraining param_7 (compared to 0x101) for a separate state change. There is no validation of param_6 at all.",
+            "The JNI entry Java_com_raonsecure_crypto_KSNative_hmac calls RSKSW_HMAC as RSKSW_HMAC(uVar2, &local_c, uVar3, param_5, uVar4, param_7, param_8). The param_6 of RSKSW_HMAC is thus param_7 of the JNI, and the pointer param_5 of RSKSW_HMAC is uVar4, which comes from a JNIEnv function pointer at *param_1 + 0x5c0, likely GetByteArrayElements / GetDirectBufferAddress or similar acting on the Java argument param_6. This means both the buffer pointer and length originate from Java layer inputs controlled by the caller.",
+            "Within the JNI bridge, the three native pointers uVar2, uVar3, uVar4 are acquired via the same JNIEnv callback, passing the Java objects param_3, param_4, param_6 and a stack byte (&uStack_f, etc.) to receive a mode flag. The JNI code does not inspect array lengths or capacity; it blindly forwards uVar2/uVar3/uVar4 plus param_7 and param_8 into RSKSW_HMAC. There is no check that param_7 (length) is <= the actual size of the buffer referenced by uVar4 or <= 512 bytes.",
+            "Thus, if Java passes a length (param_7) larger than 512, RSKSW_HMAC will perform RSKSW_memcpy(auStack_20c, uVar4, param_7), which will run off the end of the 512‑byte stack buffer. This is a classic stack-based buffer overflow, since auStack_20c is followed on the stack by local_c and the stack canary, then the saved return address. Overwriting beyond 512 bytes will corrupt local variables and potentially the canary/return address, triggering a crash (or, without stack protector, leading to control-flow hijack).",
+            "Because this function is a JNI entry exposed to the Java side, and HMAC parameters are usually based on input data or keys that could be influenced by a caller (e.g., app logic or possibly another app via IPC to the host app), param_7 is attacker-controllable under realistic circumstances. Even if only the hosting app code calls this JNI, a logic bug or malformed input can cause it to pass an overly large length. No protective checks or clamps are evident in the native code path.",
+            "The crash termination message RSKSW_memcpy is consistent with a memory error happening during the memcpy loop, e.g., out-of-bounds access causing a segmentation fault or similar. The lack of any other checks or aborts confirms the overflow is due to unbounded copy, not a deliberate harness abort. The call sequence from JNI to HMAC to memcpy is clear, and the overflow condition can be precisely characterized as len > 512 causing write past a 512‑byte stack buffer.",
+            "There is no evidence this is harness-only. The JNI entry is a real exported native method, and the use of general JNIEnv accessors indicates it is meant for arbitrary byte arrays or direct buffers. Therefore this is a genuine, high-severity memory corruption vulnerability: a stack-based buffer overflow on attacker-controlled data length, reachable through the app’s Java interface."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.96,
+          "reasons": [
+            "RSKSW_HMAC copies param_6 bytes from param_5 into a fixed 512-byte stack buffer without any bounds check.",
+            "JNI entry Java_com_raonsecure_crypto_KSNative_hmac forwards Java-controlled arguments directly as param_5/param_6 into RSKSW_HMAC, so the length can exceed 512.",
+            "The crash occurs inside RSKSW_memcpy, consistent with an out-of-bounds write on the stack when length is too large.",
+            "No validation or clamping of the length occurs anywhere along the call chain from JNI to memcpy."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_memcpy",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "void RSKSW_memcpy(undefined8 *param_1,undefined8 *param_2,uint param_3) { ... byte/word copy of param_3 bytes from param_2 to param_1 with no bounds checks ... }",
+              "note": "Utility memcpy-like function used by RSKSW_HMAC; trusts caller-provided length."
+            },
+            {
+              "function": "RSKSW_HMAC",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "undefined1 auStack_20c[512];\n...\nlocal_c = param_6;\nRSKSW_memcpy(auStack_20c, param_5, param_6);\nlocal_210 = param_7;",
+              "note": "Copies param_6 bytes into a 512-byte stack buffer without checking that param_6 <= 512."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_hmac",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "uVar4 = (**(code **)(*param_1 + 0x5c0))(param_1,param_6,&uStack_d);\n...\niVar1 = RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8);",
+              "note": "JNI bridge obtains native buffer from Java param_6 and passes it with length param_7 directly to RSKSW_HMAC; no length validation performed."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "RSKSW_HMAC",
+            "RSKSW_memcpy"
+          ],
+          "recommendations": [
+            "Add explicit bounds checking in RSKSW_HMAC to ensure param_6 (copied length) does not exceed sizeof(auStack_20c) before calling RSKSW_memcpy.",
+            "In the JNI method, validate that the Java buffer length is at least param_7 and that param_7 is limited to a safe maximum (e.g., 512) before calling RSKSW_HMAC.",
+            "Enable and monitor stack-protector and ASLR for this library, and consider replacing custom memcpy with standard, safer patterns."
+          ],
+          "assumptions": [
+            "Java_com_raonsecure_crypto_KSNative_hmac is exposed to normal app Java code as a native method, allowing its parameters to be influenced by caller logic or external inputs.",
+            "There are no hidden constraints in Java wrapper code that always ensure param_7 <= 512; such wrappers are not visible in the provided data.",
+            "The fuzzer reproduced a realistic over-long length scenario that is also possible in production when incorrect sizes are passed to the JNI method."
+          ],
+          "limitations": [
+            "Java-side wrapper code and manifest are not visible, so exact reachability from untrusted external inputs (e.g., other apps) is inferred but not proven.",
+            "Exact function names of the JNIEnv callbacks at *param_1+0x5c0 and *param_1+0x600 are unknown, but their semantics as buffer accessors/array release are inferred from calling pattern.",
+            "The precise crash instruction inside RSKSW_memcpy is not shown; analysis infers out-of-bounds write from unbounded copy into fixed 512-byte buffer."
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Java code calling native method Java_com_raonsecure_crypto_KSNative_hmac with a key/data buffer but an excessively large length parameter",
+            "prerequisites": [
+              "Ability to execute or influence Java code within the com.kt.ktauth app (e.g., via app logic or IPC-controlled input).",
+              "The native library compiled with typical protections (stack canary) but still vulnerable to stack overflow before canary check abort.",
+              "Knowledge (or trial-and-error discovery) of the maximum safe length (512) and the overlong length that triggers corruption."
+            ],
+            "exploit_pipeline": [
+              "Craft or control Java code that calls KSNative.hmac (or equivalent Java wrapper) with a byte array or direct buffer (param_6) and set the length parameter (param_7) to a value > 512 while keeping param_3/param_4 valid.",
+              "Ensure the native buffer referenced by param_6 is at least as large as the overlong length to prevent earlier crashes, so that the overflow occurs when copying into the 512-byte auStack_20c buffer in RSKSW_HMAC.",
+              "Invoke the JNI method repeatedly with varying overlong lengths and data patterns to observe crashes and, if protections are weak, attempt to overwrite return address/control data beyond the stack canary.",
+              "In a weaker-protection or non-PIE build, shape the overflowing data to overwrite saved return address or function pointers for control-flow hijack; otherwise, leverage the reliable crash as a denial-of-service or information leak channel.",
+              "Package the exploit into an automated harness (e.g., malicious Java component or test harness) that triggers the vulnerable HMAC call with attacker-controlled parameters during normal app operation."
+            ],
+            "poc_commands": [
+              "adb shell am start -n com.kt.ktauth/.MainActivity --es native_test 'hmac_overflow'",
+              "adb shell am instrument -w com.kt.ktauth/.test.HMACTestRunner",
+              "adb push /sdcard/Download/hmac_overflow_input.bin /sdcard/Download/hmac_overflow_input.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/hmac_overflow_input.bin"
+            ],
+            "notes": "Exact Java class/method name for the HMAC wrapper is not provided; PoC assumes existence of a Java-accessible KSNative.hmac or equivalent method that forwards parameters directly to Java_com_raonsecure_crypto_KSNative_hmac. The overlong length (param_7) must exceed 512 to trigger the overflow on the auStack_20c buffer."
+          }
+        },
+        "statistics": {
+          "time": "00:00:44",
+          "llm_requests": 4,
+          "llm_tool_calls": 5,
+          "input_tokens": 26290,
+          "output_tokens": 2597
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "RSKSW_HMAC",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "android.security.keystore.IKeystoreService$Stub$Proxy.generateKey",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_hmac",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "RSKSW_HMAC",
+              "Java_com_raonsecure_crypto_KSNative_hmac",
+              "Java_com_raonsecure_crypto_KSNative_hmac"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is RSKSW_memcpy, which is an app-local optimized memcpy implementation. Termination reason is named after this function, implying crash occurred within it (likely invalid access). Need to see how it is called from first non-allocator frame, which is RSKSW_HMAC.",
+            "Decompiled RSKSW_HMAC shows: it allocates a 0x208-byte stack area (auStack_20c) and then calls RSKSW_memcpy(auStack_20c, param_5, param_6). The length argument to memcpy is param_6, copied also into local_c. There are no bounds checks on param_6 before using it as memcpy length into the 512B buffer.",
+            "Thus, if param_6 > 0x200 (512), RSKSW_memcpy will overflow the fixed-size stack buffer auStack_20c, causing stack corruption / out-of-bounds write. This is a clear memory safety vulnerability (CWE-787).",
+            "Need to trace param_6 backwards: RSKSW_HMAC signature is (long param_1, undefined8 param_2, long param_3, undefined8 param_4, undefined8 param_5, undefined4 param_6, int param_7). Then see its caller Java_com_raonsecure_crypto_KSNative_hmac.",
+            "Decompiled Java_com_raonsecure_crypto_KSNative_hmac shows call: iVar1 = RSKSW_HMAC(uVar2, &local_c, uVar3, param_5, uVar4, param_7, param_8). Therefore RSKSW_HMAC.param_6 == param_7 of the JNI function. No transformation or validation is applied; it is passed verbatim.",
+            "Now trace param_7 of JNI. The JNI function is a bridge using function pointers at *param_1+0x5c0 to convert Java objects (param_3,param_4,param_6) into native buffers uVar2,uVar3,uVar4, and a function pointer at *param_1+0x600 to release them. There is no check that param_7 is within [0,512] or any constraints at all. Therefore the length ultimately comes from Java caller (attacker-controllable under fuzzing and plausibly under app input).",
+            "RSKSW_memcpy itself does not do bounds checking; it just copies param_3 bytes from param_2 to param_1. The crash is consistent with param_6 too large relative to 512-byte destination, causing stack overflow.",
+            "Reachability/exploitability: The JNI method Java_com_raonsecure_crypto_KSNative_hmac is a public native method in com.raonsecure.crypto.KSNative (typical keystore/HMAC wrapper). Any Java code inside the app can call it; external attacker influence would depend on whether app exposes it via IPC or processes attacker-supplied parameters. That app-level wiring is not shown, but for security assessment of the library, it is enough that untrusted or semi-trusted Java input can propagate to the native layer without checks. The fuzz harness triggered it by varying JNI args, confirming path is live.",
+            "Thus, we have: attacker-controllable length (param_7) -> used as RSKSW_HMAC.param_6 -> memcpy into fixed 512-byte stack buffer without bounds check. This is a classic stack-based buffer overflow vulnerability. Severity high/critical (potential code execution) but lack of ASLR/stack-protector info; however, stack_chk_guard is present so SSP will abort on detected overwrite, but still memory corruption window may exist pre-check. We'll label as high severity memory corruption.",
+            "No evidence suggests this is a harness-only artifact; the JNI wrapper is generic and would be called in production. Therefore classify as real vulnerability."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "RSKSW_HMAC copies param_6 bytes into a 512-byte stack buffer using RSKSW_memcpy without any bounds checking",
+            "JNI bridge Java_com_raonsecure_crypto_KSNative_hmac forwards its param_7 directly as RSKSW_HMAC.param_6, with no validation",
+            "RSKSW_memcpy performs raw copying of the requested length and will write beyond the destination buffer when length > 512, causing stack-based buffer overflow",
+            "Crash in RSKSW_memcpy is consistent with an out-of-bounds write from an overlarge length value"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_HMAC",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "undefined1 auStack_20c [512];\n...\nlocal_c = param_6;\nRSKSW_memcpy(auStack_20c,param_5,param_6);",
+              "note": "Copies param_6 bytes into 512-byte stack buffer auStack_20c without bounds checking, enabling stack overflow when param_6 > 512."
+            },
+            {
+              "function": "RSKSW_memcpy",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "void RSKSW_memcpy(undefined8 *dst, undefined8 *src, uint len)\n{\n  if (len != 0) {\n    if ((src < dst + 2 && dst < src + 2) || (len < 0x10)) {\n      // byte-wise copy len bytes\n    } else {\n      // 16-byte chunked copy plus tail\n    }\n  }\n}",
+              "note": "Custom memcpy performs len-byte copy with no bounds checks relative to destination buffer size."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_hmac",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "iVar1 = RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8);",
+              "note": "JNI param_7 is passed directly as RSKSW_HMAC length parameter param_6, with no validation, allowing Java caller to control memcpy length."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_raonsecure_crypto_KSNative_hmac -> RSKSW_HMAC -> RSKSW_memcpy"
+          ],
+          "recommendations": [
+            "Add strict bounds checking in RSKSW_HMAC to ensure param_6 does not exceed sizeof(auStack_20c) before calling RSKSW_memcpy",
+            "In Java_com_raonsecure_crypto_KSNative_hmac, validate param_7 against the actual key buffer size and a hard maximum before passing it to native HMAC implementation",
+            "Consider replacing RSKSW_memcpy with standard memcpy/memmove and enabling compiler-level stack protections and ASan in testing builds"
+          ],
+          "assumptions": [
+            "JNI parameter param_7 in Java_com_raonsecure_crypto_KSNative_hmac is controllable by higher-level Java code driven by user or external input",
+            "There is no hidden validation of the HMAC key length elsewhere before this native method is invoked"
+          ],
+          "limitations": [
+            "AndroidManifest and app wiring were not inspected to determine exact external exposure of this JNI method",
+            "Exact function addresses and symbol decorations in the final binary were not considered; analysis is based on decompiled output"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "malformed or oversized HMAC key length passed to KSNative.hmac JNI method",
+            "prerequisites": [
+              "Ability to execute or influence Java code that calls com.raonsecure.crypto.KSNative.hmac with attacker-controlled length parameter",
+              "Target device running an app version that includes libRSKSW_Android_Core.so without additional native hardening beyond stack canaries"
+            ],
+            "exploit_pipeline": [
+              "Identify where com.raonsecure.crypto.KSNative.hmac is invoked in the app (e.g., via exported component or higher-level API) and how its parameters map to user-controllable data",
+              "Craft input that causes the Java layer to pass an excessively large key length (param_7) while providing corresponding native buffers via the keystore service",
+              "Trigger the JNI call so that RSKSW_HMAC is invoked with param_6 > 512, leading to out-of-bounds write in RSKSW_memcpy into auStack_20c",
+              "Iterate on payload and length to attempt controlled overwrite of adjacent stack data (saved registers, return address) before stack canary validation, aiming for code execution or at minimum reliable process crash"
+            ],
+            "poc_commands": [
+              "adb shell am start -n <package>/<Activity> --es hmac_key \"A...A\" --ei hmac_key_len 1024",
+              "adb shell cmd instrument -w -e class <test_class>#testOversizeHmac com.<package>.test/androidx.test.runner.AndroidJUnitRunner"
+            ],
+            "poc_files": [
+              "/sdcard/Download/oversize_hmac_input.bin"
+            ],
+            "notes": "Exact mapping from external inputs to JNI parameters is app-specific; PoC commands use placeholders for package/activity names and assume there is a code path that forwards supplied HMAC key and length to KSNative.hmac without additional checks."
+          }
+        },
+        "statistics": {
+          "time": "00:00:36",
+          "llm_requests": 2,
+          "llm_tool_calls": 4,
+          "input_tokens": 14132,
+          "output_tokens": 2019
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "RSKSW_HMAC",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "com.android.internal.location.nano.GnssLogsProto$GnssLog.writeTo",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_hmac",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "RSKSW_HMAC",
+              "Java_com_raonsecure_crypto_KSNative_hmac",
+              "Java_com_raonsecure_crypto_KSNative_hmac"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is RSKSW_memcpy inside libRSKSW_Android_Core.so, termination reason string equals function name, suggesting custom memcpy detected an issue or just is where crash manifested.",
+            "Decompiled RSKSW_memcpy: it does manual copying, supports overlapping regions if <2 qwords apart or len<16 via byte loop. No explicit bounds checks; relies on caller-provided pointers and length. Any out-of-bounds comes from bad inputs to this function.",
+            "Decompiled RSKSW_HMAC: local 0x208-byte stack buffer auStack_20c. It calls memset(&local_210,0,0x208), then calls RSKSW_memcpy(auStack_20c, param_5, param_6). Here param_6 is param_6 (undefined4) but used as length; local_c = param_6. No validation that param_6 <= 0x200 or that param_5 is non-null; auStack_20c capacity is 0x200 bytes (512) from local_210..auStack_20c. Passing larger param_6 will overflow stack buffer, causing memory corruption and likely crash in or near memcpy. This is classic stack-based buffer overflow.",
+            "Decompiled JNI Java_com_raonsecure_crypto_KSNative_hmac: obtains three native buffers via function pointer (**(code **)(*param_1 + 0x5c0)) for param_3, param_4, param_6, writing some meta bytes at uStack_f/e/d. Then calls checkSelfTest(), then RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8). So mapping: param_5 (JNI) passed to HMAC as param_4, param_6 (JNI) as param_6 length, param_7 as param_7, param_8 as param_8. The length argument that controls memcpy is param_6 (JNI param_7? We must interpret type mapping). From signature, last two are jint param_7 and jint param_8. RSKSW_HMAC prototype: (..., undefined4 param_6, int param_7). In call RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8), param_7 (JNI) goes into param_6 (length) and param_8 into param_7 (probably HMAC type/size). Thus attacker can choose param_7 from Java side; fuzz harness did so. No validation in JNI before passing to RSKSW_HMAC.",
+            "Thus vulnerability: JNI method takes an integer from Java (hmac key length or similar), passes it unchecked as memcpy length param_6 into RSKSW_HMAC, which copies from attacker-controlled buffer param_5 (uVar4 derived from jbyteArray param_6 or similar) into fixed-size 0x200 stack buffer auStack_20c. If param_7 > 512, stack buffer overflow occurs. Even smaller oversized values could corrupt adjacent stack variables or canaries. Stack protector is enabled (__stack_chk_guard), so overflow will eventually trigger __stack_chk_fail, an abort, but before that there is memory corruption. With some constraints, this could be exploited, though stack canary raises bar; still CWE-121/CWE-787 memory corruption bug.",
+            "Inputs source/taint: JNI entry can be called from app code. In shown Java call graph, com.android.internal.location.nano.GnssLogsProto$GnssLog.writeTo leading to JNI suggests HMAC is used while serializing logs; but from security perspective, any app component that can reach KSNative.hmac can supply arbitrary length and buffer; if library exposed to untrusted input, an attacker can influence length. Fuzzer mimics this by passing large values, demonstrating reachable crash path from JNI entry through HMAC to memcpy. No length checks anywhere; only basic null/zero checks on param_1/param_3 (pointers) and KSC_CM_StateChange on param_7 (last int), not on param_6.",
+            "Allocator/sanitizer involvement: custom memcpy, no ASAN; crash likely direct SEGV or stack protector abort. We have concrete code evidence of overflow; not harness-only: JNI function is realistic and would process external data lengths depending on app logic. Even if in production typical lengths are limited (e.g., key size <= 64), absence of enforcement is still vulnerability because any misuse or unexpected caller from app can set higher size; fuzz harness did so only by using JNI API legitimately, not via impossible parameters.",
+            "Therefore classify as genuine memory safety vulnerability: stack-based buffer overflow (out-of-bounds write) in RSKSW_HMAC due to unchecked length from JNI argument. Severity high: potential code execution, but stack canary and limited attack surface via app make RCE non-trivial; at minimum, robust DoS. Confidence high (>=0.95) because we have full dataflow and concrete unsafe memcpy call with attacker-controlled length and source/dest characteristics."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.97,
+          "reasons": [
+            "RSKSW_HMAC copies attacker-controlled data into a fixed-size stack buffer using RSKSW_memcpy without validating the length parameter",
+            "Length param_6 to RSKSW_HMAC comes directly from JNI argument (param_7 in Java_com_raonsecure_crypto_KSNative_hmac) with no bounds check",
+            "auStack_20c is 0x200 bytes but memcpy length param_6 is unconstrained, causing stack-based buffer overflow and memory corruption when too large",
+            "Crash in RSKSW_memcpy is consistent with out-of-bounds write/read from overflowing auStack_20c",
+            "Bug is reachable via a realistic JNI entrypoint, not a harness-only artifact"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_HMAC",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "undefined1 auStack_20c [512];\n...\nmemset(&local_210,0,0x208);\nlocal_c = param_6;\nRSKSW_memcpy(auStack_20c,param_5,param_6);",
+              "note": "Copies param_6 bytes from param_5 into 512-byte stack buffer without checking that param_6 <= 512"
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_hmac",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "iVar1 = RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8);",
+              "note": "JNI passes param_7 directly as param_6 (length) to RSKSW_HMAC, giving attacker control over memcpy size"
+            },
+            {
+              "function": "RSKSW_memcpy",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "if (param_3 != 0) {\n  ...\n  do {\n    *(undefined1 *)((long)param_1 + lVar3) = *(undefined1 *)((long)param_2 + lVar3);\n    lVar3 = lVar3 + 1;\n  } while (lVar3 != (ulong)(param_3 - 1) + 1);\n}",
+              "note": "Performs raw byte copies for length param_3 with no safety checks; any oversized length from caller causes OOB write/read."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_raonsecure_crypto_KSNative_hmac -> RSKSW_HMAC -> RSKSW_memcpy"
+          ],
+          "recommendations": [
+            "Add explicit bounds checking in RSKSW_HMAC to ensure param_6 does not exceed the size of auStack_20c before calling RSKSW_memcpy, and fail gracefully on error",
+            "Validate and constrain the length parameter in Java_com_raonsecure_crypto_KSNative_hmac based on the actual buffer sizes and HMAC key/data semantics",
+            "Consider replacing custom RSKSW_memcpy with well-tested standard memcpy/memmove combined with rigorous size validation, and re-run fuzzing to confirm fix"
+          ],
+          "assumptions": [
+            "JNI method KSNative.hmac is callable with attacker-controlled parameters via app logic or untrusted inputs",
+            "auStack_20c has an effective capacity of 512 bytes and is intended to hold the key or related data copied from param_5",
+            "No hidden checks elsewhere constrain param_7 (length) before Java_com_raonsecure_crypto_KSNative_hmac is invoked"
+          ],
+          "limitations": [
+            "Exact Java signature and usage context of KSNative.hmac are not available, so mapping of JNI parameters is inferred from typical patterns",
+            "Stack canary and other mitigations may complicate exploitation beyond simple crash, but binary-level protections are not fully enumerated",
+            "Callers higher up the Java stack (e.g., GnssLogsProto$GnssLog.writeTo) were not decompiled, so degree of external attacker control over input sizes is inferred, not proven"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Calling KSNative.hmac JNI method with an overly large length argument for the key/data buffer",
+            "prerequisites": [
+              "Attacker can influence arguments passed to KSNative.hmac (directly or via crafted app input)",
+              "Library is built and shipped with the vulnerable libRSKSW_Android_Core.so and exposed through app Java APIs",
+              "Target device allows running the vulnerable app and invoking its HMAC functionality"
+            ],
+            "exploit_pipeline": [
+              "Craft or identify a Java-level entrypoint that calls com.raonsecure.crypto.KSNative.hmac (or wrapper) with attacker-controlled buffer and length parameters",
+              "Pass a legitimate or dummy byte array as key/data but set the associated length parameter (mapped to native param_7) to a value larger than 512 bytes",
+              "Trigger the JNI call so that Java_com_raonsecure_crypto_KSNative_hmac forwards the large length into RSKSW_HMAC",
+              "RSKSW_HMAC performs RSKSW_memcpy into the 512-byte auStack_20c, overflowing the stack and corrupting adjacent stack data and/or stack canary",
+              "Observe process crash (DoS) and, in a more advanced attack, attempt to shape overflow data to influence control flow, subject to stack canary and platform mitigations"
+            ],
+            "poc_commands": [
+              "adb shell am start -n <package.name>/<MainActivity> --es hmac_input /sdcard/Download/payload.bin --ei hmac_len 1024",
+              "adb push crafted_input.bin /sdcard/Download/payload.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact Java API and activity names are unknown; PoC commands include placeholders. The key idea is to route a large hmac_len integer to the JNI KSNative.hmac method so that RSKSW_HMAC is invoked with param_6 > 512, triggering stack overflow in RSKSW_memcpy."
+          }
+        },
+        "statistics": {
+          "time": "00:00:50",
+          "llm_requests": 4,
+          "llm_tool_calls": 5,
+          "input_tokens": 26263,
+          "output_tokens": 2510
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "RSKSW_HMAC",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "??",
+            "cktrace stopped: Cannot access memory at address 0x81010000001"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_hmac",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: Cannot access memory at address 0x81010000001",
+          "LibMap": {
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "RSKSW_HMAC",
+              "Java_com_raonsecure_crypto_KSNative_hmac",
+              "Java_com_raonsecure_crypto_KSNative_hmac"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Process termination is labeled 'RSKSW_memcpy', suggesting the crash occurs during or is attributed to a memcpy-like routine; need to inspect its call site.",
+            "Decompiled RSKSW_HMAC shows a 512-byte local buffer auStack_20c and a call RSKSW_memcpy(auStack_20c, param_5, param_6); with param_6 as length (local_c = param_6).",
+            "There are no bounds checks on param_6 before copying into auStack_20c; stack-guard is present but only detects overflow after the fact. Any param_6 > 512 (0x200) will overflow this buffer → classic stack-based overflow risk.",
+            "Need to establish if param_5 and param_6 are controllable from JNI inputs. RSKSW_HMAC signature: (long param_1, u8 param_2, long param_3, u8 param_4, u8 param_5, u32 param_6, int param_7). In Java_com_raonsecure_crypto_KSNative_hmac, RSKSW_HMAC is called with: RSKSW_HMAC(uVar2, &local_c, uVar3, param_5, uVar4, param_7, param_8). Thus param_5 = uVar4, param_6 = param_7, param_7 = param_8.",
+            "uVar4 is obtained via (**(code **)(*param_1 + 0x5c0))(param_1, param_6, &uStack_d); which is very likely a JNI Get*ArrayElements / GetByteArrayRegion-like accessor from the Java arguments (param_6 is a jbyteArray or similar). So the source pointer is derived directly from a Java buffer argument.",
+            "param_7 (length) in Java_com_raonsecure_crypto_KSNative_hmac comes directly from the Java-side method parameter list (mapped JNI argument) and is passed unchanged into RSKSW_HMAC as param_6; there is no validation, bounds check, or clamping. So an attacker controlling the Java layer (e.g., app input, IPC, or fuzz harness) can choose arbitrary param_7 including values much larger than 512.",
+            "Therefore, in realistic scenarios (assuming this JNI is reachable from app code with user-controlled key/IV/etc), an attacker can set param_7 > 0x200 while also providing a buffer at uVar4 with at least that length, causing RSKSW_memcpy to overflow auStack_20c, corrupting adjacent stack variables, potentially the saved return address, leading to memory corruption and possible RCE. The stack canary will detect some overwrites, turning it into an abort, but the underlying bug is still a stack-based buffer overflow (CWE-121/787).",
+            "The stack trace and termination reason are consistent: RSKSW_memcpy is top frame; given absence of other bounds, likely a write OOB. The fuzz harness did not inject impossible NULLs; pointers are from JNI accessors, and the only bad parameter is length.",
+            "This is not a harness-only artifact: Java_com_raonsecure_crypto_KSNative_hmac is clearly production JNI glue, and the lack of checking param_7 against the fixed internal buffer size is a genuine bug that would also occur under real app inputs if lengths can be large (e.g., HMAC key or data length).",
+            "Severity is high: stack-based write overflow with attacker-controlled length; even with stack canary, this is a serious memory corruption vulnerability; exploitability is at least theoretical and likely practical on unprotected builds or with partial mitigations.",
+            "CWE mapping: primary CWE-121 Stack-based Buffer Overflow; also CWE-787 Out-of-bounds Write covers the generic overrun. The affected library is libRSKSW_Android_Core.so. Call sequence path: JNI entry Java_com_raonsecure_crypto_KSNative_hmac → RSKSW_HMAC → RSKSW_memcpy.",
+            "Exploit concept: craft Java-layer call into KSNative.hmac (or equivalent) via app or IPC with a large length parameter (param_7) and suitably sized key buffer (param_6), causing native stack overflow; on a rooted/controlled environment an attacker app or fuzz harness can drive this via the app's own Java APIs or reflection. ADB PoC would push a small helper app or use instrumentation; since package/activity names are unknown, use placeholders and state assumption."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "RSKSW_HMAC copies param_6 bytes from param_5 into a fixed 512-byte stack buffer without any bounds check.",
+            "Java_com_raonsecure_crypto_KSNative_hmac passes unvalidated length param_7 from JNI directly into RSKSW_HMAC as param_6, making the overflow length attacker-controlled.",
+            "Source pointer for memcpy is derived from a Java-provided buffer via a function pointer accessor, so attacker can supply sufficiently large data, enabling out-of-bounds stack write.",
+            "Crash top frame and termination in RSKSW_memcpy are consistent with stack buffer overflow due to excessive length."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_HMAC",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "undefined1 auStack_20c[512];\n...\nlocal_c = param_6;\nRSKSW_memcpy(auStack_20c, param_5, param_6); // no bounds check vs 512\nlocal_210 = param_7;",
+              "note": "Fixed-size 512-byte stack buffer used as memcpy destination with attacker-controlled length param_6."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_hmac",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "uVar4 = (**(code **)(*param_1 + 0x5c0))(param_1,param_6,&uStack_d);\n...\niVar1 = RSKSW_HMAC(uVar2,&local_c,uVar3,param_5,uVar4,param_7,param_8);",
+              "note": "JNI bridge forwards unvalidated length param_7 and source pointer uVar4 (from Java buffer) into RSKSW_HMAC, providing attacker control over memcpy length and data."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "RSKSW_HMAC",
+            "RSKSW_memcpy"
+          ],
+          "recommendations": [
+            "Add strict bounds checking in RSKSW_HMAC to ensure param_6 does not exceed sizeof(auStack_20c) before calling RSKSW_memcpy, and fail gracefully on oversize input.",
+            "In Java_com_raonsecure_crypto_KSNative_hmac, validate param_7 against both the JNI buffer length and the maximum internal buffer size, or derive the length from actual buffer size instead of trusting caller input.",
+            "Consider replacing custom RSKSW_memcpy usage on stack buffers with safer APIs (e.g., bounded memcpy/memmove wrappers) and enable compiler hardening flags (stack protector, CFG) to mitigate exploitation."
+          ],
+          "assumptions": [
+            "Java_com_raonsecure_crypto_KSNative_hmac is reachable from app code with some level of user/attacker influence on its parameters.",
+            "The function pointer at *param_1 + 0x5c0 returns a pointer to a buffer of at least param_7 bytes when param_7 is large; i.e., overflow is on destination, not caused by invalid source pointer.",
+            "Stack canary aborts do not fully prevent exploitation on all target builds; some environments or compiler flags may differ."
+          ],
+          "limitations": [
+            "Exact prototype and use of the function pointer at offset 0x5c0 are inferred from pattern, not symbol names.",
+            "Details of Java-side KSNative.hmac signature and exposure (public API, IPC) are not available, so exploit trigger path is partly assumed.",
+            "No direct decompilation of RSKSW_memcpy itself, so exact failing instruction is inferred from call context and crash label."
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Malicious or malformed call into KSNative.hmac JNI method with oversized length argument.",
+            "prerequisites": [
+              "Attacker can cause app code to invoke the KSNative.hmac JNI method (directly, via app APIs, reflection, or IPC).",
+              "Attacker can supply key or buffer data large enough to match the oversized length parameter.",
+              "Target build does not fully mitigate stack-based overflows (or attacker aims for reliable crash/DoS)."
+            ],
+            "exploit_pipeline": [
+              "Identify or reverse-engineer the Java wrapper for KSNative_hmac to determine its parameter types (key buffer, data buffer, length parameters).",
+              "From a malicious app or internal test harness, construct a call to the HMAC function with a key/buffer argument and a length parameter significantly larger than 512 bytes (e.g., 4096), ensuring the Java buffer is at least that size.",
+              "Invoke the target app component or Java API that ultimately calls KSNative.hmac with these crafted arguments to force the JNI bridge to pass param_7 directly into RSKSW_HMAC.",
+              "When RSKSW_HMAC executes, RSKSW_memcpy will copy param_7 bytes into the 512-byte auStack_20c buffer, corrupting the stack and leading to crash or potential control-flow hijack, depending on mitigations.",
+              "Iterate on buffer contents and length values to analyze corruption patterns; with appropriate knowledge of stack layout and mitigations, attempt to shape the overflow for code execution."
+            ],
+            "poc_commands": [
+              "adb push /path/to/malicious-helper.apk /sdcard/Download/mhelper.apk",
+              "adb install -r /sdcard/Download/mhelper.apk",
+              "adb shell am start -n <victim.package/.HmacTriggerActivity> --es payload_file /sdcard/Download/payload.bin",
+              "adb logcat | grep -i \"RSKSW_HMAC\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "The exact Java method name and activity/component that exposes KSNative.hmac are unknown; a helper app or instrumentation framework (e.g., Frida, Xposed) can be used to call the JNI method directly once identified via reverse engineering."
+          }
+        },
+        "statistics": {
+          "time": "00:00:43",
+          "llm_requests": 3,
+          "llm_tool_calls": 2,
+          "input_tokens": 19064,
+          "output_tokens": 2219
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "KS_SHA3_Update",
+          "StackTrace": [
+            "KS_SHA3_Update",
+            "KS_Hash_Update",
+            "KS_HMAC",
+            "KSC_HMAC",
+            "RSKSW_HMAC",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_hmac",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libKeySharpCryptoV1_4.so": [
+              "KS_SHA3_Update",
+              "KS_Hash_Update",
+              "KS_HMAC",
+              "KSC_HMAC"
+            ],
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "KSC_HMAC",
+              "RSKSW_HMAC",
+              "Java_com_raonsecure_crypto_KSNative_hmac",
+              "Java_com_raonsecure_crypto_KSNative_hmac"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Ghidra MCP decompilation failed due to connection errors, so I must reason only from the symbolic stack and function names.",
+            "The first app-level native frame below any allocators/sanitizers is KS_SHA3_Update in libKeySharpCryptoV1_4.so; there is no indication of malloc/asan/abort frames, so the termination string 'KS_SHA3_Update' likely indicates a crash or abort inside this function (e.g., assertion, internal bounds check, or null deref).",
+            "Function naming suggests a standard HMAC over SHA3 implemented as layers: Java_com_raonsecure_crypto_KSNative_hmac -> RSKSW_HMAC (wrapper in core lib) -> KSC_HMAC (bridge between core and crypto lib) -> KS_HMAC (crypto-level HMAC) -> KS_Hash_Update -> KS_SHA3_Update.",
+            "In a typical design, KS_SHA3_Update operates on an internal state context and ingests user-supplied message bytes and length. Crashes there are frequently due to invalid context pointers or length/offset issues. However, without code, I cannot see memcpy/memmove usage or concrete pointer arithmetic, so I cannot prove OOB read/write.",
+            "Because the fuzzer drives the JNI directly, it may be passing obviously invalid pointers or sizes (e.g., null, absurdly large length) through the JNI stub, which production Java code would never do. But since this is JNI, lengths and buffers are normally checked (e.g., via GetByteArrayElements and array length) on the Java side, making arbitrary pointer corruption less likely.",
+            "No allocator, sanitizer, or signal-type information (like SIGSEGV or ASAN message) is provided; only the symbol name is used as 'Process Termination', which looks like a symbolic label from the harness rather than an OS signal. That weakens the evidence for a genuine memory safety bug vs. a controlled error path inside KS_SHA3_Update (e.g., assert on invalid state, return code converted to crash by the harness).",
+            "The layered structure (RSKSW_HMAC/KSC_HMAC/KS_HMAC/KS_Hash_Update/KS_SHA3_Update) is standard and does not suggest obviously unsafe cross-library API misuse. The vulnerability, if any, would be in how message length and buffer pointers propagate, but I cannot observe actual lack of validation or unsafe memcpy.",
+            "Given no visible stack frame from allocators, no ASAN/SEGV marker, and the fact that the termination reason is just a function name, I cannot confidently assert memory corruption. It might be a benign abort or assertion, or harness interpreting a non-zero return as a crash.",
+            "This therefore falls into 'unclear or speculative' for real-world exploitability; with current evidence it is safer to classify as not a confirmed vulnerability, with low-to-moderate confidence and note the limitations.",
+            "I will mark is_vulnerable=false, provide CWE list empty, severity null, and highlight that more detailed native code/ASAN info would be needed to upgrade this to a real crypto implementation bug or memory safety issue."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.4,
+          "reasons": [
+            "Top frame is KS_SHA3_Update with no explicit SIGSEGV/ASAN/allocator evidence; only a symbolic function name is given as termination reason.",
+            "Typical HMAC/SHA3 layering suggests a standard digest update path; without decompiled code or crash signal details there is no proof of out-of-bounds access or use-after-free.",
+            "The fuzzer-driven JNI harness may be causing invalid usage (e.g., bad parameters, state misuse) that triggers internal assertions or error handling in KS_SHA3_Update rather than a genuine exploitable bug."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libKeySharpCryptoV1_4.so",
+            "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "KS_SHA3_Update",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libKeySharpCryptoV1_4.so",
+              "note": "Crash/termination reported at this function name, but no signal or disassembly is available."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_hmac",
+              "file": "APKs_FINAL/com.kt.ktauth/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "note": "JNI entrypoint used by fuzzer; actual argument validation and conversions cannot be inspected due to missing decompilation."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_raonsecure_crypto_KSNative_hmac",
+            "RSKSW_HMAC",
+            "KSC_HMAC",
+            "KS_HMAC",
+            "KS_Hash_Update",
+            "KS_SHA3_Update"
+          ],
+          "recommendations": [
+            "Re-run the fuzz case with an instrumented build (ASAN or HWASAN) to obtain precise crash signal, faulting address, and stack.",
+            "Decompile or inspect KS_SHA3_Update and KS_Hash_Update to check for unchecked memcpy/memmove or pointer arithmetic using attacker-controlled lengths.",
+            "Add argument/state validation in JNI bridge and HMAC wrappers (e.g., check context initialization, buffer lengths) and log detailed error codes instead of hard aborting."
+          ],
+          "assumptions": [
+            "The termination label 'KS_SHA3_Update' is not guaranteed to be an OS-level crash signal but may be harness-specific.",
+            "Fuzz inputs may exercise parameter combinations that never occur in production Java code paths.",
+            "Internal crypto functions (KS_HMAC/KS_Hash_Update) follow common HMAC/SHA3 patterns but actual implementation details are unknown."
+          ],
+          "limitations": [
+            "Unable to decompile or disassemble the relevant native functions due to Ghidra MCP connection failure.",
+            "No crash signal (SIGSEGV/SIGABRT), fault address, or register context provided, so root cause cannot be determined.",
+            "No visibility into JNI parameter handling or length checks in Java_com_raonsecure_crypto_KSNative_hmac."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 4,
+          "llm_tool_calls": 10,
+          "input_tokens": 25626,
+          "output_tokens": 1648
+        }
+      }
+    ]
+  }
+}
