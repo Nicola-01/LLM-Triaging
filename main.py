@@ -282,7 +282,7 @@ def find_backtrace_apk_pairs(target_apk_dir: Path, *, apk_filter: Optional[set]=
     print_message(BLUE, "INFO", f"Found {len(results)} (folder2backtraces.txt, base.apk) pairs")
     return results
 
-def run(args):
+async def run(args):
     """Run the full assessment for all APKs in target_APK."""
     
     debug = args.debug
@@ -319,7 +319,7 @@ def run(args):
             # Extract metadata via Jadx MCP
             
             try:
-                appMetadata = asyncio.run(get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=debug))      
+                appMetadata = await get_jadx_metadata(model_name=args.model_name, verbose=args.verbose, debug=debug)  
             except Exception as e:
                 handle_model_errors(e)
    
@@ -334,7 +334,7 @@ def run(args):
         if debug:
             print_message(BLUE, "INFO", f"Starting assessment: {appname} @ {case_dir_name}")
             
-        result = asyncio.run(run_detection(apk, appMetadata, backtraces, args, debug=debug))
+        result = await run_detection(apk, appMetadata, backtraces, args, debug=debug)
         result.to_json_file(final_json)
         if debug:
             print_message(GREEN, "DONE", f"Wrote {final_json}")
@@ -387,7 +387,7 @@ def main():
         
     # --- Run the assessment ---
     
-    run(args)
+    asyncio.run(run(args))
     
     shutil.rmtree('/pyghidra_mcp_projects', ignore_errors=True)
 
