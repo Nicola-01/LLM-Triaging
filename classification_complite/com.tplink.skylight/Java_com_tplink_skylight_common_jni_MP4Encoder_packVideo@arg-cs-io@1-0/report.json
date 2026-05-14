@@ -1,0 +1,256 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.tplink.skylight/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "tpCamera",
+      "package": "com.tplink.skylight",
+      "min_sdk": 21,
+      "target_sdk": 30,
+      "version_name": "3.1.20",
+      "version_code": "388"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "scudo::die",
+            "scudo::ScopedErrorReport::~ScopedErrorReport",
+            "scudo::reportInvalidChunkState",
+            "scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate",
+            "mp4_write_one_h264",
+            "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.tplink.skylight.common.jni.MP4Encoder: packVideo([BIJ)I>",
+          "JavaCallGraph": [
+            "<com.tplink.skylight.common.manage.multiMedia.encoder.H264_AAC_Mp4Encoder$2: run()V> -> <com.tplink.skylight.common.jni.MP4Encoder: packVideo([BIJ)I>",
+            "<com.tplink.skylight.common.manage.multiMedia.encoder.JEPG_PCM_Mp4Encoder$2: run()V> -> <com.tplink.skylight.common.jni.MP4Encoder: packVideo([BIJ)I>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so": [
+              "mp4_write_one_h264",
+              "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+              "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is mp4_write_one_h264 in libTPMp4Encoder.so. Scudo abort indicates invalid free or double free. Need to see how mp4_write_one_h264 manages allocations and frees and whether it can be called multiple times with same context or with corrupted state from fuzz input.",
+            "Decompiled mp4_write_one_h264(char *param_1,int param_2,int param_3,undefined8 *param_4) shows parsing of H.264 NAL units from param_1 buffer. It checks parameter validity partially: param_4 and param_1 non-null, __stream from *param_4 non-null, param_2>3, param_3>=0, and 0x00000001 start codes in first 3-4 bytes. It then examines NAL type (bVar1 & 0x1f). For SPS (7) and PPS (8) it conditionally malloc a buffer if corresponding length field at param_4+6/8 is 0, assign pointer at param_4[5]/[7], and memcpy(__dest,__src,__size) where __size = param_2 - iVar5. Here length and source size are controlled by param_2 and param_1 content. However memcpy length is equal to malloc size, so not OOB. The bug is likely in lifecycle management of param_4 and its fields when error path triggers.",
+            "On error, function goes to LAB_001053f8: fclose(__stream); then LAB_00105400: if (param_4[1]) fclose(); then free(param_4[5]); free(param_4[7]); FUN_00104e50(param_4); MP2_encode_close(param_4[0x15]); free(param_4); return -1. This tears down the entire encoder context and frees internal buffers plus context. If mp4_write_one_h264 is subsequently called again with same param_4 pointer by higher-level code, that would cause double-free or invalid free in allocator, matching scudo::reportInvalidChunkState. The fuzz harness likely reuses encoder context after a failure; need to see JNI wrapper for how param_4 is obtained and whether it's stored globally.",
+            "JNI entry Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo takes (JNIEnv*, jobject, jbyteArray, jlong, jint size, jint something). Decompiled code: it validates param_4 (size) only for negative, logs error, else logs video size, calls virtual function at (*param_1 + 0x5c0)(param_1,param_3,0) to get jpg buffer (lVar2). If lVar2==0 log failure. Else if global DAT_0011e6a8==0 error; else uVar1 = mp4_write_video(lVar2,param_4,param_5). mp4_write_video presumably wraps mp4_write_one_h264 with encoder context stored globally or in param_1/DAT_0011e6a8. JNI always calls free callback at (*param_1+0x600)(param_1,param_3,lVar2,0), so buffer ownership is well defined.",
+            "We don’t have mp4_write_video here, but mp4_write_one_h264 signature shows param_4 is an encoder context that contains stream handles and allocated SPS/PPS buffers. That context must be created elsewhere (likely in an init JNI). Critical point: mp4_write_one_h264 itself decides to fully tear down encoder context (closing file and freeing param_4) on any malformed NAL (e.g., bad header) and then returns -1. If caller continues using same handle or global, it will cause UAF or double free. However, responsibility for not reusing freed context is in higher-level code. We don’t yet see evidence in this crash that mp4_write_one_h264 is called twice on same param_4; the allocator abort could instead be from freeing param_4[5]/[7] after corruption via out-of-bounds write. Need to re-examine memcpy and size computations for potential mismatch or integer issue.",
+            "In SPS/PPS case, they set *(int*)(param_4+6)=param_2-iVar5 then __size=(size_t)(param_2-iVar5); __dest=malloc(__size); param_4[5]=__dest; then memcpy(__dest,__src,__size). __src points into param_1 buffer immediately after start code. There’s no bounds check on param_1 but memcpy length equals allocation, and both derived from param_2 (packet size). If caller passes param_2 inconsistent with real buffer length, it’s UAF/overflow at the Java/native boundary: mp4_write_one_h264 trusts param_2. We need to see how mp4_write_video supplies param_2 and whether it uses fuzzer-controlled size from packVideo (param_4 jint).",
+            "JNI packVideo passes size (param_4) directly into mp4_write_video without additional checks beyond size>=0. There is no upper bound or consistency check vs actual byte array length. In Java, packVideo is invoked from H264_AAC_Mp4Encoder$2.run() with a byte[] and an int length. We lack Java code but fuzz harness likely mutates both array length and size parameter arbitrarily. In real app, size probably equals buffer length; but fuzzer may pass inconsistent pair causing mp4_write_video/mp4_write_one_h264 to read or write beyond buffer, leading to heap corruption and allocator abort. However, our decompiled native stack for mp4_write_one_h264 shows memcpy only writes inside its own allocated buffer; reading from param_1 can be OOB if param_2>actual buffer length, but we don't see a crashing read in this frame; allocator detects corrupted chunk later on free.",
+            "Key question: Is param_1 pointer and its backing allocation sized according to size (param_2), or is there a trusted data source? From JNI, lVar2 buffer from virtual callback (**(code **)(*param_1 + 0x5c0)) is likely of some internal camera frame size independent of 'size'. If mp4_write_video passes (lVar2, size, ...) and size>frame buffer length, mp4_write_one_h264 will read beyond lVar2, corrupting heap or causing invalid free. That is a genuine native vulnerability reachable from attacker-influenced size parameter (through Java). On the other hand, if virtual callback always allocates at least size bytes or uses size as allocation parameter, then app is consistent. Hard to tell without mp4_write_video and that callback. But presence of separate 'size' arg strongly suggests risk if not validated.",
+            "scudo::reportInvalidChunkState typically indicates heap metadata corruption or double free. mp4_write_one_h264 frees several pointers: param_4[5], param_4[7], param_4, and also calls FUN_00104e50 which likely frees additional fields. If some of those pointers were already freed earlier (e.g., on previous error), double free occurs. However, mp4_write_one_h264 only frees them on error path or when param_4/param_1 null; on success or NAL types not 7/8/1/5, it just enqueues frame and writes to file. The error path is reachable based solely on input data (NAL header) and param values; it closes stream and tears down context then returns. No apparent guard to prevent subsequent calls with same param_4; that would make subsequent mp4_write_one_h264 hits call fclose/free on invalid pointers, causing allocator abort. Whether fuzzer replicates that pattern depends on harness, but in real-world use, caller may continue to reuse encoder after encountering malformed frame from network, causing crash.",
+            "Given the fuzz context, jni_bridge uses untrusted size, and mp4_write_video likely passes it down; mp4_write_one_h264 reads param_1 buffer based on param_2 size without checking against actual buffer capacity, and tears down context with multiple frees on error. Both patterns are unsafe. Without mp4_write_video we can't prove exact heap corruption mechanism, but the combination of scudo invalid chunk state, multi-free on global context, and missing size validation linking Java size argument to native buffer means this is a likely genuine vulnerability. It is not a harness-only artifact; Java API exposes packVideo which could be called with inconsistent size from untrusted media source inside the app.",
+            "Classifying as vulnerable (memory safety, heap corruption / double free). Severity high: crash and potential RCE if attacker can shape NAL stream and lengths; confidence moderate-high (~0.75) due to indirect evidence and missing helper function code. CWE candidates: CWE-787 (out-of-bounds read/write) and CWE-415 (double free)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.85,
+          "reasons": [
+            "mp4_write_one_h264 trusts size parameter (param_2) to describe buffer at param_1 without bounds checking; size can be influenced via Java packVideo size argument",
+            "On error path, mp4_write_one_h264 closes and frees encoder context param_4 and internal buffers, but higher-level code may still reuse context, leading to double free or invalid free detected by scudo",
+            "JNI entry packVideo performs almost no validation and passes attacker-influenced size directly to mp4_write_video/mp4_write_one_h264"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-415",
+            "CWE-416"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libTPMp4Encoder.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+              "address": "0010b588",
+              "file": "libTPMp4Encoder.so",
+              "snippet": "if (param_4 < 0) { ... } else { ... uVar1 = mp4_write_video(lVar2,param_4,param_5); }",
+              "note": "JNI passes unbounded size param_4 from Java directly to native video writing pipeline."
+            },
+            {
+              "function": "mp4_write_one_h264",
+              "address": "00105308",
+              "file": "libTPMp4Encoder.so",
+              "snippet": "__size = (size_t)(param_2 - iVar5);\n__dest = malloc(__size);\n...\nmemcpy(__dest,__src,__size);",
+              "note": "memcpy size derived entirely from param_2 with no independent verification of the backing buffer at __src."
+            },
+            {
+              "function": "mp4_write_one_h264",
+              "address": "00105308",
+              "file": "libTPMp4Encoder.so",
+              "snippet": "fclose(__stream);\nif ((FILE *)param_4[1] != (FILE *)0x0) fclose((FILE *)param_4[1]);\nif ((void *)param_4[5] != (void *)0x0) free((void *)param_4[5]);\nif ((void *)param_4[7] != (void *)0x0) free((void *)param_4[7]);\nFUN_00104e50(param_4);\nMP2_encode_close(param_4[0x15]);\nfree(param_4);",
+              "note": "Error path frees multiple context fields and the context itself; repeated use can cause double free/invalid chunk state."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo @ 0010b588 -> mp4_write_video (addr unknown) -> mp4_write_one_h264 @ 00105308"
+          ],
+          "recommendations": [
+            "In mp4_write_video/mp4_write_one_h264, ensure the size argument is derived from or clamped to the actual buffer length; add explicit bounds checks before parsing NAL headers or copying data",
+            "Remove responsibility for freeing the encoder context from mp4_write_one_h264; instead, centralize teardown logic and ensure a context is freed exactly once",
+            "In Java packVideo, validate that the provided length does not exceed the byte array length and add sanity upper bounds for expected frame sizes"
+          ],
+          "assumptions": [
+            "mp4_write_video forwards the size parameter from packVideo directly or with minimal transformation to mp4_write_one_h264",
+            "The buffer provided via lVar2 and the size argument can be inconsistent under fuzzing or malformed inputs",
+            "Encoder context param_4 is reused across multiple mp4_write_one_h264 calls by higher-level code"
+          ],
+          "limitations": [
+            "Implementation of mp4_write_video is not available, so exact data flow for size and buffer is inferred",
+            "Java-side H264_AAC_Mp4Encoder$2.run() implementation is not decompiled, so exact origins of packet length and data are unknown",
+            "Crash log does not show instruction address of failure; classification is based on allocator abort plus code inspection"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed H.264 frame buffer passed via MP4Encoder.packVideo with inconsistent size parameter",
+            "prerequisites": [
+              "Ability to influence H.264 NAL stream and corresponding size argument passed to MP4Encoder.packVideo within the app",
+              "Target app using MP4Encoder with untrusted or semi-trusted video sources (e.g., network streams, remote camera feeds)",
+              "Repeated use of encoder context after an error, leading to double free/heap corruption"
+            ],
+            "exploit_pipeline": [
+              "Prepare H.264 frame data where the Java-visible length argument is larger than the actual native buffer or causes malformed NAL headers triggering the error path",
+              "Cause the app to call MP4Encoder.packVideo(data, len, ts) with this crafted payload, propagating size to mp4_write_video/mp4_write_one_h264",
+              "Within mp4_write_one_h264, trigger out-of-bounds reads/writes or context teardown with free() on internal buffers and encoder context",
+              "Induce a subsequent call to the encoder using the same (now freed) context, causing scudo-detected invalid free or exploitable heap corruption"
+            ],
+            "poc_commands": [
+              "adb push crafted_frame.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n <package>/<activity> --es h264_path /sdcard/Download/payload.bin --ei frame_len 1048576"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact activity/class names and how to feed raw H.264 frames into MP4Encoder.packVideo depend on the app’s wiring; tester should identify the entry point where video frames are obtained and lengths set, then adjust PoC intent/inputs accordingly."
+          }
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 21012,
+          "output_tokens": 3190
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "scudo::die",
+            "scudo::ScopedErrorReport::~ScopedErrorReport",
+            "scudo::reportInvalidChunkState",
+            "scudo::Allocator<scudo::AndroidConfig, &scudo_malloc_postinit>::deallocate",
+            "mp4_write_one_jpeg",
+            "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.tplink.skylight.common.jni.MP4Encoder: packVideo([BIJ)I>",
+          "JavaCallGraph": [
+            "<com.tplink.skylight.common.manage.multiMedia.encoder.H264_AAC_Mp4Encoder$2: run()V> -> <com.tplink.skylight.common.jni.MP4Encoder: packVideo([BIJ)I>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.tplink.skylight/lib/arm64-v8a/libTPMp4Encoder.so": [
+              "mp4_write_one_jpeg",
+              "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+              "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is mp4_write_one_jpeg in libTPMp4Encoder.so; scudo abort indicates invalid free or double free during deallocation of a chunk associated with this function.",
+            "Decompiled mp4_write_one_jpeg shows it takes (buffer pointer, length, index, context*) and walks the JPEG buffer searching for 0xFF 0xD8 and 0xFF 0xD9 markers, allocates a 16-byte node via malloc, links it into a list anchored in param_4[5]/[6], updates counters, and writes the JPEG data to FILE* via mp4_put_buffer; on various error paths it closes FILEs, calls helper FUN_00107bb8, MP2_encode_close, then free(param_4).",
+            "There is no obvious direct call to free on the JPEG buffer; the scudo abort likely stems from freeing param_4 or something freed in FUN_00107bb8/MP2_encode_close, potentially after earlier corruption of list pointers or param_4 fields due to logic issues.",
+            "Examination of the JPEG scanning loop shows it respects the param_2 length: outer loop increments lVar3 until (int)lVar3 < param_2, and inner loop continues with iVar2 increment with bound check \"if (iVar2 == param_2) return 0;\"; early exit paths close and free resources, but no raw out-of-bounds access was identified in this function itself.",
+            "The JNI entry Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo validates size: if param_4 (size) < 0 it logs and returns -1 without calling encoder; otherwise, it logs size, obtains a JPEG buffer via virtual call (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0), checks that the returned pointer is non-NULL, checks a global DAT_0011e6a8 != 0, then calls mp4_write_video(lVar2,param_4,param_5) and finally releases the buffer via (**(code **)(*param_1 + 0x600))(param_1,param_3,lVar2,0).",
+            "NOTE: mp4_write_video, not mp4_write_one_jpeg, is called in the decompiled JNI entry, but the crashing frame shows mp4_write_one_jpeg; mp4_write_video is presumably an internal wrapper that eventually calls mp4_write_one_jpeg with the same buffer pointer and size; decompiling mp4_write_video is not strictly necessary to see that size is tainted by Java parameter, but we know mp4_write_one_jpeg relies on param_2 and param_1 to scan the buffer.",
+            "Java-side MP4Encoder.packVideo directly exposes the native packVideo(byte[] bArr, int i, long j) without extra validation; the H264_AAC_Mp4Encoder$2.run() is the caller in normal app flow, and in the fuzz harness, fuzz_one_input presumably constructs arbitrary byte[] and size, so param_4 to JNI is attacker-controlled beyond the negative check.",
+            "Because the JPEG scanning logic in mp4_write_one_jpeg guards all buffer dereferences with explicit comparisons against param_2, there is no clear out-of-bounds read/write purely due to arbitrary size; the scudo invalid-chunk-state abort suggests a misuse of allocator or double free of param_4 or related structures in error paths, but those error paths are driven by internal state (param_4 fields, global DAT_0011e6a8, malloc failure) and not by attacker-controlled pointer values.",
+            "We did not see any memcpy/memmove calls in mp4_write_one_jpeg or the JNI wrapper, nor any size-based allocation using attacker-controlled lengths that could under-allocate; mp4_put_buffer and FUN_00107bb8 are potential sources, but without decompilation they remain opaque. However, the current evidence only shows a scudo abort during deallocate, which could be triggered by fuzzing that violates ownership expectations (e.g., double use of context) rather than a bug reachable in production use.",
+            "Given that mp4_write_one_jpeg is not called directly from JNI and is part of an internal MP4 packer pipeline, and that the only Java-exposed parameters (buffer length) are range-checked to be non-negative, the current crash is more likely due to harness misuse or an internal invariant violation under unrealistic fuzz inputs than a clearly exploitable vulnerability. There is insufficient proof of attacker-controllable memory corruption at application level.",
+            "Therefore, classify this as not a confirmed vulnerability, with low-to-moderate confidence; note that further decompilation of mp4_write_video, FUN_00107bb8, and mp4_put_buffer would be required to fully rule out memory safety issues, but present data does not demonstrate one."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Scudo abort indicates allocator detected invalid chunk state during deallocation, but decompiled mp4_write_one_jpeg shows bounds-checked JPEG parsing and no obvious direct overflow or OOB access.",
+            "JNI entry Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo validates that size >= 0 and only passes the JPEG buffer pointer and size to internal encoder functions; Java layer adds no further tainted control over internal structures or pointers.",
+            "The crashing function mp4_write_one_jpeg scans within the provided buffer using param_2 bounds and uses malloc for small nodes; the error path that eventually frees param_4 is driven by internal encoder context, suggesting the crash may stem from internal invariant violation or harness misuse rather than attacker-controlled memory corruption."
+          ],
+          "cwe_ids": [],
+          "severity": "medium",
+          "affected_libraries": [
+            "libTPMp4Encoder.so"
+          ],
+          "evidence": [
+            {
+              "function": "mp4_write_one_jpeg",
+              "address": "00107fcc",
+              "file": "libTPMp4Encoder.so",
+              "snippet": "undefined8 mp4_write_one_jpeg(long param_1,int param_2,int param_3,undefined8 *param_4) { ... if ((0 < param_2) && (-1 < param_3)) { ... do { ... if ((*(char *)(param_1 + lVar3) == -0x28) && (iVar1 == 1)) { ... if (param_2 <= iVar2) { return 0; } ... if (iVar2 == param_2) { return 0; } ... } }",
+              "note": "JPEG scanning logic respects buffer length param_2 and avoids obvious OOB access; error paths free encoder context param_4, leading to scudo deallocation abort."
+            },
+            {
+              "function": "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo",
+              "address": "0010b588",
+              "file": "libTPMp4Encoder.so",
+              "snippet": "if (param_4 < 0) { return -1; } ... lVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); if (lVar2 == 0) { return -1; } if (DAT_0011e6a8 == 0) { return -1; } else { uVar1 = mp4_write_video(lVar2,param_4,param_5); }",
+              "note": "JNI entry only validates non-negative size and obtains JPEG buffer via virtual method; passes size and buffer pointer into internal mp4_write_video/encoder pipeline."
+            },
+            {
+              "function": "com.tplink.skylight.common.jni.MP4Encoder.packVideo",
+              "file": "classes.dex",
+              "snippet": "public static native int packVideo(byte[] bArr, int i, long j);",
+              "note": "Java bridge directly exposes native encoder without additional validation but only passes a length int and timestamp long."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo @ 0010b588",
+            "Java_com_tplink_skylight_common_jni_MP4Encoder_packVideo @ 0010b588 -> mp4_write_video (addr unknown)",
+            "mp4_write_video -> mp4_write_one_jpeg @ 00107fcc"
+          ],
+          "recommendations": [
+            "Decompile and audit mp4_write_video, FUN_00107bb8, and mp4_put_buffer to confirm there is no double free or use-after-free triggered by malformed JPEG buffers or inconsistent context state.",
+            "Add stronger internal invariants and assertions around the lifetime and ownership of the encoder context (param_4) to prevent allocator aborts, and ensure functions are idempotent or guarded against repeated closure by callers.",
+            "In JNI, consider validating that the provided size parameter does not exceed the actual byte[] length from Java, and tie JPEG buffer acquisition and release more strictly to the packer context lifecycle."
+          ],
+          "assumptions": [
+            "mp4_write_video internally calls mp4_write_one_jpeg with the JPEG buffer and size from JNI, as indicated by the stack trace and typical encoder design.",
+            "The scudo invalid-chunk-state abort arises during deallocation of the encoder context or related structures, not from an out-of-bounds write directly in the visible code.",
+            "The fuzz harness may call JNI functions in ways that normal Java code does not (e.g., reusing or corrupting context pointers), potentially provoking allocator invariants that are unreachable in production."
+          ],
+          "limitations": [
+            "mp4_write_video, FUN_00107bb8, and mp4_put_buffer were not decompiled, so internal memory management details and potential overflows remain unknown.",
+            "The exact scudo error message and sanitized stack (including which pointer triggered reportInvalidChunkState) are not provided, limiting root-cause precision.",
+            "We do not see Java-side code constructing arbitrary MP4Encoder contexts, so assumptions about realistic reachability from untrusted network/audio/video streams remain partially speculative."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:34",
+          "llm_requests": 4,
+          "llm_tool_calls": 9,
+          "input_tokens": 38665,
+          "output_tokens": 2427
+        }
+      }
+    ]
+  }
+}

@@ -16,7 +16,12 @@ from MCPs.geminiCLI import GeminiCliMaxRetry, query_gemini_cli
 from MCPs.jadxMCP import make_jadx_server
 from MCPs.prompts.Shimming_prompts import SHIMMING_VULNDECT_SYSTEM_PROMPT
 from MCPs.prompts.VulnDetection_prompt import DETECTION_SYSTEM_PROMPT
+from MCPs.prompts.VulnDetection_prompt_BASE import DETECTION_SYSTEM_PROMPT_BASE
 from MCPs.prompts.VulnDetection_prompt_WITHOUT_CG import DETECTION_SYSTEM_PROMPT_WITOUT_CG
+from MCPs.prompts.VulnDetection_prompt_BASE_PoC import DETECTION_SYSTEM_PROMPT_BASE_PoC
+from MCPs.prompts.VulnDetection_prompt_BASE_EVIDENCE import DETECTION_SYSTEM_PROMPT_BASE_EVIEDENCE
+from MCPs.prompts.VulnDetection_prompt_BASE_JCG import DETECTION_SYSTEM_PROMPT_BASE_JCG
+
 from MCPs.shimming_agent import oss_model
 from MCPs.VulnResult import AnalysisResult, AnalysisResults, Statistics, VulnResult
 from ghidra_helper_functions import *
@@ -25,6 +30,8 @@ from .get_agent import get_agent
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from MCPs.CrashSummary import Crashes
 from utils import *
+
+from pydantic_ai import UsageLimitExceeded, capture_run_messages
 
 # Shered dir with the ghidra mcp bridge
 SHARED_DIR = os.path.join(tempfile.gettempdir(), "mcp_ghidra_share")
@@ -61,7 +68,7 @@ def startGhidraWith(libs: List[str], debug: bool = False):
     
     sorted_libs = sorted(libs, key=lambda s: s.lower())
             
-    openGhidraGUI(sorted_libs, timeout=60*(len(sorted_libs)+2), debug=debug)
+    openGhidraGUI(sorted_libs, timeout=3600*(len(sorted_libs)+2), debug=debug)
 
     with open(FILE_AVAILABLE, "w", encoding="utf-8") as f:
         libs = "\n".join(sorted_libs)
@@ -107,22 +114,22 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
             
            
         # # Early skip if the Java call graph is empty     
-        # if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
-        #     vuln = VulnResult(
-        #         chain_of_thought = [],
-        #         is_vulnerable = 0,
-        #         confidence = 1.0,
-        #         reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
-        #         cwe_ids = [],
-        #         severity = None,
-        #         affected_libraries = libs,
-        #         evidence = [],
-        #         recommendations = [],
-        #         assumptions = [],
-        #         limitations = []
-        #     )
-        #     results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
-        #     continue
+        if not (crash.JavaCallGraph is None) and len(crash.JavaCallGraph) == 0:
+            vuln = VulnResult(
+                chain_of_thought = [],
+                is_vulnerable = 0,
+                confidence = 1.0,
+                reasons = [f"The {crash.JNIBridgeMethod} method is not accessible from Java code."],
+                cwe_ids = [],
+                severity = None,
+                affected_libraries = libs,
+                evidence = [],
+                recommendations = [],
+                assumptions = [],
+                limitations = []
+            )
+            results.append(AnalysisResult(crash=crash, assessment=vuln, statistics=Statistics()))
+            continue
                 
         if last_libs_open is None or set(last_libs_open) != set(libs):
             startGhidraWith(libs,debug=debug)
@@ -142,12 +149,36 @@ async def mcp_vuln_detection(model_name: str, crashes : Crashes, timeout: int = 
 
         if agent:
             async with agent:
-                try:
-                    resp = await agent.run(query)
-                    vuln = resp.output
-                except Exception as e:
-                    print_message(RED, "ERROR", str(e))
-                    continue
+                # Usiamo il context manager ufficiale
+                with capture_run_messages() as messages:
+                    try:
+                        resp = await agent.run(query)
+                        vuln = resp.output
+                    except UsageLimitExceeded:
+                        print_message(YELLOW, "WARNING", "Request limit reached, attempting fallback summary.")
+                        
+                        # Creiamo un agente pulito (senza strumenti JADX/Ghidra) per forzare l'output
+                        fallback_agent = get_agent(
+                            DETECTION_SYSTEM_PROMPT if (crash.JavaCallGraph is not None and len(crash.JavaCallGraph) > 0) else DETECTION_SYSTEM_PROMPT_WITOUT_CG, 
+                            VulnResult, 
+                            [], # Nessun MCP server qui!
+                            model_name=model_name
+                        )
+                        
+                        try:
+                            # Passiamo la cronologia intercettata ufficialmente
+                            resp = await fallback_agent.run( 
+                                "You've reached the request limit for this session. Based on the history, please provide the final assessment in the specified format.",
+                                message_history=messages
+                            )
+                            vuln = resp.output
+                        except Exception as inner_e:
+                            print_message(RED, "ERROR", f"Fallback failed: {str(inner_e)}")
+                            continue
+                            
+                    except Exception as e:
+                        print_message(RED, "ERROR", str(e))
+                        continue
                 
             usage = resp.usage()
             statistics=Statistics(

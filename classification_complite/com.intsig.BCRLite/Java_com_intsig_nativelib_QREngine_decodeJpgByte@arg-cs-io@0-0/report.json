@@ -1,0 +1,157 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "0x7f1100df",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "stream_gets",
+          "StackTrace": [
+            "stream_gets",
+            "??",
+            "ms_decode_buf_pnm",
+            "MsDecodeBuffer",
+            "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "MsDecodeBuffer",
+              "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+              "Java_com_intsig_nativelib_QREngine_decodeJpgByte"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "MsDecodeBuffer"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so": [
+              "stream_gets",
+              "ms_decode_buf_pnm",
+              "MsDecodeBuffer"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libscanner.so": [
+              "MsDecodeBuffer"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is stream_gets with process termination label 'stream_gets', suggesting an internal bounds check or assertion failed when reading a line into a buffer.",
+            "Library map shows stream_gets and ms_decode_buf_pnm and MsDecodeBuffer implemented in libmainstone.so; MsDecodeBuffer is also exposed via other libs and is the app-level decoding entry used by QREngine JNI.",
+            "Ghidra decompilation for MsDecodeBuffer in the current context shows it is just an indirect call through PTR_MsDecodeBuffer_0068aed8; therefore actual implementation is elsewhere or resolved at runtime, but the call graph from the crash indicates that implementation ultimately calls ms_decode_buf_pnm then stream_gets.",
+            "We could not directly decompile stream_gets or ms_decode_buf_pnm due to symbol lookup issues, but the naming and crash function strongly imply stream_gets is a custom fgets/gets‑style helper operating on an in‑memory stream that reads a line into a fixed buffer, historically a classic source of overflows if line length is not bounded by the destination size.",
+            "The stack trace indicates the path: Java_com_intsig_nativelib_QREngine_decodeJpgByte -> MsDecodeBuffer -> ms_decode_buf_pnm -> stream_gets. QREngine_decodeJpgByte is a JNI bridge that receives arbitrary JPEG bytes from Java (in production: camera or gallery input; in fuzzing: arbitrary attacker‑controlled bytes). These bytes are then processed by MsDecodeBuffer, which decodes into some PNM buffer via ms_decode_buf_pnm. The failing stream_gets call is therefore operating on data that is entirely derived from supplied image bytes.",
+            "Even though we do not see the exact memcpy/length expressions, the likely pattern is that ms_decode_buf_pnm prepares a text PNM header or line‑oriented representation and then uses stream_gets to parse lines from that buffer. If stream_gets does not enforce a maximum line length or size check, a crafted input that produces an extremely long line (or missing newline) can overflow the fixed-size destination buffer in stream_gets, causing memory corruption and crash.",
+            "Alternatively, stream_gets may internally check available buffer size and abort when exceeded; the termination reason 'stream_gets' suggests a fail-fast abort rather than SIGSEGV. However, the triage pipeline treats this as a crash, and regardless of whether the overflow is prevented by an abort, an attacker-controlled input can force a decoding abort/DoS at minimum. The more likely scenario, given the classic naming, is that it uses unsafe gets-like semantics, which would be a high-severity memory safety bug.",
+            "This code path is clearly reachable from untrusted input in the real app: any QR decode on untrusted image bytes flows through QREngine_decodeJpgByte to MsDecodeBuffer and its backend decoders. No indication of strong bounds checks or validation exists in the limited snippets we can see, and the indirection via PTR_MsDecodeBuffer_0068aed8 does not sanitize data; it only chooses which decoder implementation to call.",
+            "Given the evidence, we infer a likely input-dependent bug in the stream_gets/ms_decode_buf_pnm decoding pipeline, potentially an out-of-bounds write/read on a stack/heap buffer triggered by crafted PNM-like content derived from a malformed JPEG. This qualifies as a likely vulnerability: attacker-controlled image data can trigger unsafe parsing behavior in native code, causing at least a denial of service and possibly exploitable memory corruption depending on how stream_gets is implemented.",
+            "Confidence is not maximal (not 0.9+) because we do not have decompiled code for stream_gets or explicit proof of overflow rather than a safe abort, but path from attacker input to low-level parser crash is strong, so we rate it around 0.7 and severity as high due to probable memory corruption in a native decoder."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Crash occurs in native image decoding path reachable from JNI entry Java_com_intsig_nativelib_QREngine_decodeJpgByte, which processes attacker-controlled JPEG bytes.",
+            "Call stack shows ms_decode_buf_pnm -> stream_gets, indicating a line-based parser over in-memory streams; such helpers are classically vulnerable if they do not bound line length to buffer size.",
+            "MsDecodeBuffer is a thin indirect wrapper, so any bounds checking must occur in underlying decoder functions; no evidence of validation between untrusted data and stream_gets suggests a likely memory safety or at least input-triggered abort condition.",
+            "Termination reason named after stream_gets implies the function hit a fatal error while parsing, consistent with overflowing or exceeding internal limits based on input content."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-20"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libscanner.so"
+          ],
+          "evidence": [
+            {
+              "function": "MsDecodeBuffer",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so",
+              "snippet": "void MsDecodeBuffer(void)\n{\n  (*(code *)PTR_MsDecodeBuffer_0068aed8)();\n  return;\n}",
+              "note": "MsDecodeBuffer is a thin indirect call into a decoder implementation that ultimately calls ms_decode_buf_pnm and stream_gets, with no validation in this wrapper."
+            },
+            {
+              "function": "stream_gets",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so",
+              "note": "Top frame and process termination tag indicate failure inside custom stream_gets when decoding image-derived data."
+            },
+            {
+              "function": "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so",
+              "note": "JNI bridge exposes decoding of arbitrary JPEG bytes from Java into the native MsDecodeBuffer pipeline."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_QREngine_decodeJpgByte -> MsDecodeBuffer -> ms_decode_buf_pnm -> stream_gets"
+          ],
+          "recommendations": [
+            "Reverse-engineer and audit stream_gets and ms_decode_buf_pnm implementations for unsafe line reading into fixed-size buffers; add explicit length parameters and bounds checks before copying.",
+            "Introduce robust input validation and size limits in MsDecodeBuffer/JNI layer so that malformed or excessively large image-derived streams cannot cause overlong lines or parser failures.",
+            "Add fuzzing and ASAN-instrumented builds directly on libmainstone.so decoders to confirm and precisely locate any out-of-bounds accesses in stream_gets."
+          ],
+          "assumptions": [
+            "stream_gets is a custom line-reading helper that either lacks proper bounds checking or aborts on length violations.",
+            "JPEG bytes supplied to Java_com_intsig_nativelib_QREngine_decodeJpgByte are attacker-controlled in realistic scenarios (e.g., scanning arbitrary QR codes from untrusted images).",
+            "The same decoding pipeline and stream_gets implementation are used in production builds, not only in the fuzzing harness."
+          ],
+          "limitations": [
+            "Direct decompilation of stream_gets and ms_decode_buf_pnm was not available, so exact buffer sizes and copy operations could not be inspected.",
+            "The termination reason does not clearly distinguish between a safe abort on oversize input vs. a true memory corruption; assessment relies on typical patterns for such helpers.",
+            "No Java-side call graph was provided to confirm all usage patterns of QREngine_decodeJpgByte beyond the fuzz harness."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or malformed image bytes passed to QREngine.decodeJpgByte JNI entry",
+            "prerequisites": [
+              "Ability to supply arbitrary or crafted JPEG/bitmap data to the QR decoding functionality in the target app.",
+              "Target build using the same native libraries (libmainstone.so/libQREngine.so) without additional sandboxing or mitigations beyond standard Android.",
+              "Potentially repeated attempts to identify exact payload that maximizes line length or malformed header content feeding into stream_gets."
+            ],
+            "exploit_pipeline": [
+              "Craft an image whose decoded/interpreted content for the internal PNM/stream layer includes an excessively long line or missing newline so that stream_gets reads more data than the destination buffer can hold.",
+              "Deliver this crafted image to the vulnerable app via camera input, gallery import, or another feature that calls QREngine_decodeJpgByte.",
+              "When the app invokes the JNI method, MsDecodeBuffer passes the image bytes down to ms_decode_buf_pnm, which uses stream_gets on the attacker-influenced stream.",
+              "Trigger the vulnerable stream_gets call, causing either an out-of-bounds write/read or a fatal abort, leading to process crash and potential memory corruption in native code.",
+              "Under favorable conditions (knowledge of memory layout, repeated attempts), refine the payload to attempt control over adjacent memory and explore exploit primitives such as stack smashing or heap metadata corruption."
+            ],
+            "poc_commands": [
+              "adb push crafted_qr.jpg /sdcard/Download/crafted_qr.jpg",
+              "adb shell am start -n <com.intsig.BCRLite/.SomeActivity> --es image_path /sdcard/Download/crafted_qr.jpg",
+              "# Or automate fuzzing-style repro if a test harness exists:",
+              "adb shell \"echo -n '<raw_bytes>' > /data/local/tmp/poc.jpg && /data/local/tmp/fuzz_harness /data/local/tmp/poc.jpg\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_qr.jpg"
+            ],
+            "notes": "Activity/component name and exact intent extras depend on the target app; replace placeholders with actual values discovered via AndroidManifest and runtime testing. Exploitability beyond DoS would require detailed analysis of stream_gets buffer management and surrounding memory layout."
+          }
+        },
+        "statistics": {
+          "time": "00:00:45",
+          "llm_requests": 3,
+          "llm_tool_calls": 9,
+          "input_tokens": 18731,
+          "output_tokens": 2376
+        }
+      }
+    ]
+  }
+}

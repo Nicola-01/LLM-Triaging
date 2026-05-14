@@ -1,0 +1,136 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "AhnLab V3 Mobile Plus",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_koscom_cert_ca_CANative_cmpIssue2",
+          "LibMap": {
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpIssue2"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libzkeylib.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is ks_memcpy, which is just an indirect call wrapper; next frame is _dPKIHeader (also an indirect call wrapper) and its caller cmpdec_PKIMessage contains the actual logic.",
+            "Decompiled cmpdec_PKIMessage shows ASN.1-like parsing: it calls __dSEQUENCE(param_1, auStack_3c), then uses the returned offset iVar2 into param_1, then calls _dPKIHeader(param_1 + iVar2). This suggests param_1 is a buffer and iVar2 is an offset into it based on parsed data.",
+            "If _dPKIHeader eventually calls ks_memcpy and crashes there, it is likely due to out-of-bounds read/write or length misuse within the decoded PKI header structure.",
+            "We must check whether the offset and subsequent lengths are validated: __dSEQUENCE returns uVar4; if iVar2 >= 0, they call _dPKIHeader(param_1 + iVar2). There are no explicit bounds checks against the total buffer length; the function relies entirely on __dSEQUENCE and _dPKIHeader to respect limits.",
+            "We do not see the implementation behind the function pointer PTR__dPKIHeader_00180958; we only know it is reached via cmpdec_PKIMessage. However, the crash in ks_memcpy strongly suggests that inside that implementation, a memcpy-equivalent is using lengths derived from decoded/parsed data, which in a protocol parser is attacker-controlled (CMP/PKI message body).",
+            "Next, the JNI entry point Java_com_koscom_cert_ca_CANative_cmpIssue2 shows it obtains two jbyteArray-like arguments via JNI GetByteArrayElements equivalents: (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) and similarly for param_4. It then calls CMP_Certificate_2(uVar2, uVar3, param_5, param_6).",
+            "CMP_Certificate_2 is almost certainly where cmpdec_PKIMessage is ultimately called on attacker-provided buffers, based on naming. Java passes the raw arrays with no visible bounds or format validation; the native side is responsible for decoding.",
+            "Because CMP/PKI messages are network- or user-provided in typical certificate APIs, and because the harness is a JNI fuzzer likely invoking this with arbitrary data, the bug is realistically reachable with untrusted input in production (e.g., malformed certificate/CMP response).",
+            "We have direct evidence of: (1) indirection into a buffer using an offset derived from parsed data, (2) lack of explicit size/bound validation in cmpdec_PKIMessage, and (3) failure in ks_memcpy called by the header decoder. This pattern is characteristic of out-of-bounds memory access due to malformed length fields (CWE-787 / CWE-125).",
+            "We do not see explicit sanitizer abort text, but the termination at ks_memcpy indicates the memcpy implementation (from another lib) is executing when the crash occurs; thus, the vulnerability is in the app code that set up the memcpy arguments. The harness is not obviously passing impossible pointers (JNI obtains elements via standard JNI calls).",
+            "Given the ASN.1 decoding context and that CMP_Certificate_2/cmpdec_PKIMessage are protocol parsers, this is a likely genuine memory safety vulnerability exploitable for crash (DoS) and potentially more depending on allocation/bounds in _dPKIHeader's implementation, which we cannot see. Severity is at least high due to memory corruption potential.",
+            "Because we cannot directly see the body of _dPKIHeader (indirect via function pointer), we infer its behavior from naming and crash location. Confidence is slightly below 0.9 but still strong (around 0.8)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.8,
+          "reasons": [
+            "Crash occurs in ks_memcpy indirectly called from _dPKIHeader during ASN.1-like PKI message parsing, indicating unsafe memcpy in header decoder.",
+            "cmpdec_PKIMessage uses an offset returned from __dSEQUENCE directly as pointer arithmetic into an attacker-controlled buffer without explicit bounds checks.",
+            "JNI entry Java_com_koscom_cert_ca_CANative_cmpIssue2 passes Java byte arrays directly to CMP_Certificate_2 with no validation, so malformed input can reach cmpdec_PKIMessage and _dPKIHeader."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libCertJavaClient.so"
+          ],
+          "evidence": [
+            {
+              "function": "ks_memcpy",
+              "address": "0010f4e0",
+              "file": "libCertJavaClient.so",
+              "snippet": "void ks_memcpy(void) { (*(code *)PTR_ks_memcpy_001804e8)(); }",
+              "note": "Wrapper around memcpy-like implementation where crash occurs."
+            },
+            {
+              "function": "_dPKIHeader",
+              "address": "0010fdc0",
+              "file": "libCertJavaClient.so",
+              "snippet": "void _dPKIHeader(void) { (*(code *)PTR__dPKIHeader_00180958)(); }",
+              "note": "Indirect call into header decoder that eventually reaches ks_memcpy."
+            },
+            {
+              "function": "cmpdec_PKIMessage",
+              "address": "00125c08",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar4 = __dSEQUENCE(param_1,auStack_3c);\nif ((int)uVar4 >= 0) {\n  uVar4 = _dPKIHeader(param_1 + (int)uVar4);\n  ...\n}",
+              "note": "Uses offset from __dSEQUENCE as pointer into buffer without explicit bounds checks, feeding header decoder."
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpIssue2",
+              "address": "00115358",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n...\niVar1 = CMP_Certificate_2(uVar2,uVar3,param_5,param_6);",
+              "note": "JNI bridge obtains raw byte arrays from Java and passes them directly to certificate/CMP processing without validation."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_koscom_cert_ca_CANative_cmpIssue2 @ 00115358",
+            "CMP_Certificate_2 @ unknown",
+            "cmpdec_PKIMessage @ 00125c08",
+            "_dPKIHeader @ 0010fdc0",
+            "ks_memcpy @ 0010f4e0"
+          ],
+          "recommendations": [
+            "Audit and harden _dPKIHeader and related ASN.1/CMP decoding routines to enforce strict bounds checking on all length and offset fields before memcpy/memmove calls.",
+            "Ensure cmpdec_PKIMessage verifies that offsets from __dSEQUENCE and subsequent parsed lengths do not exceed the overall buffer size passed from JNI.",
+            "Add robust fuzzing and negative testing for CMP/PKI parsing paths with sanitizers enabled to confirm no further out-of-bounds or memcpy misuse remains."
+          ],
+          "assumptions": [
+            "CMP_Certificate_2 invokes cmpdec_PKIMessage or another decoder path that leads to _dPKIHeader, consistent with naming and crash trace.",
+            "Input buffers provided via Java byte arrays can be influenced by remote or untrusted sources in realistic app usage.",
+            "ks_memcpy’s underlying implementation behaves like standard memcpy and the crash is due to invalid src/dst/length set up by app code rather than allocator anomalies."
+          ],
+          "limitations": [
+            "Implementation behind PTR__dPKIHeader_00180958 is not visible, so exact memcpy arguments and precise corruption type are inferred.",
+            "The exact Java call site(s) and data origin for CANative.cmpIssue2 are not inspected here, so attacker reachability is reasoned from typical certificate/CMP workflows.",
+            "No direct view of CMP_Certificate_2, so the intermediate call structure between JNI and cmpdec_PKIMessage is partly inferred."
+          ]
+        },
+        "statistics": {
+          "time": "00:02:03",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 31632,
+          "output_tokens": 1925
+        }
+      }
+    ]
+  }
+}

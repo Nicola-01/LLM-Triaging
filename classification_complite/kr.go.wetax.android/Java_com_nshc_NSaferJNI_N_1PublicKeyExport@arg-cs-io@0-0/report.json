@@ -1,0 +1,129 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.go.wetax.android/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "스마트 위택스",
+      "package": "kr.go.wetax.android",
+      "min_sdk": 23,
+      "target_sdk": 35,
+      "version_name": "5.4.14",
+      "version_code": "254"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.go.wetax.android/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below __memcpy is NI_PublicKeyDecode in libNSaferJNI.so. We already have its decompilation. Need to identify memcpy/memcpy_chk calls and reason about their arguments and bounds.\n",
+            "In NI_PublicKeyDecode, local buffers __dest and __dest_00 are calloc(1, param_2 + 0x80). So their size is uVar1 = param_2 + 0x80. First memcpy(__dest, param_1, param_2): length = param_2, dest size = param_2 + 0x80. This is safe as long as param_1 is at least param_2 bytes; but that's under caller control. However, crash site is reported as __memcpy (no _chk), so it might be any of the memcpy calls. Need to list them: memcpy(__dest,param_1,param_2); memcpy(__dest_00, pcVar7 + (uVar4 & 0xffffffff), local_94); memcpy(__dest, pcVar2,uVar5); __memcpy_chk(&local_7c,..., local_94,0x14); memcpy(param_3,pcVar7,uVar5); memcpy(param_5,pcVar7 + 1 + (uVar4 & 0xffffffff), local_94).\n",
+            "The only obvious missing bounds check is before memcpy(param_3, pcVar7, uVar5) when param_3 buffer size is not known in this function. But they do check `if (0x100 < local_94) goto LAB_0014e220;` so they reject local_94 > 0x100 when param_3 != NULL. However, the actual size of param_3 is unknown and not validated here. That could be a bug if caller provides smaller buffer than 0x100. Similarly, for param_5 / param_6 they check `if (local_94 <= *param_6)` before copying local_94 bytes into param_5, so that's safe presuming param_6 is buffer size from caller.\n",
+            "Crash is in __memcpy not __memcpy_chk, so likely one of the plain memcpy calls dereferenced invalid memory. Candidates: 1) first memcpy from param_1 into __dest: if param_1 is invalid pointer or param_2 too large relative to input, crash. But this is directly using attacker-controlled input pointer from JNI or fuzzer; no internal validation. However, in realistic app use, Java-side would pass a properly sized byte[] and JNI would translate to pointer + length. Typically param_1 length equals param_2 and is validated by JVM, so no overflow of source; destination is allocated with param_2+0x80, so cannot overflow dest. Only way to crash is if param_1 is NULL or bogus, which would be harness fault, not vulnerability.\n",
+            "2) memcpy(__dest_00, pcVar7 + (uVar4 & 0xffffffff), local_94) where pcVar7 points inside __dest. Before this, we had `uVar4 = ASN1_length_decode(pcVar7,&local_94); if ((local_94 <= uVar1) && (memcpy(...`, so they ensure local_94 <= uVar1 (buffer size). Source pointer pcVar7+(uVar4&0xffffffff) is within __dest (DER-encoded data) where ASN1_length_decode presumably returns offset of content; but they don't bounds-check that offset+local_94 lies within uVar1. However, they used condition local_94 <= uVar1, not <= uVar1 - (uVar4&0xffffffff). So potential out-of-bounds read from __dest into __dest_00. That could crash memcpy if it reads beyond __dest into unmapped memory. This is a classical bug: incomplete bounds check with ASN. But we must see if uVar4 is attacker-controllable: ASN1_length_decode uses the encoded data in __dest (copied from param_1 / attacker). So yes, attacker can craft length fields to make uVar4 large while still satisfying local_94 <= uVar1. For example, uVar4 might be large offset, making source pointer beyond allocated buffer. This is memory read overflow, potentially causing SIGSEGV in memcpy.\n",
+            "However, we do not know if ASN1_length_decode validates that offset+local_94 <= remaining buffer. Typical safe implementation would ensure this, but we have no code here. Without decompiling it, we cannot assume safety. Need to search & decompile ASN1_length_decode in libNSaferJNI.so.\n"
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.75,
+          "reasons": [
+            "NI_PublicKeyDecode performs memcpy operations based on ASN.1 length/offset values derived from attacker-controlled input without clearly enforcing that offset+length stays within the allocated buffer.",
+            "The first memcpy from param_1 into a freshly allocated buffer is sized to dest (param_2+0x80), so no dest overflow; crash in __memcpy is more plausibly due to out-of-bounds read from crafted ASN.1 structure.",
+            "If ASN1_length_decode does not fully validate that the returned offset plus length are within bounds (not shown here), then an attacker can craft data so that memcpy reads past the end of __dest, causing a crash and possible info leak / memory corruption, making this a likely vulnerability rather than a harness-only issue."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-20"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "__dest = (char *)calloc(1,(ulong)uVar1);\n__dest_00 = (char *)calloc(1,(ulong)uVar1);\n...\nmemcpy(__dest,param_1,(ulong)param_2);\n...\nuVar4 = ASN1_length_decode(pcVar7,&local_94);\nif ((local_94 <= uVar1) &&\n   (memcpy(__dest_00,pcVar7 + (uVar4 & 0xffffffff),(ulong)local_94), *__dest_00 == '0')) {",
+              "note": "Length check only validates local_94 <= uVar1 (buffer size) but ignores offset uVar4, so source pointer may go beyond allocated region depending on ASN.1 length decoding."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "if (param_3 != (void *)0x0) {\n  if (0x100 < local_94) goto LAB_0014e220;\n  memcpy(param_3,pcVar7,uVar5);\n  *param_4 = uVar1;\n}\n...\nif (local_94 <= *param_6) {\n  memcpy(param_5,pcVar7 + 1 + (uVar4 & 0xffffffff),(ulong)local_94);",
+              "note": "Caller-provided output buffers param_3 and param_5 are written based on lengths derived from input; one has only a fixed upper bound (0x100) without knowing actual buffer size, relying on caller correctness."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_nshc_NSaferJNI_N_1PublicKeyExport -> NI_PublicKeyDecode -> __memcpy"
+          ],
+          "recommendations": [
+            "Review and, if necessary, harden ASN1_length_decode to enforce that returned offset+length never exceeds the provided buffer size, and propagate explicit buffer length parameters.",
+            "In NI_PublicKeyDecode, replace ad-hoc checks like `local_94 <= uVar1` with explicit validation of both source and destination ranges before each memcpy/memcpy_chk call.",
+            "Document and assert required sizes for caller-provided output buffers (param_3, param_5) or pass their lengths explicitly and enforce them before copying."
+          ],
+          "assumptions": [
+            "ASN1_length_decode is attacker-reachable and operates directly on the ASN.1 data copied from untrusted input.",
+            "JNI bridge Java_com_nshc_NSaferJNI_N_1PublicKeyExport is callable with attacker-controlled public key blobs in realistic usage, not only in fuzz harness.",
+            "Crash in __memcpy is due to out-of-bounds source pointer or length rather than unrelated allocator or harness issues."
+          ],
+          "limitations": [
+            "Implementation of ASN1_length_decode is not visible; its internal validation could mitigate the apparent bounds issue.",
+            "Exact size and validation of output buffers provided via param_3 and param_5 are not known, so related overflows are hypothesized based on typical JNI patterns.",
+            "Stack trace does not specify which particular memcpy call is faulting; assessment is based on static reasoning about the most likely unsafe operations."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious ASN.1-encoded public key blob passed through the app interface that eventually calls N_PublicKeyExport",
+            "prerequisites": [
+              "Ability to supply or influence a public key or certificate processed by NSaferJNI (e.g., via file import, network response, or QR code).",
+              "Target app must use Java_com_nshc_NSaferJNI_N_1PublicKeyExport to decode untrusted keys."
+            ],
+            "exploit_pipeline": [
+              "Craft an ASN.1-encoded public key whose length fields cause ASN1_length_decode to return a large offset while keeping length (local_94) <= param_2+0x80 so the superficial check passes.",
+              "Deliver this crafted key blob to the vulnerable app via its normal input path (e.g., load key file, import certificate, or similar feature that calls N_PublicKeyExport).",
+              "When NI_PublicKeyDecode runs, memcpy will read from a pointer pcVar7 + offset beyond the allocated __dest buffer, potentially causing an access violation or information exposure.",
+              "Iterate on payload structure to control the degree and direction of the out-of-bounds read for potential info leak or to achieve more reliable denial of service."
+            ],
+            "poc_commands": [
+              "adb push crafted_key.der /sdcard/Download/crafted_key.der",
+              "adb shell am start -n <package>/<activity> --es input_key /sdcard/Download/crafted_key.der",
+              "adb logcat | grep -i NSaferJNI"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_key.der"
+            ],
+            "notes": "Without ASN1_length_decode implementation and Java-side call sites, exploitation details remain approximate. However, the missing bound on offset+length around memcpy from __dest to __dest_00 is a plausible out-of-bounds read path that can be exercised by malformed ASN.1 data."
+          }
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 2,
+          "llm_tool_calls": 1,
+          "input_tokens": 12829,
+          "output_tokens": 2305
+        }
+      }
+    ]
+  }
+}

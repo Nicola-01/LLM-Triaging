@@ -1,0 +1,160 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "CamCard",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "qri1II",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "qri1II",
+            "DecodeQR",
+            "Java_com_intsig_nativelib_QREngine_decode",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<android.graphics.BitmapFactory: decodeResource(Landroid/content/res/Resources;I)Landroid/graphics/Bitmap;>",
+          "JavaCallGraph": [
+            "<com.intsig.camcard.cardholder.ExportContactsActivity: onCreate(Landroid/os/Bundle;)V> -> <dummyMainClass: dummyMainMethod_com_intsig_camcard_cardholder_ExportContactsActivity(Landroid/content/Intent;)Lcom/intsig/camcard/cardholder/ExportContactsActivity;> -> <dummyMainClass: dummyMainMethod([Ljava/lang/String;)V> -> <android.graphics.BitmapFactory: decodeResource(Landroid/content/res/Resources;I)Landroid/graphics/Bitmap;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "qri1II",
+              "DecodeQR",
+              "Java_com_intsig_nativelib_QREngine_decode",
+              "Java_com_intsig_nativelib_QREngine_decode"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "DecodeQR"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Step 1: Identify the crash context. The crash occurs in function 'qri1II' called from 'DecodeQR', called from 'Java_com_intsig_nativelib_QREngine_decode', triggered by fuzzer 'fuzz_one_input'. The process termination reason is simply 'qri1II' which is an obfuscated function name.",
+            "Step 2: The JNI bridge method is BitmapFactory.decodeResource, but the actual native call chain goes through Java_com_intsig_nativelib_QREngine_decode. The Java class QREngine declares: 'public static native String decode(byte[] bArr, int i, int i2)' - taking a byte array with width and height parameters.",
+            "Step 3: Library analysis. libQREngine.so is listed in the LibMap as exposing 'qri1II', 'DecodeQR', and 'Java_com_intsig_nativelib_QREngine_decode'. However, in Ghidra analysis, the .so file appears to be the same binary as libbcr.so (same addresses, same exports). The symbol 'Java_com_intsig_nativelib_QREngine_decode' was not found in the export list - only BCREngine JNI methods were found. The 'qri1II' symbol was also not found in the function list.",
+            "Step 4: Analyzing DecodeQR at 0x00211100 - this is the real implementation (not the thunk at 0x00147cf0). It takes two parameters (param_1 appears to be an image structure, param_2 is a result structure). It reads dimensions from param_1+8 and param_1+0xc, validates them (must be between 0x65 and ~10000), and processes the QR code through multiple passes.",
+            "Step 5: The DecodeQR function allocates working memory at param_1+0x10 (lVar31) and performs extensive pointer arithmetic to set up various buffer pointers within that working area. The key concern is whether the image data passed from Java through JNI is properly validated.",
+            "Step 6: Looking at FastDecodeQR_YUV at 0x00212aa8 - this is the higher-level function called from the JNI entry points. It validates param_2 >= 240 (0xf0) and param_3 >= 240, and allocates 0x96000 bytes via malloc. It then resamples/copies image data into this buffer and calls the internal QR decode pipeline.",
+            "Step 7: In FastDecodeQR_YUV, when param_2 == 0x140 (320) and param_3 == 0xf0 (240), data is copied directly with memcpy of 0x140 bytes per row. The stride (param_4) controls how far apart rows are in the source. If param_4 < param_2, the function returns early with an error.",
+            "Step 8: The qkdmioi1Io function at 0x0020fe98 is the image resampling/scaling function. It reads from source image (lVar66/param_1[0]) using indices derived from image dimensions. There are potential out-of-bounds reads here - the function computes indices using divisions and multiplications from the dimension parameters, and accesses lVar66 (source image data) with computed offsets. If the byte array size doesn't match the declared width*height, this could lead to OOB reads.",
+            "Step 9: Java-side analysis. QREngine.decode(byte[] bArr, int i, int i2) passes a byte array and two integers (width, height) directly to native code. There is NO validation in Java that bArr.length >= i * i2. The fuzzer can supply arbitrary byte arrays with mismatched width/height parameters.",
+            "Step 10: In the JNI bridge (Java_com_intsig_nativelib_BCREngine_DecodeQRYUV at 0x0014d9ac), the byte array is accessed via GetByteArrayElements, and the width/height params are passed directly to FastDecodeQR_YUV. The stride parameter equals width. There's no check that the byte array length matches width * height.",
+            "Step 11: The crash in 'qri1II' (which we couldn't find directly but is in the call chain from DecodeQR) likely occurs during image processing where computed indices exceed the actual buffer bounds. The key vulnerability: attacker-supplied width/height parameters that don't match the actual byte array size can cause out-of-bounds memory reads in the native QR decoding pipeline.",
+            "Step 12: Reachability assessment. The QREngine.decode method is a public static native method. The Java callgraph shows it's reachable from ExportContactsActivity.onCreate, which uses BitmapFactory.decodeResource. However, the more direct attack vector is through QR code scanning functionality where user-supplied images are processed. The app has camera permissions and handles image intents from external sources (OpenInterfaceActivity accepts ACTION_SEND with image/* MIME type).",
+            "Step 13: The vulnerability is a potential out-of-bounds read/write in QR decoding when processing malformed image data. The native code trusts width/height parameters without validating against actual buffer size. This is CWE-125 (Out-of-bounds Read) or CWE-787 (Out-of-bounds Write) depending on the specific crash location.",
+            "Step 14: Confidence assessment. We have clear evidence of: (1) No length validation in Java before JNI call, (2) Native code trusts width/height params for buffer access computations, (3) Complex index arithmetic in resampling functions without bounds checking. However, we couldn't resolve the exact 'qri1II' function, and the crash reason is just the function name (not a sanitizer report). Moderate-high confidence."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.72,
+          "reasons": [
+            "QREngine.decode(byte[], int, int) passes attacker-controlled byte array with width/height directly to native code without validating that array length >= width * height",
+            "Native DecodeQR and qkdmioi1Io perform unchecked index computations based on width/height parameters, accessing source image buffer at computed offsets that may exceed actual allocation",
+            "FastDecodeQR_YUV copies data from source buffer using stride and dimensions without verifying buffer bounds against the JNI byte array length",
+            "The crash function qri1II is called from within DecodeQR's image processing pipeline where out-of-bounds memory access is likely due to dimension mismatch"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "libQREngine.so"
+          ],
+          "evidence": [
+            {
+              "function": "QREngine.decode",
+              "file": "com.intsig.nativelib.QREngine",
+              "snippet": "public static native String decode(byte[] bArr, int i, int i2);",
+              "note": "No Java-side validation that bArr.length >= i * i2 before passing to native"
+            },
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "address": "0x0014d9ac",
+              "snippet": "uVar4 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); iVar3 = FastDecodeQR_YUV(uVar4,param_4,param_5,param_4,auStack_1078);",
+              "note": "JNI entry passes byte array pointer and user-supplied width/height directly to FastDecodeQR_YUV without size validation"
+            },
+            {
+              "function": "FastDecodeQR_YUV",
+              "address": "0x00212aa8",
+              "snippet": "memcpy((void *)((long)__ptr + lVar23),param_1,0x140); ... param_1 = (void *)((long)param_1 + (long)param_4);",
+              "note": "Copies rows from source using stride (param_4) without verifying source buffer has enough data for all rows"
+            },
+            {
+              "function": "qkdmioi1Io",
+              "address": "0x0020fe98",
+              "snippet": "*(undefined1 *)(lVar68 + -1) = *(undefined1 *)(lVar66 + (long)iVar74 + (long)iVar74 * 2 + (long)*(short *)(param_2 + lVar54 + 0x4ae) * 3 + 1);",
+              "note": "Reads from source image at computed offsets derived from dimension parameters - potential OOB if dimensions don't match buffer"
+            }
+          ],
+          "call_sequence": [
+            "Java_com_intsig_nativelib_QREngine_decode (JNI entry)",
+            "FastDecodeQR_YUV @ 0x00212aa8",
+            "DecodeQR @ 0x00211100",
+            "qkdmioi1Io @ 0x0020fe98 (image resampling)",
+            "qri1II (crash site - obfuscated function)"
+          ],
+          "recommendations": [
+            "Add Java-side validation in QREngine.decode() to verify bArr.length >= i * i2 before JNI call",
+            "Add native-side bounds checking in FastDecodeQR_YUV and DecodeQR to validate buffer dimensions against actual allocation sizes",
+            "Consider using SafeJNI patterns that pass array length alongside the array and validate in native code"
+          ],
+          "assumptions": [
+            "The 'qri1II' function is an obfuscated internal function within the QR decoding pipeline that we could not resolve in Ghidra",
+            "libQREngine.so and libbcr.so share the same codebase (identical addresses and exports observed)",
+            "The crash is triggered by malformed/mismatched byte array and dimension parameters from the fuzzer"
+          ],
+          "limitations": [
+            "Could not locate or decompile the exact 'qri1II' function - it may be dynamically resolved or stripped",
+            "The JNI entry 'Java_com_intsig_nativelib_QREngine_decode' was not found in exports - only BCREngine JNI methods were visible, suggesting dynamic registration",
+            "Crash termination reason is just the function name, not a sanitizer-specific message, limiting root cause certainty"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supply a crafted byte array with mismatched width/height parameters to QREngine.decode() causing out-of-bounds memory access in native QR decoding",
+            "prerequisites": [
+              "Ability to invoke QREngine.decode with controlled byte[], width, and height parameters",
+              "This can be reached through image processing paths that accept external images (e.g., via ACTION_SEND intent to OpenInterfaceActivity)"
+            ],
+            "exploit_pipeline": [
+              "1. Craft a small byte array (e.g., 100 bytes) but specify large width/height values (e.g., 640x480) to QREngine.decode",
+              "2. The JNI bridge passes these parameters directly to FastDecodeQR_YUV without validation",
+              "3. FastDecodeQR_YUV attempts to copy rows from the undersized buffer using the declared stride, reading past the buffer boundary",
+              "4. DecodeQR and internal resampling functions compute indices based on declared dimensions, causing further OOB reads from the source image buffer",
+              "5. This results in information disclosure (OOB read) or potential crash/corruption"
+            ],
+            "poc_commands": [
+              "adb push crafted_qr_image.raw /sdcard/Download/payload.raw",
+              "adb shell am start -n com.intsig.BCRLite/com.intsig.camcard.OpenInterfaceActivity -a android.intent.action.SEND -t 'image/*' --eu android.intent.extra.STREAM file:///sdcard/Download/payload.raw"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.raw"
+            ],
+            "notes": "Direct exploitation requires reaching QREngine.decode with controlled parameters. The most realistic path is through the app's QR scanning feature processing a malformed image file. The OOB read could leak sensitive heap data."
+          }
+        },
+        "statistics": {
+          "time": "00:05:01",
+          "llm_requests": 1,
+          "llm_tool_calls": 0,
+          "input_tokens": 171105,
+          "output_tokens": 3027
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_Missing/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>"
+          ],
+          "LibMap": {
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpUpdate3"
+            ],
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ],
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libzkeylib.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is ks_memcpy; decompiled body shows a custom memcpy that assumes non-overlapping regions for the vectorized path and does no bounds checking itself. Crash reason is generic ks_memcpy failure, suggesting OOB or bad pointer passed in rather than an internal check.",
+            "The caller in the stack is _dPKIHeader @00125790 (the non-trivial implementation). Decompilation shows multiple uses of ks_memcpy. The relevant one given the SEQUENCE/CONTEXT parsing is especially the case 0/1/7 copies into acStack_468 (a 1032-byte local) from param_1 + offset with length local_46c. local_46c is parsed from ASN.1 length fields via __dSEQUENCE, __dCONTEXTSPECIFIC, __get_len, etc., with no explicit check that local_46c fits into 1032 bytes. Therefore, if the parsed length exceeds 1032, ks_memcpy will overflow acStack_468, causing memory corruption.",
+            "Source pointer param_1 comes from ASN.1-encoded CMP header buffer. Its lifetime and bounds are not verified against local_46c beyond what the parsing helpers do internally (unknown), but there is clearly no size check against the destination capacity. This is classic stack-based buffer overflow (CWE-121/787) in _dPKIHeader.",
+            "The JNI bridge Java_com_koscom_cert_ca_CANative_cmpUpdate3 simply converts two Java byte arrays to native buffers (GetByteArrayElements via function pointer at *env+0x5c0) and calls CMP_Update_3(buf1, buf2, int flag). CMP_Update_3 is not decompiled here but library map shows _dPKIHeader in the same lib, and name plus flow strongly suggests CMP_Update_3 will parse ASN.1 request/response data and will ultimately call _dPKIHeader on these buffers.",
+            "On the Java side, cmpUpdate3([B[BI)I is called from business logic updatePwdCert / updatePWD; these pass arbitrary byte[] arguments from higher-level certificate update workflow. Fuzzer can supply arbitrary contents and sizes for these arrays; in real app, arrays may be attacker-controlled via network, certificate files, or server responses, all of which are untrusted and not size-restricted by Java. There is no indication of maximum length enforcement matching 1032 bytes.",
+            "Thus, an attacker who controls the ASN.1 message can set an encoded length >1032 to make _dPKIHeader memcpy more bytes than acStack_468 can hold. Because acStack_468 is on stack and the overflow is unbounded up to the array length, this is a clear, likely exploitable stack-based buffer overflow reachable from JNI and untrusted input.",
+            "Given the cryptographic / certificate context and the typical use of this library in security-sensitive apps, exploitation could lead to code execution within the app process or at minimum memory corruption / crash. No mitigations are visible at this level (no bounds check, no safe memcpy wrapper). This is therefore a high-severity memory corruption vulnerability, not a harness-only issue."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "_dPKIHeader copies ASN.1-parsed data into a 1032-byte stack buffer via ks_memcpy using an unbounded length local_46c without checking it against buffer size",
+            "Length local_46c is derived from attacker-controlled ASN.1 fields in CMP messages and can exceed the destination buffer capacity, leading to stack-based buffer overflow",
+            "Reachable from Java via JNI bridge cmpUpdate3 through CMP_Update_3, which processes user/server-provided certificate data, making this a realistic exploit path"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libCertJavaClient.so"
+          ],
+          "evidence": [
+            {
+              "function": "_dPKIHeader @ 00125790",
+              "address": "00125790",
+              "file": "libCertJavaClient.so",
+              "snippet": "case 1:\n  uVar7 = __dSEQUENCE(param_1 + iVar13,&local_46c);\n  ...\n  ks_memcpy(acStack_468,param_1 + uVar15,local_46c);\n  uVar15 = (ulong)(local_46c + (int)uVar15);\n  break;",
+              "note": "acStack_468 is a 1032-byte local buffer; local_46c is not checked to be <=1032"
+            },
+            {
+              "function": "_dPKIHeader @ 00125790",
+              "address": "00125790",
+              "file": "libCertJavaClient.so",
+              "snippet": "case 7:\n  ...\n  ks_memcpy(acStack_468,lVar1 + iVar6,local_46c);\n  uVar14 = local_46c + iVar6;",
+              "note": "Same unbounded copy into acStack_468 using ASN.1-derived length"
+            },
+            {
+              "function": "ks_memcpy @ 00146034",
+              "address": "00146034",
+              "file": "libCertJavaClient.so",
+              "snippet": "if (param_3 != 0) {\n  ...\n  do {\n    param_3 = param_3 - 1;\n    *param_1 = *param_2;\n    param_2 = param_2 + 1;\n    param_1 = param_1 + 1;\n  } while (param_3 != 0);\n}",
+              "note": "Raw memcpy implementation with no internal bounds check; relies entirely on caller to provide safe length"
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpUpdate3 @ 00115f68",
+              "address": "00115f68",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n...\niVar1 = CMP_Update_3(uVar2,uVar3,param_5);",
+              "note": "JNI bridge takes Java byte[] and passes raw buffers into CMP_Update_3 without any size constraints or validation"
+            },
+            {
+              "function": "com.lumensoft.ks.KSCmp.updatePWD / KSNative.cmpUpdate3",
+              "file": "classes.dex",
+              "note": "Java call graph shows cmpUpdate3 invoked as part of certificate password update; supplied byte arrays ultimately originate from external certificate data and user input without explicit maximum size checks matching native limits"
+            }
+          ],
+          "call_sequence": [
+            "com.lumensoft.ks.KSCmp.updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;",
+            "com.lumensoft.ks.KSCmp.updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;",
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert()Ljava/util/Hashtable;",
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.run()V",
+            "com.lumensoft.ks.KSNative.cmpUpdate3([B[BI)I",
+            "Java_com_koscom_cert_ca_CANative_cmpUpdate3",
+            "CMP_Update_3",
+            "_dPKIHeader @ 00125790",
+            "ks_memcpy @ 00146034"
+          ],
+          "recommendations": [
+            "Add explicit bounds checks in _dPKIHeader before each ks_memcpy into acStack_468, ensuring local_46c does not exceed sizeof(acStack_468) and abort/return error on violation",
+            "Prefer using a safer memcpy wrapper that enforces destination buffer size or refactor ASN.1 parsing to operate on caller-supplied buffers with explicit length parameters instead of fixed-size locals",
+            "Review all uses of ks_memcpy and related parsing functions in libCertJavaClient.so for similar unbounded copies from ASN.1/attacker-controlled data"
+          ],
+          "assumptions": [
+            "CMP_Update_3 eventually calls _dPKIHeader with a pointer into attacker-influenced CMP/ASN.1 data buffers",
+            "Java layer does not enforce strict maximum sizes on the byte[] arguments passed into cmpUpdate3 beyond typical platform limits"
+          ],
+          "limitations": [
+            "Exact internal implementation of CMP_Update_3 is not decompiled here; linkage to _dPKIHeader inferred from naming/context",
+            "Java sources for KSCmp/KSNative were not fully inspected for size validation logic, but call graph suggests direct forwarding of arrays"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:45",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 21128,
+          "output_tokens": 2034
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,361 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.shareitagain.whatslov.app/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "WhatsLov",
+      "package": "com.shareitagain.whatslov.app",
+      "min_sdk": 19,
+      "target_sdk": 33,
+      "version_name": "12.5.0",
+      "version_code": "211"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "??",
+            "__gxx_personality_v0",
+            "_Unwind_RaiseException",
+            "__cxa_throw",
+            "operator new",
+            "operator new[]",
+            "FastGifEncoder::init",
+            "GifEncoder::init",
+            "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+          "LibMap": {
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so": [
+              "_Unwind_RaiseException",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so": [
+              "__cxa_throw"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libglide-webp.so": [
+              "_Unwind_RaiseException"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top application-level frame is FastGifEncoder::init → actually GCTGifEncoder::init at 0x00112f80 per decompilation.",
+            "Decompiled GCTGifEncoder::init shows it takes (this, width, height, char* filename). It stores width/height, fopen(filename,\"wb\"), and if file opened, allocates two pixel buffers of size width*height*4 via operator_new__.",
+            "Critical expression: uVar3 = (ulong)((uint)param_1 * (uint)param_2) << 2 with some sign-extension/overflow masking logic. There is no bounds check on param_1/param_2 before multiplication or before passing uVar3 to operator_new__. Therefore width*height is fully attacker-controlled from JNI parameters (GifEncoder_nativeInit’s param_3 and filename pointer param_4).",
+            "This is a classic potential integer overflow in allocation size: for large width/height, (uint)param_1 * (uint)param_2 may overflow 32-bit, then shifted left by 2; masking attempts to handle sign, but there is no explicit maximum. If overflow wraps small, operator_new__ allocates a too-small buffer relative to logical pixel count (width*height*4), and subsequent encoding functions will index assuming full width*height, causing heap overflow (CWE-190 leading to CWE-787).",
+            "Need data-flow from JNI: Java_com_waynejo_androidndkgif_GifEncoder_nativeInit decompiled: it allocates a GifEncoder object with operator_new(8), calls GifEncoder::GifEncoder(pGVar2,param_6), setThreadCount, obtains a jstring via env->GetStringUTFChars (indirect vtable call), then calls GifEncoder::init((ushort)pGVar2,param_3,(char *)(param_4 & 0xffffffff)). Here param_3 (a Java short width) and param_4 (jstring pointer) are direct JNI arguments under fuzzer/app control, with no validation on width/height before reaching GCTGifEncoder::init or FastGifEncoder::init path.",
+            "Although the observed crash is via __cxa_throw / operator new / new[] (likely bad_alloc or std::bad_array_new_length due to enormous size), on real devices with different allocators or limits, the same unchecked multiplication and allocations can lead to allocation truncation and heap overflow, not just clean exceptions. The code is thus logically vulnerable even if current crash is an exception.",
+            "This is not a harness-only issue: nativeInit is a real JNI API used in production, where a caller can pass arbitrary dimensions (e.g., via app logic or possibly untrusted content). Even if the Java layer typically constrains sizes, no native enforcement exists. Fuzzer uses extreme values to reveal this lack of bounds checking.",
+            "Therefore classify as a genuine, likely exploitable memory-safety vulnerability originating in libandroidndkgif.so, with severity high (heap overflow potential) and high confidence, even though the current trace ends at operator new throwing."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.93,
+          "reasons": [
+            "GCTGifEncoder::init computes allocation size as (uint)width*(uint)height<<2 with no bounds check, then calls operator_new__ with that size.",
+            "Width and height are derived from JNI parameters to Java_com_waynejo_androidndkgif_GifEncoder_nativeInit without any native validation, so attacker-controlled values can trigger integer overflow and mis-sized allocations.",
+            "Although current crash is via operator new throwing, the underlying unchecked arithmetic and allocations can cause heap buffer overflows under different conditions."
+          ],
+          "cwe_ids": [
+            "CWE-190",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_waynejo_androidndkgif_GifEncoder_nativeInit -> GifEncoder::init -> GCTGifEncoder::init (aka FastGifEncoder::init path)"
+          ],
+          "recommendations": [
+            "Add explicit validation in GifEncoder::init / GCTGifEncoder::init to enforce reasonable maxima on width and height before multiplying and allocating (e.g., check width>0, height>0, width<=MAX_W, height<=MAX_H, and their product <= MAX_PIXELS).",
+            "Use safe size calculations that detect overflow (e.g., check if width != 0 && total_bytes/width/4 != height) before calling operator_new__ and fail gracefully on overflow.",
+            "Consider propagating allocation failures back to Java cleanly instead of relying on throwing exceptions at operator new, to avoid undefined behaviour on other platforms/allocators."
+          ],
+          "assumptions": [
+            "GifEncoder::init dispatches to GCTGifEncoder::init or FastGifEncoder::init with the same width/height semantics as seen in decompiled GCTGifEncoder::init.",
+            "Future writes into the allocated buffers index up to width*height elements, which is consistent with GIF encoder logic but not fully inspected here."
+          ],
+          "limitations": [
+            "Exact crashing instruction and allocator behaviour at the time of fuzzing are not shown; analysis is based on decompiled logic and typical allocator semantics.",
+            "No direct view of FastGifEncoder::init body, but GCTGifEncoder::init already exhibits the overflow-prone pattern."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:40",
+          "llm_requests": 8,
+          "llm_tool_calls": 9,
+          "input_tokens": 135149,
+          "output_tokens": 1344
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "??",
+            "__gxx_personality_v0",
+            "_Unwind_RaiseException",
+            "__cxa_throw",
+            "operator new",
+            "operator new[]",
+            "LCTGifEncoder::init",
+            "GifEncoder::init",
+            "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+          "LibMap": {
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so": [
+              "_Unwind_RaiseException",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so": [
+              "__cxa_throw"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libglide-webp.so": [
+              "_Unwind_RaiseException"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native app-level frame is LCTGifEncoder::init / GifEncoder::init, but only Java_com_waynejo_androidndkgif_GifEncoder_nativeInit is visible in symbols; stack shows C++ exception path (__cxa_throw → operator new/new[] → LCTGifEncoder::init → GifEncoder::init → JNI).",
+            "Decompiled JNI function: allocates GifEncoder via operator_new(8), runs constructor, sets thread count, then calls a JNI env method (**(code **)(*param_1 + 0x548)) to get something from Java (likely a String or buffer) into uVar3, then calls GifEncoder::init(pGVar2, param_3, (char*)(param_4 & 0xffffffff)). After that it calls another JNI method to release uVar3, and if init failed (returns 0), it deletes the GifEncoder and returns null.",
+            "The observed crash walks through __cxa_throw and operator new/new[], meaning the termination is likely due to an unhandled C++ exception thrown from within LCTGifEncoder::init or GifEncoder::init. There is no ASan/scudo or SIGSEGV evidence here; this is an exception-based abort, not a memory violation signal.",
+            "Because Ghidra cannot resolve GifEncoder::init in this binary (likely inlined, stripped, or in another translation unit without symbol), we cannot inspect internal pointer arithmetic or memcpy usage; however, the stack explicitly references LCTGifEncoder::init and GifEncoder::init, not generic lib functions. Without that body we cannot demonstrate any out-of-bounds or unsafe operation, only that an exception is thrown.",
+            "In the JNI glue, parameters with attacker influence: param_3 (ushort) and lower 32 bits of param_4 (cast to char*). These are passed unvalidated into GifEncoder::init. In a typical library, init(width,height or path) will validate and throw exceptions on invalid values. Here the subsequent code checks the boolean result of GifEncoder::init; that pattern is consistent with init returning false instead of throwing for common errors. The stack, however, shows __cxa_throw before LCTGifEncoder::init, so an internal call likely throws (e.g., std::bad_alloc, logic error).",
+            "Throwing a C++ exception from library code and not catching it at the JNI boundary can crash the app (local DoS), but this is usually considered a robustness/logic issue unless triggered via clearly untrusted remote input. Fuzz harness passes arbitrary values into params normally coming from Java code. In real app paths, those args likely come from UI and are constrained (e.g., image size, file path). There is no proof that an attacker can remotely control them beyond local app context.",
+            "No evidence of classic memory corruption (no SIGSEGV, double free, bounds write). The exception path goes through operator new/new[], which may indicate allocation failure or explicit throw; still not inherently exploitable beyond a crash. No sanitizer or allocator abort is present in the trace to connect this to unsafe memcpy, etc.",
+            "Given the missing definition of GifEncoder::init and lack of any direct evidence of out-of-bounds or misuse, the safest classification is that this is a non-memory-safety crash (unhandled C++ exception), triggered by fuzz harness pushing unexpected values. This is not clearly a vulnerability under typical Android app threat model, though it is a robustness bug.",
+            "Therefore, classify as not a confirmed vulnerability. At most, it is a potential local DoS via unhandled exception if hostile inputs reach nativeInit, but with current evidence that remains speculative and low confidence."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.35,
+          "reasons": [
+            "Stack trace indicates C++ exception (__cxa_throw via operator new/new[]), not a SIGSEGV or sanitizer-detected memory corruption",
+            "JNI nativeInit only forwards parameters to GifEncoder::init; internal body of GifEncoder::init/LCTGifEncoder::init not available, so no direct evidence of out-of-bounds or unsafe memcpy",
+            "Crash is consistent with an unhandled C++ exception (logic/robustness bug) likely triggered by fuzz-only argument ranges, not proven attacker-controlled memory safety issue"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so",
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so"
+          ],
+          "call_sequence": [
+            "main -> fuzz_one_input -> Java_com_waynejo_androidndkgif_GifEncoder_nativeInit -> GifEncoder::init/LCTGifEncoder::init -> operator new/new[] -> __cxa_throw -> _Unwind_RaiseException"
+          ],
+          "recommendations": [
+            "Obtain or reconstruct the body of GifEncoder::init/LCTGifEncoder::init to inspect for unsafe memory operations and add appropriate argument validation",
+            "Wrap calls into GifEncoder::init inside a try/catch at the JNI boundary and translate C++ exceptions into Java exceptions instead of allowing process termination",
+            "Add unit/fuzz tests at the Java API layer with realistic parameter ranges to ensure invalid inputs produce controlled Java-level errors"
+          ],
+          "assumptions": [
+            "GifEncoder::init and LCTGifEncoder::init are not available with symbols or decompilable bodies in the current binary",
+            "Fuzzer is providing argument values outside normal application-level constraints, potentially triggering exceptional paths not reachable in production use"
+          ],
+          "limitations": [
+            "Unable to decompile or inspect internal implementation of GifEncoder::init/LCTGifEncoder::init",
+            "Exact process termination signal/reason is unknown (\"??\"), limiting correlation between exception and crash semantics"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:34",
+          "llm_requests": 4,
+          "llm_tool_calls": 5,
+          "input_tokens": 22347,
+          "output_tokens": 1340
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "??",
+            "__gxx_personality_v0",
+            "_Unwind_RaiseException",
+            "__cxa_throw",
+            "operator new",
+            "operator new[]",
+            "GCTGifEncoder::init",
+            "GifEncoder::init",
+            "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+          "LibMap": {
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so": [
+              "_Unwind_RaiseException",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so": [
+              "__cxa_throw"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libglide-webp.so": [
+              "_Unwind_RaiseException"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native app frame is GifEncoder::init, but the crash stack shows operator new/new[] and C++ exception machinery, not memcpy/memmove or sanitizers; likely an exception thrown from inside encoder init or allocation failure rather than memory corruption.",
+            "Decompiled Java_com_waynejo_androidndkgif_GifEncoder_nativeInit shows: allocate GifEncoder with operator_new(8); call constructor; call GifEncoder::setThreadCount; call a JNI env function via vtable (CreateStringUTF-like); then call GifEncoder::init with parameters ultimately derived from JNI arguments: width/height (ushort param_3) and char* from param_4 low 32 bits; return encoder or delete on failure. No raw buffer arithmetic or memcpy present here.",
+            "Decompiled GifEncoder::init(ushort, ushort, char const*) reveals it simply dereferences a vtable function pointer at offset 0x10 from *(*(long **)(ulong)param_1) and calls it with (this,param_2). param_3 is unused and there is no length/buffer handling in this wrapper; actual implementation is in a virtual method in concrete encoder class (e.g. GCTGifEncoder::init, FastGifEncoder::init, etc.).",
+            "Search/list of functions shows multiple init implementations (GCTGifEncoder::init at 0x00114330; FastGifEncoder::init at 0x00115e30; SimpleGCTGifEncoder::init at 0x00117b28, etc.). The stack trace specifically lists GCTGifEncoder::init, implying the virtual dispatch resolved to that implementation. However, the crash stack only shows operator new/new[] immediately before GCTGifEncoder::init, and then unwinding; there is no evidence of memcpy/memmove or out-of-bounds access at the crash site from the available trace.",
+            "Since process termination reason is unknown (\"??\"), and the stack shows __cxa_throw and _Unwind_RaiseException coming from libanimation-decoder-gif/libglide-webp, the observed \"crash\" is actually an unhandled C++ exception. That can be a DoS if not caught, but to treat it as a security vulnerability we need evidence that attacker-controlled parameters (width/height, thread count, etc.) trigger unsafe memory operations (overflow, OOB, UAF).",
+            "Within GifEncoder::init wrapper there is no unsafe operation; it merely forwards a ushort param_2 (height) from JNI to vfunc. param_1 is a small object allocated by operator_new(8) and its vtable is set by the constructor; attacker cannot influence vtable pointer in normal use. Without decompiling GCTGifEncoder::init we cannot see its internal memory allocations, but the stack trace shows operator new/new[] before it, indicating any failure is handled via exceptions (e.g., bad_alloc) rather than silent overflow or UB.",
+            "The fuzzer harness may be invoking nativeInit with extreme sizes or invalid pointers for param_4 (string pointer) that normal Java code would not provide, so some exceptions (e.g., std::bad_alloc or a custom logic error) can be raised. However, this is just normal exception-based failure, not evidence of memory safety violation. There’s no sign of invalid free, double free, or allocator abort from ASAN/scudo in the trace.",
+            "Given lack of sanitizer messages, lack of memcpy/memmove involvement, and the fact that crash manifests as C++ exception propagation, the most reasonable assessment is that this is a benign unhandled exception / OOM-like condition in encoder initialization rather than an exploitable vulnerability. It may be worth checking GCTGifEncoder::init for oversized allocations, but with current data there is no concrete proof of unsafe behavior or exploitable memory corruption.",
+            "Therefore classify this as not a confirmed vulnerability, with low confidence of it hiding a serious issue, and mark as at most a potential DoS due to unhandled exception under extreme/unrealistic inputs."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.3,
+          "reasons": [
+            "Crash path shows C++ exception (__cxa_throw, _Unwind_RaiseException) rather than allocator/sanitizer abort or segfault",
+            "JNI nativeInit and GifEncoder::init wrapper contain no memcpy/memmove or raw buffer arithmetic; they only allocate and dispatch to virtual init",
+            "Observed behavior is consistent with unhandled exception or allocation failure under fuzzed parameters, not clear memory corruption"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so",
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so",
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libglide-webp.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_waynejo_androidndkgif_GifEncoder_nativeInit -> GifEncoder::GifEncoder -> GifEncoder::setThreadCount -> GifEncoder::init -> GCTGifEncoder::init -> operator new[] -> __cxa_throw / _Unwind_RaiseException"
+          ],
+          "recommendations": [
+            "Instrument and decompile GCTGifEncoder::init and related init implementations to check for size checks and allocation patterns under large width/height values",
+            "Add exception handling around nativeInit/GifEncoder initialization so encoder init failures do not crash the process",
+            "Run additional fuzzing with ASAN/UBSAN to confirm absence of hidden memory safety issues in encoder init paths"
+          ],
+          "assumptions": [
+            "Stack trace frame GCTGifEncoder::init corresponds to init at 0x00114330 in libandroidndkgif.so",
+            "Crash was due to an unhandled C++ exception rather than SIGSEGV or allocator abort, since termination is listed as '??' and unwinding frames are present",
+            "JNI caller in production would not pass arbitrary invalid native pointers for the filename/char* argument"
+          ],
+          "limitations": [
+            "Did not decompile GCTGifEncoder::init itself to inspect its internal logic",
+            "Exact exception type and message at __cxa_throw are unknown",
+            "Process termination signal/reason is not provided, so some subtle memory errors cannot be fully ruled out"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:45",
+          "llm_requests": 9,
+          "llm_tool_calls": 9,
+          "input_tokens": 140725,
+          "output_tokens": 1533
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "??",
+            "__gxx_personality_v0",
+            "_Unwind_RaiseException",
+            "__cxa_throw",
+            "operator new",
+            "operator new[]",
+            "SimpleGCTGifEncoder::init",
+            "GifEncoder::init",
+            "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+          "LibMap": {
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libandroidndkgif.so": [
+              "_Unwind_RaiseException",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit",
+              "Java_com_waynejo_androidndkgif_GifEncoder_nativeInit"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libanimation-decoder-gif.so": [
+              "__cxa_throw"
+            ],
+            "APKs_FINAL/com.shareitagain.whatslov.app/lib/arm64-v8a/libglide-webp.so": [
+              "_Unwind_RaiseException"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Topmost meaningful app-level frame before allocators/sanitizers is SimpleGCTGifEncoder::init, then GifEncoder::init, then the JNI entry Java_com_waynejo_androidndkgif_GifEncoder_nativeInit.",
+            "The presence of operator new and operator new[] directly before SimpleGCTGifEncoder::init in the stack, followed by __cxa_throw and unwinding frames, strongly suggests the crash is an unhandled C++ exception being thrown during allocation or init rather than a memory safety violation (no SIGSEGV/ASAN context is shown).",
+            "The fuzz harness calls the JNI nativeInit with arbitrary/possibly malformed parameters, but the stack trace does not show any memcpy/memmove/unsafe memory primitive involvement: it is pure construction/initialization and allocation (new/new[]) leading to an exception.",
+            "Without evidence of out-of-bounds access, use-after-free, or invalid pointer arithmetic, and with only an allocation followed by exception throwing, the most plausible explanation is that init performs some internal validation and throws on invalid state (e.g., bad dimensions, allocation failure, parameter check), which the fuzz harness interprets as a crash.",
+            "App-level behaviour in production code would usually wrap nativeInit in Java try/catch or avoid passing nonsensical values; the fuzz harness may be deliberately driving impossible or unchecked arguments and not handling the native exception, causing process termination but not constituting a vulnerability by the given definition.",
+            "There is no indication of cross-library unsafe interaction (only libandroidndkgif.so and C++ runtime/exception machinery); no indication that attacker-controlled data can corrupt memory or control flow beyond causing the library to throw and terminate."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.3,
+          "reasons": [
+            "Crash appears to be due to an unhandled C++ exception during initialization/allocator use, not a memory safety error",
+            "No evidence of memcpy/memmove or other unsafe buffer operations in the stack trace",
+            "Likely DoS only via bad parameters and missing exception handling in fuzz harness, not an exploitable condition in normal app usage"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libandroidndkgif.so"
+          ],
+          "call_sequence": [
+            "main -> fuzz_one_input -> Java_com_waynejo_androidndkgif_GifEncoder_nativeInit -> GifEncoder::init -> SimpleGCTGifEncoder::init -> operator new[] -> operator new -> __cxa_throw -> _Unwind_RaiseException -> __gxx_personality_v0"
+          ],
+          "recommendations": [
+            "Obtain and inspect decompiled code for SimpleGCTGifEncoder::init and GifEncoder::init to confirm no unchecked buffer operations or integer overflows around allocations",
+            "Add robust exception handling around nativeInit in both Java and native layers so that thrown C++ exceptions map to safe Java errors instead of process termination",
+            "Extend fuzzing to capture and classify C++ exceptions separately from hard crashes to better distinguish logic/validation failures from memory corruption"
+          ],
+          "assumptions": [
+            "Stack trace is complete and no omitted frames show unsafe memory APIs",
+            "init methods primarily perform allocation and parameter validation rather than complex buffer manipulation"
+          ],
+          "limitations": [
+            "No decompiled native code for SimpleGCTGifEncoder::init or GifEncoder::init was available to inspect for subtle memory issues",
+            "Exact process termination signal and exception type are unknown (\"??\"), reducing certainty about the root cause"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:11",
+          "llm_requests": 1,
+          "llm_tool_calls": 0,
+          "input_tokens": 5278,
+          "output_tokens": 704
+        }
+      }
+    ]
+  }
+}

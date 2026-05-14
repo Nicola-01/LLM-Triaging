@@ -218,11 +218,31 @@ def closeGhidraFile(file: str, debug = False):
 
 def closeGhidraGUI(debug = False):
     """
-    Closes the entire Ghidra GUI window (first one found with title “Ghidra:”).
+    Closes the entire Ghidra GUI window forcefully (kill -9) to avoid "Save" popups.
     """
     line = _find_window_line("Ghidra:")
     if not line:
+        # Fallback: try pkill anyway to clean up any hung processes
+        if debug:
+            print_message(CYAN, "DEBUG", "No Ghidra window found, but running pkill fallback.")
+        _run_cmd("pkill -9 -f 'ghidra'", shell=True)
         return
+        
     win_id = line.split()[0]
-    print_message(GREEN, "INFO", f"Closing Ghidra GUI..")
-    _run_cmd(f"{wmctrl_cmd} -i -c {win_id}", shell=True)
+    print_message(GREEN, "INFO", f"Closing Ghidra GUI forcefully..")
+    
+    # Attempt to get PID from window ID and kill it
+    try:
+        pid_out = _run_cmd(f"xprop -id {win_id} _NET_WM_PID", shell=True).stdout
+        if "_NET_WM_PID" in pid_out:
+            pid = pid_out.split("=")[-1].strip()
+            if debug:
+                print_message(CYAN, "DEBUG", f"Identifying PID {pid} for Ghidra window {win_id}")
+            _run_cmd(f"kill -9 {pid}", shell=True)
+            time.sleep(0.5)
+    except Exception as e:
+        if debug:
+            print_message(YELLOW, "WARNING", f"Failed to kill via xprop PID: {e}")
+
+    # Fallback/Safety: kill any remaining Ghidra-related processes
+    _run_cmd("pkill -9 -f 'ghidra'", shell=True)

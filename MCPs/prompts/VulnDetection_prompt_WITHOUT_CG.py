@@ -62,9 +62,10 @@ For each crash, the LLM MUST use MCP tools (Ghidra) in the following exact order
 
 2. GHIDRA MCP:
    (a) Decompile the function corresponding to that frame.
+   - You have to use `search_functions_by_name`, that return `<function> @ <addr>`, you have to use exact that address in `decompile_function_by_address <addr>`
+   - If `search_functions_by_name` returns multiple results, decompile all of them for find the correct one, some method could be just a wrapper, (e.g. `PTR_xxx_<addr>`, or similar). 
    (b) Locate any calls to memcpy/memmove/ks_memcpy or indirect function pointers.
    (c) For each call: extract SOURCE, DESTINATION, LENGTH expressions.
-   - If you use `search_functions_by_name`, that return `<function> @ <addr>`, you have to use exact that address in `decompile_function_by_address <addr>`
 
 3. BACKWARD DATA-FLOW (MANDATORY):
    For each of the three arguments (src, dst, len):

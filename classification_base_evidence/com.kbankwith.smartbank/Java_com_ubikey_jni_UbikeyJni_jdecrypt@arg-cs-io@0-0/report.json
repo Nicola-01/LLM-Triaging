@@ -1,0 +1,960 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.kbankwith.smartbank/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.kbankwith.smartbank",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "1.5.8",
+      "version_code": "554"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Get_DER_Child",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Get_DER_Child",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Get_DER_Child",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Get_DER_Child; decompiled code shows it walks an ASN.1 DER buffer (param_1->0x10) computing child offsets/lengths via helper functions and then dispatching to various Decode_DER_* routines based on the ASN.1 tag param_3. Loop bounds are tied to iVar1 = Compute_ASN1_ValueLength() and it increments iVar6 by header+value lengths until iVar6 == iVar1 or an error (-1) from Compute_ASN1_ValueLength_from_LO, in which case it returns 0. So no obvious out-of-bounds in this function itself: the helpers determine the structural sizes; if they miscompute, bug might live there, but we don't see them here.",
+            "Convert_ASN1_to_EncCertExchangeMessage takes an ASN1 (param_1) and an EncCertExchangeMessage** (param_2), allocates if needed, then calls Get_DER_Child three times with fixed child indices/tag values (0/2, 1/4, 2/0x10). If any step fails or BINT conversion fails, it deletes the structure and returns 0. No raw buffer manipulation; it just stores returned child pointers in struct fields. So this is mostly logic glue.",
+            "DecryptCertExchange is more interesting w.r.t. memory safety: it takes 'param_6' (long) and 'param_7' (int) from caller as an input buffer + length. It checks (param_6 == 0) || (param_7 < 1) and bails early in that case. Otherwise it calls Decode_DER_ASN1_ST(param_6) with no length argument; presumably ASN.1 object stores its own internal length. If decode or subsequent conversions fail, it cleans up and returns 0.",
+            "On success, EncCertExchangeMessage_to_CertExchangeMessage fills local_18 (CertExchangeMessage*). Then the code reads an int at *local_18 + 0x10 into *param_3 (length1), mallocs that many bytes for *param_2, and memcpy's from *(void**)(*plVar5 + 8) (data pointer 1) into the new buffer with length (long)*param_3. Then it does exactly the same for a second component at plVar5[1] (length2 at +0x10, data pointer at +8). There is no explicit validation that these lengths are sane (non-negative, bounded) or that the source buffers are actually at least that long, but they are assumed to be consistent as produced by EncCertExchangeMessage_to_CertExchangeMessage and earlier ASN.1 decoding. So if an attacker can drive malformed ASN.1 into this chain and trigger inconsistent internal lengths/pointers, they could cause heap overflow or out-of-bounds read/write in these memcpy calls.",
+            "However, the actual crash is labeled only 'Process Termination : Get_DER_Child' without a sanitizer or signal; might be a controlled early-return or an abort inside one of the Decode_* helpers. Without more, we treat the core unsafe operation as the unchecked memcpy in DecryptCertExchange that depends entirely on upstream parsing logic with no final-range check. The fact that fuzzing reached Get_DER_Child suggests malformed DER; if ASN.1 helpers are buggy, they may derive bogus lengths/fields. But within DecryptCertExchange itself, the potential overflow is clear: memcpy(dst, src, len) where len is from *(int*)(*local_18+0x10) and src is *(void**)(*plVar5+8), both ultimately derived from attacker-controlled ASN.1 with no direct bounds check here.",
+            "JNI root Java_com_ubikey_jni_UbikeyJni_jdecrypt: obtains a Java byte[] (param_3) length via env->GetArrayLength, allocates a native buffer of that size, copies the data, then calls DecryptCertExchange(DAT_..., ..., __s, __size). No validation of __size, and content is entirely attacker-controlled via the Java caller. So the ASN.1 parsing chain is reachable with fully attacker-controlled bytes and length information.",
+            "We don't see the Java caller, but given this is a fuzz harness and typical app behavior (decrypting a certificate exchange message), the length is just the array length from Java. So taint: Java byte[] -> JNI memcpy into __s -> DecryptCertExchange(param_6=__s,param_7=__size) -> Decode_DER_ASN1_ST, Get_DER_Child, etc. If Decode/Convert/EncCertExchangeMessage_to_CertExchangeMessage mis-validate or fail to check consistency of embedded lengths vs actual buffers, DecryptCertExchange will trust those embedded lengths when allocating and copying. That is a classic pattern that can lead to heap overflow (CWE-787/CWE-122) or OOB read (CWE-125).",
+            "We do not have the decompiled bodies of Decode_DER_ASN1_ST, Compute_ASN1_LengthSize, etc., so we cannot prove they are buggy. The crash being reported at Get_DER_Child could just be error-handling returning 0 up the chain (non-vulnerability). But the presence of unchecked memcpy using internal length fields without any sanity bounds or use of param_7 to cap operations is a structural bug pattern. Under fuzzing, a crash in Get_DER_Child might indicate some Decode_* helper read outside bounds from a malformed tag/length; however, we lack direct view. Still, because the entire ASN.1 object and lengths are influenced by untrusted input and no high-level validation enforces that embedded lengths remain within the original buffer size, it's reasonable to classify this as a likely memory-safety vulnerability.",
+            "Severity: if exploitable, this could be heap overwrite/from-heap-controlled lengths leading to information disclosure or RCE, especially since memcpy lengths are 32-bit ints potentially large; but allocations currently use the same length, so overflow would most likely come from a mismatch where the source buffer is smaller than its recorded length (out-of-bounds read) or later uses of these lengths. Given incomplete visibility into Decode*/Enc* functions, we should assign 'high' with less than full confidence, since we do see concrete unsafe memcpy paths controlled by ASN.1 data, but not the exact crashing instruction.",
+            "Thus: classify as vulnerable, with medium-high confidence (~0.75). CWE-787 (out-of-bounds write) and CWE-125 (out-of-bounds read) are appropriate; primarily CWE-787 due to memcpy on allocated buffers from potentially inconsistent metadata."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "JNI jdecrypt passes fully attacker-controlled byte array and size into DecryptCertExchange with no validation.",
+            "DecryptCertExchange performs memcpy with length fields and source pointers derived from ASN.1/CertExchange structs without independent bounds checking.",
+            "ASN.1 parsing helpers (Decode_DER_ASN1_ST, Get_DER_Child, etc.) use embedded lengths/tags from attacker-controlled DER; any bug there can corrupt internal length/pointer fields, which DecryptCertExchange then trusts, leading to potential heap out-of-bounds access.",
+            "Fuzzing reached deep into ASN.1 parsing (Get_DER_Child) with malformed data, indicating this path is reachable and complex enough for memory-safety bugs."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "00110190",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n... \nDecryptCertExchange(...,__s,__size);",
+              "note": "JNI copies attacker-controlled Java byte[] of length __size into native buffer and passes it directly into DecryptCertExchange."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "001218a0",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = *(int *)(*local_18 + 0x10);\n*param_3 = iVar1;\npvVar3 = malloc((long)iVar1);\n*param_2 = pvVar3;\nif (pvVar3 != (void *)0x0) {\n  memcpy(pvVar3,*(void **)(*plVar5 + 8),(long)*param_3);\n  iVar1 = *(int *)(plVar5[1] + 0x10);\n  *param_5 = iVar1;\n  pvVar3 = malloc((long)iVar1);\n  *param_4 = pvVar3;\n  ...\n  memcpy(pvVar3,*(void **)(plVar5[1] + 8),(long)*param_5);\n}",
+              "note": "Length fields and source pointers from CertExchangeMessage are trusted without cross-checking against original DER buffer length."
+            },
+            {
+              "function": "Convert_ASN1_to_EncCertExchangeMessage",
+              "address": "001210bc",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "lVar2 = Get_DER_Child(param_1,0,2);\n*plVar4 = lVar2;\nif (lVar2 != 0) {\n  lVar2 = Get_DER_Child(param_1,1,4);\n  plVar4[1] = lVar2;\n  if ((lVar2 != 0) && (iVar1 = Convert_BINT_to_Binary(*plVar4,local_10), 0 < iVar1)) {\n    ...\n    lVar2 = Get_DER_Child(param_1,2,0x10);\n    plVar4[2] = lVar2;\n  }\n}",
+              "note": "EncCertExchangeMessage fields (later used to derive pointers/lengths) come from ASN.1 children with minimal structural checks."
+            },
+            {
+              "function": "Get_DER_Child",
+              "address": "00119648",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "do {\n  lVar5 = *(long *)(param_1 + 0x10);\n  if (param_2 == iVar8) {\n    uVar7 = (uint)*(byte *)(lVar5 + iVar6);\n    ...\n    switch(param_3) { ... calls Decode_DER_* ... }\n  }\n  iVar6 = iVar6 + 1;\n  iVar2 = Compute_ASN1_LengthSize(lVar5 + iVar6);\n  iVar3 = Compute_ASN1_ValueLength_from_LO(*(long *)(param_1 + 0x10) + (long)iVar6);\n  if (iVar3 == -1) {\n    return 0;\n  }\n  iVar8 = iVar8 + 1;\n  iVar6 = iVar2 + iVar3 + iVar6;\n} while (iVar6 != iVar1);",
+              "note": "Iterates over ASN.1 children based on computed lengths; correctness of helpers is essential to prevent OOB access when parsing attacker-controlled DER."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 00110190",
+            "DecryptCertExchange @ 001218a0",
+            "Convert_ASN1_to_EncCertExchangeMessage @ 001210bc",
+            "Get_DER_Child @ 00119648"
+          ],
+          "recommendations": [
+            "Audit Decode_DER_ASN1_ST, Compute_ASN1_LengthSize, and related ASN.1 helpers for strict bounds checking of tag/length fields against the original buffer length (param_7).",
+            "In DecryptCertExchange, validate that length fields read from CertExchangeMessage are non-negative, reasonably bounded, and consistent with underlying buffer sizes before calling memcpy.",
+            "Consider using safer copy primitives (e.g., memmove with explicit size checks or capped lengths) and propagate the original input length into downstream parsing logic to enforce upper bounds."
+          ],
+          "assumptions": [
+            "Java layer can pass arbitrary byte[] contents and lengths into jdecrypt (e.g., from network or user input).",
+            "EncCertExchangeMessage_to_CertExchangeMessage and ASN.1 Decode_* functions derive lengths directly from untrusted DER metadata.",
+            "The fuzz crash is related to malformed DER driving this chain, even though the precise crashing instruction is not visible."
+          ],
+          "limitations": [
+            "Bodies of ASN.1 helper functions (Decode_DER_ASN1_ST, Compute_ASN1_ValueLength, etc.) are not decompiled here, so specific OOB behavior inside them is inferred, not proven.",
+            "Java caller(s) of UbikeyJni.jdecrypt were not inspected; exact sources of untrusted data are assumed based on typical usage."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:16",
+          "llm_requests": 3,
+          "llm_tool_calls": 10,
+          "input_tokens": 20253,
+          "output_tokens": 3198
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Convert_Binary_to_BINT",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Convert_Binary_to_BINT",
+            "Decode_DER_Integer",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_Binary_to_BINT",
+              "Decode_DER_Integer",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Convert_Binary_to_BINT in libUbikeyJni.so; lower frames are Decode_DER_Integer, Convert_ASN1_to_EncCertExchangeMessage, DecryptCertExchange, then JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt. Crash trigger text only says 'Process Termination : Convert_Binary_to_BINT' with no allocator/sanitizer, so I look directly at this function.",
+            "Ghidra decompilation shows Convert_Binary_to_BINT(byte *param_1, int param_2, long *param_3): it optionally allocates/expands a BINT, then interprets param_1 as a big‑endian byte array of length param_2, packing into 32‑bit words inside the BINT. Core logic: computes uVar2 = param_2-1, uVar9 = (uVar2 >> 2)+1, ensures capacity via Expand_BINT, then iterates from pbVar8=param_1 up to param_1+uVar2, folding bytes into uVar6 and storing into *(ulong*)(lVar5 + uVar4*8). It finally trims leading zero words.",
+            "Potential crash sites: (1) if Expand_BINT fails and returns 0, function deletes BINT and returns null safely; (2) if param_3 is NULL it calls Create_BINT and checks its return; (3) loops might read from param_1 or write to *param_3 out of bounds if param_2 is inconsistent, but the code uses param_2 only for bounds and uVar9 for capacity. There is no direct obvious out‑of‑bounds write on param_3 because Expand_BINT is called with uVar9 and the code then writes exactly uVar9 words (or fewer) into *param_3. So likely crash is a bad pointer/dereference on param_1 or param_3, not a subtle miscalculation.",
+            "However, Convert_Binary_to_BINT never validates that param_1 is non‑NULL or that param_2 is non‑negative; it assumes a valid buffer and size provided by its caller. If fuzzing passes bogus values it may cause a crash (e.g., NULL param_1 with param_2>0). To see if that can happen in real app paths, I must inspect its callers, in particular the preceding stack frames: Decode_DER_Integer, Convert_ASN1_to_EncCertExchangeMessage, DecryptCertExchange. I do not have their decompilations here, but by naming they look like internal parsing of ASN.1 cert exchange messages where lengths are driven by received data.",
+            "Next, inspect JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt. Decompilation shows: iVar1 = env->GetArrayLength(param_3); __size=(size_t)iVar1; __src=env->GetByteArrayElements(param_3,0); __s=malloc(__size); memset(__s,0,__size); memcpy(__s,__src,__size); env->ReleaseByteArrayElements(param_3,__src,2); then it calls DecryptCertExchange(…, __s, __size) and frees __s. So DecryptCertExchange gets a pointer+length pair directly from a Java byte[]. Length is bounded by Java array length (int), but there is no extra validation here; parsing and length checks must happen deeper in native.",
+            "The vulnerability question is: does the crash in Convert_Binary_to_BINT reflect a logic/length bug in cert parsing that can be triggered by arbitrary attacker‑controlled ciphertext provided via this JNI; or is it an expected crash if the fuzzer drives JNI with totally invalid param_3 (e.g., passing null or a non‑byte[])? The JNI bridge itself assumes param_3 is a valid Java byte array. In real app, param_3 likely comes from cryptographic protocol data (network, server, NFC). If attacker can influence that data, and if deeper parsing miscalculates an ASN.1 INTEGER length, they could drive Convert_Binary_to_BINT with an inconsistent (param_1,param_2) pair that reads beyond the buffer.",
+            "Without decompiled Decode_DER_Integer and DecryptCertExchange I cannot show a concrete integer‑overflow or bounds‑check bug. However, typical ASN.1 decoders maintain current offset and length from the input; if those are mishandled, param_1+param_2 might exceed the original __s buffer. Given fuzzing already produced a crash at Convert_Binary_to_BINT, this strongly suggests a missing bounds check or length validation in the certificate parsing logic, not just a NULL passed by harness, because JNI bridge already ensures a real heap buffer and len. The fuzzer operates via fuzz_one_input at the Java layer, so it likely passes a byte[] of arbitrary length, which is something an attacker could approximate by sending malformed cert exchange messages.",
+            "Convert_Binary_to_BINT itself assumes param_2 > 0 and does param_2-1 without checking for negative; but param_2 is signed int. If Decode_DER_Integer passes a negative length due to over/underflow, uVar2=param_2-1 underflows to a huge unsigned, leading to gigantic uVar9, Expand_BINT(param_3,uVar9) likely fails and returns 0; function then cleans up and returns NULL, not crashing. Therefore the more realistic crash types are: (a) param_3 points to an invalid BINT (e.g., freed / uninitialized) due to a higher‑level bug, or (b) param_1 points outside __s due to misparsed offsets. Both are memory safety bugs that could be reached with malformed ASN.1 input.",
+            "The JNI bridge jdecrypt clearly exposes DecryptCertExchange to arbitrary Java callers as long as they have a byte[]; there is no signature/auth check before parsing. So an untrusted Java caller or any external data path the app feeds into this JNI (e.g., from remote server) can influence the native parsing. There is no sign this is a harness‑only path; libUbikeyJni.so is part of banking app crypto. Fuzz harness just automated calls into a real JNI method.",
+            "Given evidence: (1) vulnerable pattern: manual ASN.1 parsing leading to Convert_Binary_to_BINT with no internal validation and crash observed; (2) parameters originate from attacker‑influenced Java byte[]; (3) JNI bridge copies length‑controlled data into heap and passes pointer+length only, no extra checks; (4) crash not attributable to fuzz harness misusing JNI (it calls a real JNI using normal env calls) — I assess this as a likely exploitable memory safety vulnerability in ASN.1 integer/cert parsing path, though exact primitive (OOB read/write vs. bad deref) is uncertain.",
+            "Impact: If parsing uses these BINTs for cryptographic key material or further processing, an attacker could trigger native crashes (denial of service) and potentially craft inputs to get controlled out‑of‑bounds reads/writes. Given involvement of pointer arithmetic on untrusted lengths, classify as at least high severity memory‑corruption risk with moderate confidence (~0.7), but not fully confirmed RCE."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Convert_Binary_to_BINT operates on caller-provided buffer and length with no local validation and is at the top crashing frame",
+            "JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt passes an attacker-controllable byte array directly into DecryptCertExchange, which eventually calls Convert_Binary_to_BINT during ASN.1/certificate parsing",
+            "Crash arises in real library code, not in fuzz-only harness logic, and the path is reachable from normal app use via a public JNI method",
+            "Manual ASN.1/BIGNUM parsing pattern plus lack of bounds checking strongly suggests out-of-bounds or invalid-pointer access on malformed input"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-20"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Convert_Binary_to_BINT",
+              "address": "0x0011cea8",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "plVar10 = (long *)0x0;\nif ((param_3 == (long *)0x0) &&\n   (param_3 = (long *)Create_BINT(), plVar10 = param_3, param_3 == (long *)0x0)) {\n  return (long *)0x0;\n}\n...\npbVar8 = param_1;\n...\npbVar7 = pbVar8 + 1;\nuVar6 = (ulong)*pbVar8 | uVar6 << 8;\n...\n*(ulong *)(lVar5 + uVar4 * 8) = uVar6;",
+              "note": "Reads bytes from param_1 and writes words into *param_3 using lengths entirely dictated by caller; no local checks that param_1 buffer is large enough."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "0x00110190",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n(**(code **)(*param_1 + 0x600))(param_1,param_3,__src,2);\nuVar2 = DecryptCertExchange(...,__s,__size);",
+              "note": "JNI bridge copies Java-provided byte[] of arbitrary length into native heap and calls DecryptCertExchange with pointer+length; no validation of content or structure before deeper ASN.1 parsing."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 0x00110190",
+            "DecryptCertExchange",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "Decode_DER_Integer",
+            "Convert_Binary_to_BINT @ 0x0011cea8"
+          ],
+          "recommendations": [
+            "Review and decompile Decode_DER_Integer, Convert_ASN1_to_EncCertExchangeMessage, and DecryptCertExchange to locate the exact point where (param_1,param_2) for Convert_Binary_to_BINT are derived from input and add strict bounds checking against the original buffer size",
+            "In Convert_Binary_to_BINT, defensively validate param_2 (non-negative, not exceeding remaining buffer length tracked alongside param_1) before reading bytes and writing into the BINT structure",
+            "In Java_com_ubikey_jni_UbikeyJni_jdecrypt, consider adding high-level sanity checks on the input byte[] (e.g., minimal certificate/exchange message length) and treat parsing failures as errors instead of letting deeper native code proceed with inconsistent lengths"
+          ],
+          "assumptions": [
+            "Fuzz harness calls Java_com_ubikey_jni_UbikeyJni_jdecrypt with a valid Java byte[] and does not intentionally break JNI invariants beyond malformed contents",
+            "Decode_DER_Integer and DecryptCertExchange do not fully validate ASN.1 lengths against the overall buffer size, enabling inconsistent (pointer,length) to reach Convert_Binary_to_BINT",
+            "The observed process termination is due to memory safety (e.g., invalid access) rather than an intentional abort inside underlying crypto/ASN.1 libraries"
+          ],
+          "limitations": [
+            "Exact crash instruction and signal (e.g., SIGSEGV vs abort) were not provided, so the precise corruption primitive cannot be confirmed",
+            "Decompiled bodies of Decode_DER_Integer, Convert_ASN1_to_EncCertExchangeMessage, and DecryptCertExchange were not inspected, so the exact faulty bounds check or offset calculation is inferred, not proven",
+            "No Java-level call graph or source was available to trace how untrusted network or user inputs are fed into jdecrypt in the production app"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:29",
+          "llm_requests": 4,
+          "llm_tool_calls": 8,
+          "input_tokens": 27552,
+          "output_tokens": 2874
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Convert_BINT_to_Binary",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "Convert_BINT_to_Binary",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_BINT_to_Binary",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: crash is reported in Convert_BINT_to_Binary within libUbikeyJni.so. No allocator/sanitizer frames in stack trace, so this function is the starting point for analysis.",
+            "Review Convert_BINT_to_Binary decompilation: it calls Get_BINT_bits_length() (no args) and then computes a bit/byte length, iterating iVar3 from (len>>3)-1 down to 0. It reads from *(ulong *)(*param_1 + (long)(iVar1 >> 2) * 8) and writes sequential bytes to param_2. There is no explicit bounds check on param_2; it assumes the caller provided a buffer large enough to hold (len>>3) bytes. Also no null-checks for param_1 or param_2.",
+            "Within this function, the potential crash sources are: (1) param_1 is NULL or *param_1 invalid, leading to invalid memory read; (2) Get_BINT_bits_length returning a value inconsistent with actual size of BINT storage at *param_1, causing out-of-bounds read from that structure; (3) param_2 buffer too small, leading to buffer overrun writes. All 3 are memory-safety issues if caller can influence BINT contents/size or output buffer size.",
+            "Trace caller: Convert_ASN1_to_EncCertExchangeMessage. It sets plVar4 based on *param_2 or allocates new EncCertExchangeMessage, then populates plVar4[0] and plVar4[1] via Get_DER_Child(param_1,0,2) and (1,4). It then calls Convert_BINT_to_Binary(*plVar4, local_10) and tests return value > 0, and then checks first byte of local_10. local_10 is a 4-byte local array (undefined4 local_10[2];) on stack, so a total of 8 bytes are reserved, but the call passes &local_10 as param_2. Convert_BINT_to_Binary treats param_2 as an arbitrary-length byte buffer and writes up to (len>>3) bytes into it, with no limit. This is a classic stack-based buffer overflow: if Get_BINT_bits_length returns more than 64 bits, the loop will write more than 8 bytes into local_10, overflowing adjacent stack locals including saved frame pointer and stack canary. The function indeed has stack protector (local_8/stack_chk_guard and __stack_chk_fail), so overflow will typically be detected and abort. This is clear unsafe behavior independent of harness; it will occur for any BINT larger than a few bytes.",
+            "Check stack-flow into DecryptCertExchange: it calls Convert_ASN1_to_EncCertExchangeMessage(lVar2,&local_10) where local_10 is a long, not a small buffer. Here, Convert_ASN1_to_EncCertExchangeMessage uses &local_10 as *param_2 (output pointer to message pointer), not as a byte buffer, so that call site is safe with respect to param_2. The internal unsafe call is Convert_BINT_to_Binary(*plVar4, local_10) where local_10 is its own local 4/8-byte array. Thus the bug is clearly within Convert_ASN1_to_EncCertExchangeMessage, not in its callers.",
+            "Trace to JNI: Java_com_ubikey_jni_UbikeyJni_jdecrypt obtains a byte[] from the Java side via JNI functions: GetArrayLength and GetByteArrayElements (or similar) through vtable offsets 0x558 and 0x5c0. It allocates a malloc(__size) buffer, copies the Java bytes into it, and calls DecryptCertExchange(..., __s, __size). So the attacker controls param_6 and param_7 of DecryptCertExchange via the Java-provided ciphertext/ASN. There is no validation on __size except that param_7 < 1 is rejected. So arbitrary user-supplied data goes into Decode_DER_ASN1_ST and subsequently Get_DER_Child and Convert_ASN1_to_EncCertExchangeMessage, where our identified overflow resides. That establishes a clear taint path from attacker-controlled Java input to the vulnerable stack buffer.",
+            "Determine exploitability and classification: The overflow is on a stack-local buffer (local_10) in Convert_ASN1_to_EncCertExchangeMessage. Number of bytes written is proportional to bit-length of BINT from the ASN. If the ASN.1 structure is attacker-controlled (which it is via DecryptCertExchange -> Decode_DER_ASN1_ST), then attacker can likely choose a BINT field with larger length, causing arbitrary overwrite of stack, including stack canary (though canary mitigates direct ROP, but still results in controlled crash/DoS). On targets without canary or with partial control, this might be exploitable for RCE. At minimum, it is a high-confidence memory corruption vulnerability reachable from untrusted input, causing denial of service and potential code execution.",
+            "Crash context: Provided crash message shows only 'Process Termination : Convert_BINT_to_Binary' with repeated frames and cktrace stopping. That is consistent with stack protector abort or corrupted frame pointer due to out-of-bounds writes. Even if immediate crash occurs in Convert_BINT_to_Binary, roots lie in unsafe design: caller not providing appropriate output buffer and callee not checking bounds. Given code evidence, this is not a harness artifact; JNI harness uses realistic Java array semantics and simply passes ciphertext down.",
+            "CWE mapping: Primary weakness is writing past end of fixed-size stack buffer (CWE-121: Stack-based Buffer Overflow) and more generically CWE-787 (Out-of-bounds Write). It also reflects missing bounds checking (CWE-125/190 not primary).",
+            "Severity: Because the issue is a stack overflow in native code invoked via JNI on untrusted input, the plausible worst case is native code execution within app process; on Android with modern mitigations, reliable RCE may be non-trivial but still within scope. At minimum it is a high-severity memory corruption/DoS; classify as 'high' with potential to be 'critical' but not fully proven to bypass all mitigations.",
+            "Confidence: Decompilation clearly shows small stack buffer used as variable-length output with no length parameter, and direct taint path from Java input. Thus assessment is very strong; set confidence ~0.95."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "Convert_ASN1_to_EncCertExchangeMessage allocates a small stack buffer local_10 (8 bytes) and passes it as output buffer to Convert_BINT_to_Binary, which writes up to (Get_BINT_bits_length()>>3) bytes with no bounds check, causing stack overflow for larger BINTs.",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt takes attacker-controlled Java byte[] input, copies it to native memory, and passes it directly into DecryptCertExchange, which decodes ASN.1 and eventually invokes the vulnerable Convert_ASN1_to_EncCertExchangeMessage path, establishing a clear taint route from untrusted input to the overflow.",
+            "The vulnerable code resides in production library libUbikeyJni.so, not in the fuzz harness; the bug is independent of harness behavior and will trigger for sufficiently large ASN.1 integer fields in real usage."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Convert_BINT_to_Binary",
+              "address": "0x0011d788",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar3 = Get_BINT_bits_length();\n... iVar3 = (iVar1 >> 3) + -1;\nif (iVar1 >> 3 != 0) {\n  do {\n    ...\n    *param_2 = (char)(*(ulong *)(*param_1 + (long)(iVar1 >> 2) * 8) >> ((ulong)(uint)(iVar3 % 4 << 3) & 0x3f));\n    param_2 = param_2 + 1;\n    iVar3 = iVar2;\n  } while (iVar2 != -1);\n}",
+              "note": "Writes (Get_BINT_bits_length()>>3) bytes to param_2 with no bounds parameter or checks, assuming caller-provided buffer is large enough."
+            },
+            {
+              "function": "Convert_ASN1_to_EncCertExchangeMessage",
+              "address": "0x001210bc",
+              "file": "libUbikeyJni.so",
+              "snippet": "undefined4 local_10[2];\n...\nif ((lVar2 != 0) && (iVar1 = Convert_BINT_to_Binary(*plVar4,local_10), 0 < iVar1)) {\n  if ((char)local_10[0] == '\\x01') {\n    ...\n  }\n}",
+              "note": "local_10 is an 8-byte stack buffer passed as param_2 to Convert_BINT_to_Binary, which may write more than 8 bytes into it, overflowing the stack."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "0x001218a0",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = Convert_ASN1_to_EncCertExchangeMessage(lVar2,&local_10);\n...",
+              "note": "Calls vulnerable Convert_ASN1_to_EncCertExchangeMessage with ASN.1 object derived from attacker-controlled data."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "0x00110190",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n(**(code **)(*param_1 + 0x600))(param_1,param_3,__src,2);\nuVar2 = DecryptCertExchange(DAT_00171908,&DAT_00171910,&DAT_00171918,&DAT_00171920,&DAT_00171928,__s,__size);",
+              "note": "JNI entry copies arbitrary Java byte[] into native buffer and passes it directly into DecryptCertExchange, providing an attacker-controlled DER/ASN.1 structure that can drive the overflow."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 0x00110190",
+            "DecryptCertExchange @ 0x001218a0",
+            "Convert_ASN1_to_EncCertExchangeMessage @ 0x001210bc",
+            "Convert_BINT_to_Binary @ 0x0011d788"
+          ],
+          "recommendations": [
+            "Fix Convert_ASN1_to_EncCertExchangeMessage by using a properly sized buffer for the BINT-to-binary conversion (e.g., dynamically allocate based on Get_BINT_bits_length or pass in a length parameter and enforce it) instead of the fixed small local_10 stack array.",
+            "Update Convert_BINT_to_Binary to take an explicit buffer length parameter and perform bounds checking before writing, or redesign so it allocates the destination itself and returns a managed buffer.",
+            "Add robust input validation on ASN.1 structures decoded from untrusted data (e.g., cap maximum BINT bit lengths) and enable/keep modern mitigations (stack canaries, ASLR, NX) while patching."
+          ],
+          "assumptions": [
+            "The byte[] passed to UbikeyJni.jdecrypt is attacker-controlled or derived from untrusted sources such as network protocols or external files.",
+            "Get_DER_Child and Decode_DER_ASN1_ST do not enforce strict maximum sizes that would always keep the BINT length <= size of local_10.",
+            "The decompilation accurately reflects stack layout (local_10 occupying 8 bytes) and calling conventions."
+          ],
+          "limitations": [
+            "Java-side code for UbikeyJni.jdecrypt was not inspected directly via Jadx; attacker control of input is inferred from standard JNI usage and the native code pattern.",
+            "Details of DER/ASN.1 parsing and maximum enforced sizes for integer fields are not visible here; precise exploitability depends on those implementations.",
+            "Runtime mitigations (stack canaries, CFG, pointer authentication) on the target device may affect practical exploitability but do not remove the underlying memory-safety flaw."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:25",
+          "llm_requests": 3,
+          "llm_tool_calls": 10,
+          "input_tokens": 19605,
+          "output_tokens": 3010
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Init_SEED",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Init_SEED",
+            "SEED_CBC",
+            "EncCertExchangeMessage_to_CertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libEngineManager.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libIWAndroid.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libKeySharp_Android_Core.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Init_SEED",
+              "SEED_CBC",
+              "EncCertExchangeMessage_to_CertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libsmartaib-core.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libswidchauthsdk_android.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/liby7wrapper.so": [
+              "SEED_CBC"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Init_SEED in libUbikeyJni.so; crash reason is \"Process Termination : Init_SEED\" suggesting an internal abort/assert or failure inside key schedule/init routine rather than allocator/sanitizer.",
+            "Search_functions_by_name in Ghidra failed to resolve Init_SEED / DecryptCertExchange / JNI symbol names, which limits direct code inspection, but the stack shows a straightforward crypto pipeline: Java_com_ubikey_jni_UbikeyJni_jdecrypt → DecryptCertExchange → EncCertExchangeMessage_to_CertExchangeMessage → SEED_CBC → Init_SEED.",
+            "Java-side UbikeyJni.jdecrypt takes a single byte[] and returns int. There is no Java-layer length check, so the native side must handle arbitrary-length ciphertext from the caller. However, SEED_CBC and Init_SEED are typical block cipher routines that operate on fixed-size keys/blocks; Init_SEED is almost certainly a context initialiser that validates key length, mode flags, etc.",
+            "The termination reason naming (“Init_SEED”) and lack of allocator frames strongly suggest the function explicitly terminates (e.g., abort/exit/return error) when init parameters are invalid or environment is wrong (e.g., uninitialised global state, missing key), not that it caused memory corruption. Fuzzing harness likely passed malformed or out-of-sequence data (e.g., calling decrypt before session/key is established).",
+            "There is no evidence that attacker-controlled data is used as a pointer, length for memory copy, or index without bounds checks. All we know is that bad parameters eventually reach Init_SEED and cause process termination. This is, at most, a controlled abort / logic error, leading to app-level DoS when API is misused, but normal app flows would not call jdecrypt before running the expected key exchange/session creation methods.",
+            "Because we cannot decompile the native functions and see a clear out-of-bounds, use-after-free, etc., and the call stack aligns with a crypto initialisation error rather than a low-level memory fault, the safer classification is non-vulnerability (or at most harness-induced DoS)."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.55,
+          "reasons": [
+            "Crash occurs in Init_SEED (crypto init) with no allocator/sanitizer frames, consistent with internal abort on invalid parameters rather than memory corruption.",
+            "JNI jdecrypt simply forwards a byte[]; no evidence native code uses input as pointer/size in unsafe operations.",
+            "Fuzz harness likely violates normal call sequencing (e.g., decrypt before creating/initialising session/key), so termination reflects misuse of API rather than exploitable bug."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "com.ubikey.jni.UbikeyJni.jdecrypt",
+              "file": "classes3.dex",
+              "snippet": "public native int jdecrypt(byte[] bArr);",
+              "note": "JNI bridge exposes decryption taking arbitrary byte[]; all validation must be native, but crash location suggests controlled failure in Init_SEED."
+            },
+            {
+              "function": "Init_SEED",
+              "file": "libUbikeyJni.so",
+              "note": "Top native frame with process termination; likely crypto context initialiser aborting on invalid params rather than corrupting memory."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "DecryptCertExchange",
+            "EncCertExchangeMessage_to_CertExchangeMessage",
+            "SEED_CBC",
+            "Init_SEED"
+          ],
+          "recommendations": [
+            "Decompile and review Init_SEED/SEED_CBC to confirm they safely handle invalid input and never use attacker-controlled values as buffer sizes or pointers.",
+            "Add explicit error returns instead of hard process termination on invalid crypto initialisation parameters to avoid unnecessary DoS.",
+            "Document required call sequence (session creation, key setup, then decrypt) and enforce it with robust state checks in JNI/native code."
+          ],
+          "assumptions": [
+            "Init_SEED is a standard SEED cipher init routine that may abort on invalid configuration but does not contain hidden memcpy/array indexing defects.",
+            "The fuzz harness can invoke jdecrypt without establishing proper session or keys first, which real app logic would normally do."
+          ],
+          "limitations": [
+            "Native implementations of Init_SEED, SEED_CBC, DecryptCertExchange, and the JNI glue could not be decompiled, so memory-safety guarantees cannot be conclusively proven.",
+            "Crash dump does not include signal type, registers, or disassembly at faulting instruction, limiting precise root-cause attribution."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:36",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 18555,
+          "output_tokens": 1115
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below abort/stack_chk_fail is Convert_ASN1_to_EncCertExchangeMessage; decompiled it and saw it only uses stack canary and structured parsing helpers (Get_DER_Child, Convert_BINT_to_Binary). No obvious unsafe memcpy here, and crash is via __stack_chk_fail, i.e. stack canary corruption somewhere in this or a caller.",
+            "Next frame DecryptCertExchange decompiled: it decodes ASN.1 (Decode_DER_ASN1_ST), converts to an internal EncCertExchangeMessage, then to CertExchangeMessage. It then reads two length fields from that internal structure, allocates with malloc(length), and memcpy’s from pointers within the internal structure to those freshly allocated buffers. There is no explicit range check besides what the earlier conversion functions do. Potential risk would be if those length fields could be attacker-controlled and not validated by EncCertExchangeMessage_to_CertExchangeMessage, leading to oversized memcpy or integer issues. However, we cannot see those helper functions’ implementations here, so we cannot prove such a bug. The immediate crash, however, is not in memcpy but in stack_chk_fail, meaning the compiler detected a stack canary overwrite. That canary is checked in both Convert_ASN1_to_EncCertExchangeMessage and DecryptCertExchange. The decompiled bodies themselves do not contain obvious stack-based buffer writes that would smash the canary, implying the overwrite likely occurs in one of the helper routines they call, not in the shown snippets.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt: this uses JNI env vfuncs to get the length and pointer of a Java byte[] (param_3), allocates a C buffer of that exact size, copies the bytes into it, then calls DecryptCertExchange(DAT_..., __s, __size). So the ASN.1 blob that Decode_DER_ASN1_ST parses comes directly from attacker-controlled Java data, with no validation in Java; length is simply array length. Thus the DER decoding and conversion routines process fully untrusted input. That makes stack corruption in this path plausibly attacker-triggerable in real usage, assuming the same code path is reachable with network- or user-supplied data in the app.",
+            "Given that the compiler inserted stack canaries and we see a runtime __stack_chk_fail, there is definitely some stack buffer overrun / memory corruption somewhere in the call chain during parsing of untrusted ASN.1. Even though we cannot see the exact vulnerable helper (Decode_DER_ASN1_ST, Convert_BINT_to_Binary, EncCertExchangeMessage_to_CertExchangeMessage, etc.), the observable symptom is corruption of the function’s stack frame, which is a classical memory-safety issue. The JNI code shows no artificial harness misuse: it passes a normal byte[] and length without tampering. The crash is therefore not a harness artifact but a real parsing bug rooted in the vendor’s ASN.1/CertExchange parsing logic.",
+            "Impact-wise, stack buffer overflow in native crypto/message parsing code tied to external data can in principle be used for RCE, though stack canaries make exploitation harder; at minimum, this is a robust native DoS vector, and depending on surrounding mitigations (ASLR, NX, PIE, etc.) could be exploitable. Because we do not see the exact overrun location, but the evidence of canary failure plus attacker-controlled input and a complex parser is strong, I classify this as a likely vulnerability with relatively high confidence, but not fully 0.9+ confirmed as we lack the specific overflow site."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.82,
+          "reasons": [
+            "__stack_chk_fail indicates a stack buffer overflow or similar memory corruption in native parsing code, not a benign abort.",
+            "DecryptCertExchange and helpers parse an ASN.1 blob and derive lengths and pointers from it with no visible top-level bounds checks; input originates directly from attacker-controllable Java byte[].",
+            "JNI bridge passes arbitrary Java byte[] to DecryptCertExchange, so this path is reachable with untrusted data under realistic app usage, making the overflow likely exploitable or at least a strong native DoS."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "00110190",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nDecryptCertExchange(...,__s,__size);",
+              "note": "Native ASN.1 parser is invoked on arbitrary Java byte[] of attacker-controlled length without validation at the Java or JNI boundary."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "001218a0",
+              "file": "libUbikeyJni.so",
+              "snippet": "lVar2 = Decode_DER_ASN1_ST(param_6);\n...\niVar1 = Convert_ASN1_to_EncCertExchangeMessage(lVar2,&local_10);\n...\nmemcpy(pvVar3,*(void **)(*plVar5 + 8),(long)*param_3);\n...\nmemcpy(pvVar3,*(void **)(plVar5[1] + 8),(long)*param_5);",
+              "note": "Complex ASN.1/CertExchange parsing pipeline; uses lengths from parsed structures to drive malloc/memcpy; stack canary present, and its failure indicates corruption caused somewhere in this chain."
+            },
+            {
+              "function": "Convert_ASN1_to_EncCertExchangeMessage",
+              "address": "001210bc",
+              "file": "libUbikeyJni.so",
+              "snippet": "local_8 = *(long *)PTR___stack_chk_guard_0016bf58;\n...\nif (local_8 == *(long *)PTR___stack_chk_guard_0016bf58) {\n  return;\n}\n/* WARNING: Subroutine does not return */\n__stack_chk_fail(uVar3);",
+              "note": "Direct caller in stack trace before __stack_chk_fail; the observed abort is due to a failing stack canary, implying prior stack corruption in this or a callee."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 00110190",
+            "DecryptCertExchange @ 001218a0",
+            "Convert_ASN1_to_EncCertExchangeMessage @ 001210bc",
+            "__stack_chk_fail",
+            "abort"
+          ],
+          "recommendations": [
+            "Audit and fuzz Decode_DER_ASN1_ST, Convert_BINT_to_Binary, EncCertExchangeMessage_to_CertExchangeMessage, and related ASN.1 helpers for stack-based buffers and unchecked length handling; fix any out-of-bounds writes.",
+            "Introduce robust bounds checking on all parsed length fields before allocations and memcpy calls, and ensure ASN.1 decoding enforces maximum sizes consistent with protocol expectations.",
+            "Add additional hardening such as structured parsing libraries, strong input validation at the Java layer (e.g., size caps), and negative test cases in CI using coverage-guided fuzzing on the jdecrypt/DecryptCertExchange path."
+          ],
+          "assumptions": [
+            "The Java byte[] passed into jdecrypt can be influenced by an external party (e.g., server or user) in typical app workflows.",
+            "The same native library and code paths are used in production builds with similar compiler options (stack canaries enabled)."
+          ],
+          "limitations": [
+            "Implementations of Decode_DER_ASN1_ST, Convert_BINT_to_Binary, and EncCertExchangeMessage_to_CertExchangeMessage were not decompiled here, so the exact overflow location is inferred from __stack_chk_fail and not pinpointed.",
+            "The Java-side call graph beyond the JNI method was not inspected to confirm the exact origin of the byte[] data or any higher-level validation."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:51",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 19217,
+          "output_tokens": 1979
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below abort is Convert_ASN1_to_EncCertExchangeMessage, which calls __stack_chk_fail only on stack canary mismatch; the logical work happens before that. DecryptCertExchange is the higher-level function that allocates/copies, and the JNI bridge sets its inputs. I need to check for unsafe memory operations and whether their sizes are derived from attacker-controlled input flowing from Java/JNI.",
+            "In Convert_ASN1_to_EncCertExchangeMessage, the function operates on ASN.1 structures given by param_1 and writes into an EncCertExchangeMessage structure via param_2. It uses Get_DER_Child and Convert_BINT_to_Binary, and if any step fails it deletes the message and returns 0. No raw memcpy/malloc here; the only crash path observed is via stack canary failure calling __stack_chk_fail. That indicates some buffer overflow previously in this or in helpers, but I don’t have visibility into those helpers. I must consider it as a possible memory bug, but the immediate function shows no obvious copies besides external routines.",
+            "DecryptCertExchange decodes ASN.1 from param_6/param_7 via Decode_DER_ASN1_ST, then Convert_ASN1_to_EncCertExchangeMessage, then EncCertExchangeMessage_to_CertExchangeMessage. If all succeed, it reads two length fields from the resulting structs, mallocs buffers of those lengths, and memcpy’s data out of the structures into the fresh buffers. It uses the length values themselves for malloc and memcpy, so as long as the internal structures are consistent (their length fields don’t exceed the actual backing allocation) these copies are safe. Potential vulnerability would be if EncCertExchangeMessage_to_CertExchangeMessage produced corrupted/inconsistent internal buffers, but that’s outside current view. Also, it checks malloc return for null and cleans up correctly; nothing obviously unsafe in this function itself aside from trusting internal struct invariants.",
+            "The JNI function Java_com_ubikey_jni_UbikeyJni_jdecrypt obtains a Java byte[] length using a JNI function pointer at offset 0x558 (likely GetArrayLength), then uses that as size for malloc, memset, memcpy from the Java array elements (via function at 0x5c0, likely GetByteArrayElements or GetPrimitiveArrayCritical). It then calls a release function at 0x600 (ReleaseByteArrayElements) and then passes the copied buffer and its size (__s, __size) to DecryptCertExchange. All sizes used here come directly from the array length reported by the JVM; this is safe because JNI guarantees its own array length is consistent with its element storage. There is no integer truncation: size_t from int length, which on 64-bit is widening, so no overflow. No unchecked indexing. So the JNI wrapper looks memory-safe with respect to Java input.",
+            "The crash shows abort -> __stack_chk_fail -> Convert_ASN1_to_EncCertExchangeMessage, which means the stack canary for that function was corrupted. That implies some buffer overflow in this frame or in a callee. However, in this decompiled body I don’t see explicit stack-local buffers or memcpys; locals are just a couple of longs and an int. The overflow could be in Convert_BINT_to_Binary or Get_DER_Child, or earlier Decoding functions manipulating the same stack frame. Without their code, I can’t pinpoint an unsafe copy. Still, we know input ASN.1 ultimately derives from Java byte[]; fuzz harness feeds arbitrary data to Java, so ASN.1 is supplied by untrusted input. If lower layers don’t fully validate ASN.1 lengths before copying into fixed-size buffers, that would be a genuine memory corruption vulnerability. But since the actual overflow site is in an un-decompiled helper, this remains speculative.",
+            "From the visible code, DecryptCertExchange and the JNI bridge use lengths consistently and allocate based on them; they don’t themselves overrun buffers. The stack canary failure could also be due to a harness artifact: fuzz harness might be freeing or corrupting memory around native data structures outside of the intended protocol usage, or using the API in a way app never does (e.g., passing malformed or completely random ASN.1 into internal certificate routines that might assume some invariants). However, ASN.1 parsing should normally defensively handle malformed input; a stack-smash here suggests a latent bug in the ASN.1-handling helpers. Given that the function is clearly processing externally supplied ASN.1 blobs, this is plausible as a real vulnerability.",
+            "However, the key issue is evidence: in this binary slice, I do not see any direct memcpy/memmove or buffer management around local stack buffers in Convert_ASN1_to_EncCertExchangeMessage itself. All heavy lifting is delegated to external functions (Get_DER_Child, Convert_BINT_to_Binary, Create_ASN1, etc.) that are not decompiled. I cannot assert there is an unsafe copy in them without seeing code. The presence of stack canary failure alone doesn’t suffice to attribute the bug to app code versus a hardened allocator or external library. Still, because these helpers are in the same lib (likely proprietary ASN.1 handlers) and process untrusted ASN.1 originating from Java, the probability of a genuine overflow in their implementation is non-trivial.",
+            "Considering the guidelines, I should label a vulnerability only when there is clear code-level evidence of unsafe behavior. Here I only have a crash in __stack_chk_fail and safe-looking higher-level wrappers; the suspected overflow is in missing internal routines. Thus, I lack direct evidence, and the true root cause could be in those helpers or in library code that might still be part of this app. Given this uncertainty and the absence of explicit improper length handling in the code I can see, I should not definitively classify this as a vulnerability. The more appropriate classification is “unclear / likely in deeper ASN.1 library”, which falls short of confirmed app-level vuln.",
+            "Therefore I will mark is_vulnerable as false, with moderate-to-low confidence, and note that deeper analysis of ASN.1 routines is needed to confirm any real memory corruption. Severity and CWE remain unset due to lack of concrete unsafe operation in visible code."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.35,
+          "reasons": [
+            "Crash is due to stack canary failure in Convert_ASN1_to_EncCertExchangeMessage, but overflow site is in unseen helper routines (e.g., ASN.1 parsing), not in the visible code.",
+            "Visible functions Java_com_ubikey_jni_UbikeyJni_jdecrypt and DecryptCertExchange handle lengths safely: they allocate using validated sizes and memcpy only into buffers sized by those lengths.",
+            "Without code for Get_DER_Child/Convert_BINT_to_Binary/Decode_DER_ASN1_ST, there is no direct evidence of an unsafe copy or bounds violation attributable to this app’s code; the issue could be internal library behavior or harness misuse."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "00110190",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n(**(code **)(*param_1 + 0x600))(param_1,param_3,__src,2);\nDecryptCertExchange(...,__s,__size);",
+              "note": "JNI bridge copies Java byte[] into native buffer using length provided by JVM; no out-of-bounds or integer overflow apparent."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "001218a0",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = *(int *)(*local_18 + 0x10);\n*param_3 = iVar1;\npvVar3 = malloc((long)iVar1);\n*param_2 = pvVar3;\nif (pvVar3 != (void *)0x0) {\n  memcpy(pvVar3,*(void **)(*plVar5 + 8),(long)*param_3);\n  iVar1 = *(int *)(plVar5[1] + 0x10);\n  *param_5 = iVar1;\n  pvVar3 = malloc((long)iVar1);\n  *param_4 = pvVar3;\n  ...\n  memcpy(pvVar3,*(void **)(plVar5[1] + 8),(long)*param_5);",
+              "note": "Function allocates output buffers based on length fields from internal structs and copies exactly that many bytes; assumes internal ASN.1/CertExchange code maintains consistent length/buffer sizes."
+            },
+            {
+              "function": "Convert_ASN1_to_EncCertExchangeMessage",
+              "address": "001210bc",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "lVar2 = Get_DER_Child(param_1,0,2);\n*plVar4 = lVar2;\n...\nif ((lVar2 != 0) && (iVar1 = Convert_BINT_to_Binary(*plVar4,local_10), 0 < iVar1)) {\n  if ((char)local_10[0] == '\\x01') {\n    ...\n  }\n  *param_2 = plVar4;\n  uVar3 = 1;\n  goto LAB_00121158;\n}\n...\nif (local_8 != *(long *)PTR___stack_chk_guard_0016bf58) {\n  __stack_chk_fail(uVar3);\n}",
+              "note": "Stack canary check fails leading to abort, but no explicit buffer operations here; likely overflow occurs inside helper routines not present in this view."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage -> __stack_chk_fail -> abort"
+          ],
+          "recommendations": [
+            "Deeply analyze ASN.1-related helpers (Decode_DER_ASN1_ST, Get_DER_Child, Convert_BINT_to_Binary, EncCertExchangeMessage_to_CertExchangeMessage) for unsafe copies or length handling, using full binary and sanitizer builds.",
+            "Run targeted fuzzing specifically on DecryptCertExchange/Convert_ASN1_to_EncCertExchangeMessage with ASan/UBSan to confirm and pinpoint any memory corruption in ASN.1 parsing.",
+            "If a bug is confirmed in ASN.1 helpers, add strict length validations and bounds checks before copying into fixed-size buffers, and ensure all length fields are cross-validated against actual allocated sizes."
+          ],
+          "assumptions": [
+            "The JNI environment functions at offsets 0x558/0x5c0/0x600 behave like standard GetArrayLength/GetByteArrayElements/ReleaseByteArrayElements.",
+            "The fuzz harness passes arbitrary Java byte[] directly to jdecrypt, approximating worst-case untrusted ASN.1 input.",
+            "Helper functions used for ASN.1 handling are part of the same native library but their implementations are not visible in this analysis."
+          ],
+          "limitations": [
+            "Implementations of critical helper functions (Decode_DER_ASN1_ST, Get_DER_Child, Convert_BINT_to_Binary, EncCertExchangeMessage_to_CertExchangeMessage) were not decompiled, so the actual overflow cause is unknown.",
+            "No Java-side call graph or validation logic for jdecrypt was inspected; potential constraints on input length or format are not accounted for.",
+            "Crash context (input causing stack canary failure, allocator/sanitizer logs) is limited to the provided stack trace, reducing certainty about root cause."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:16",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 30838,
+          "output_tokens": 2840
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_OctetString",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_OctetString",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below __memcpy is Decode_DER_OctetString in libUbikeyJni.so; crash site is memcpy there or in DecryptCertExchange/Java_com_ubikey_jni_UbikeyJni_jdecrypt using memcpy.",
+            "Decompiled Decode_DER_OctetString: computes ASN.1 length (iVar2), mallocs iVar2 bytes, then memcpy(__dest, param_1 + (iVar1 + 1), iVar2) with no validation that iVar2 is consistent with actual buffer size of param_1. Length and offsets come from the DER data. If Decode_DER_ASN1_ST or callers allow attacker-controlled DER, this is an out-of-bounds read in memcpy (CWE-125/CWE-787 style).",
+            "DecryptCertExchange: Takes param_6/param_7 as input buffer and length; explicitly checks (param_6 == 0) || (param_7 < 1) then returns, so it trusts param_7 as total buffer length. It calls Decode_DER_ASN1_ST(param_6); that likely builds an ASN.1 tree directly from the DER blob; then Convert_ASN1_to_EncCertExchangeMessage and EncCertExchangeMessage_to_CertExchangeMessage, then uses lengths stored in structures to drive malloc/memcpy when copying message fields. Those length fields come from parsing the DER structure and there is no further bounds validation at the point of memcpy. If ASN.1 parsing doesn't fully enforce internal length consistency relative to param_7, these memcpy calls may also over-read, but the clearer direct issue is in Decode_DER_OctetString.",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt: obtains a jbyteArray length and elements (__size and __src) via JNIEnv function pointers; then malloc(__size), memset, memcpy(__s,__src,__size), and then calls DecryptCertExchange(...,__s,__size). There is no validation on __size, but JNIEnv guarantees it fits in address space; harness might pass huge values but real Java locations enforce array size. No bug there: memcpy uses exactly the Java array length; both src and dst are sized to __size.",
+            "Critical question: can attacker influence DER content passed to DecryptCertExchange? JNI bridge reads Java byte[] param_3 and forwards as-is to DecryptCertExchange. Fuzzer harness uses fuzz_one_input to fill this array. In a real app, this jdecrypt(byte[]) very likely decrypts a cert exchange message coming from a network server or external source (untrusted). Therefore param_6 points to attacker-controlled buffer and all ASN.1 parsing (Decode_DER_ASN1_ST, Decode_DER_OctetString) operates directly on attacker data.",
+            "Decode_DER_OctetString relies on Compute_ASN1_LengthSize and Compute_ASN1_ValueLength_from_LO. We don't see their implementations, but behavior is typical: parse length bytes, returning value length iVar2 and how many length-octets (iVar1). There is no check that param_1 + (iVar1 + 1) + iVar2 stays within the original buffer of size param_7. Unless Decode_DER_ASN1_ST or Get_DER_Child propagate and enforce a total buffer span, Decode_DER_OctetString by itself has no safety: it's given only a pointer param_1, no size. That is a classical ASN.1 parsing flaw leading to out-of-bounds read/write. At minimum, memcpy can read beyond end of the original DER blob; if the pointer is into some heap structure, may read into other heap regions; depending on malloc implementation this could cause crash or info leak; if the destination malloc((long)iVar2) fails to allocate due to overflow or large size, Delete_OCTET_STRING is called (defensive).",
+            "Stack frame lists __memcpy then Decode_DER_OctetString, so the faulty memcpy is probably the one inside Decode_DER_OctetString, not in DecryptCertExchange or JNI. That memcpy's third argument is iVar2, fully derived from untrusted DER length field, with no check against the total decoded object or against param_7. Param_1 origin: from ASN.1 tree nodes created by Decode_DER_ASN1_ST; those ultimately index into the original DER buffer of length param_7. If Decode_DER_ASN1_ST is also unsafe, Decode_DER_OctetString exacerbates it; but even if the tree points inside the buffer, it doesn't verify sub-length. Therefore attacker can set a large length causing memcpy to over-read beyond original DER blob boundary into invalid memory ⇒ crash observed by fuzzer.",
+            "Given typical mobile crypto code, this path is reachable in production where jdecrypt is called on network data. Fuzzer simply accelerated discovery. The bug is not due to harness misusing JNI: JNI bridge uses standard JNIEnv operations correctly and passes exact buffer + length; there is no assumption that Java never passes malformed DER. This is exactly the kind of untrusted ASN.1 input the code must robustly handle.",
+            "Impact: out-of-bounds read via memcpy, using attacker-controlled length and source derived from their buffer. That can result in denial of service and possibly information disclosure (reading adjacent heap data and perhaps returning it to caller in other code paths). It is not clearly an out-of-bounds write (destination is appropriately sized to iVar2), so RCE is less clear, but many modern allocators will abort on over-read leading to DoS. It’s still a bona fide memory safety vulnerability.",
+            "Therefore classify as vulnerable, severity high (memory corruption/DoS on untrusted ASN.1 parsing), confidence ~0.9 because we see explicit unsafe memcpy with attacker-controlled length and no bounds check, and clear JNI control path from Java byte array to parser."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "Decode_DER_OctetString performs memcpy from ASN.1 buffer using length iVar2 derived directly from DER length field without any bounds check against the actual buffer size.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt forwards attacker-controlled Java byte[] directly into DecryptCertExchange/Decode_DER_ASN1_ST, so DER contents are attacker-controlled under realistic usage.",
+            "Crash stack shows __memcpy -> Decode_DER_OctetString, matching an out-of-bounds read caused by the unbounded memcpy, not by harness misuse."
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_OctetString",
+              "address": "00117e38",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = Compute_ASN1_LengthSize(param_1 + 1);\niVar2 = Compute_ASN1_ValueLength_from_LO(param_1 + 1);\n...\npuVar3[4] = iVar2;\n__dest = malloc((long)iVar2);\n...\nmemcpy(__dest,(void *)(param_1 + (iVar1 + 1)),(long)iVar2);",
+              "note": "Length iVar2 is derived from untrusted ASN.1 length bytes; there is no check that iVar2 fits within original DER buffer span."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "001218a0",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "if ((param_6 == 0) || (param_7 < 1)) { ... }\nlVar2 = Decode_DER_ASN1_ST(param_6);\n...\nmemcpy(pvVar3,*(void **)(*plVar5 + 8),(long)*param_3);\n...\nmemcpy(pvVar3,*(void **)(plVar5[1] + 8),(long)*param_5);",
+              "note": "DecryptCertExchange treats param_6/param_7 as untrusted DER and uses internal lengths from parsed structures for memcpy without validating against overall buffer size."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "00110190",
+              "file": "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemcpy(__s,__src,__size);\nDecryptCertExchange(...,__s,__size);",
+              "note": "JNI bridge passes arbitrary Java byte[] contents and length directly into DecryptCertExchange; contents are attacker-controlled under realistic app usage."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 00110190",
+            "DecryptCertExchange @ 001218a0",
+            "Decode_DER_ASN1_ST (address unknown)",
+            "Decode_DER_OctetString @ 00117e38",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "In Decode_DER_OctetString (and related ASN.1 helpers), track and enforce the remaining buffer length alongside the pointer and verify that iVar2 and iVar1 do not cause param_1 + (iVar1 + 1) + iVar2 to exceed the original buffer size before calling memcpy.",
+            "Audit Decode_DER_ASN1_ST and Get_DER_Child to ensure every ASN.1 length/value pointer has an associated bound derived from the overall DER buffer length, rejecting any structure with inconsistent or oversized lengths.",
+            "Add robust negative and fuzz testing for jdecrypt/DecryptCertExchange with malformed ASN.1 to verify no out-of-bounds access or crashes occur, and consider adding defensive checks or sanitizer builds in CI."
+          ],
+          "assumptions": [
+            "The byte[] passed to jdecrypt in production can contain untrusted or attacker-controlled data (e.g., from network or external source).",
+            "Decode_DER_ASN1_ST and Compute_ASN1_ValueLength_from_LO do not already enforce global bounds for each node; Decode_DER_OctetString receives only a pointer without size context."
+          ],
+          "limitations": [
+            "Implementation of Decode_DER_ASN1_ST, Compute_ASN1_LengthSize, and Compute_ASN1_ValueLength_from_LO was not available, so precise bounds guarantees from those helpers cannot be fully verified.",
+            "Java call graph / specific application paths to UbikeyJni.jdecrypt were not inspected in Java source, so the exact trust boundary of the byte[] argument is inferred from typical usage and fuzz harness design."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:58",
+          "llm_requests": 3,
+          "llm_tool_calls": 10,
+          "input_tokens": 19648,
+          "output_tokens": 2692
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "ProgramEntry": "er to this frame",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "er to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: stack shows abort -> __stack_chk_fail -> Convert_ASN1_to_EncCertExchangeMessage -> DecryptCertExchange -> Java_com_ubikey_jni_UbikeyJni_jdecrypt. First non-sanitizer frame is Convert_ASN1_to_EncCertExchangeMessage, but the logical operation that might be influenced by input is in DecryptCertExchange as well. Need to see both implementations and JNI entry.",
+            "Review Convert_ASN1_to_EncCertExchangeMessage: it uses stack canary (local_8) and will abort via __stack_chk_fail only if stack is corrupted, which in turn normally implies an overflow in this function or a prior one. Inspect body: it gets children from ASN.1 structure, sets fields in EncCertExchangeMessage, calls Convert_BINT_to_Binary and potentially allocates ASN1 if needed. No obvious unsafe memcpy/memmove; main risk would be in called helpers, but we don't see them here. However crash is at __stack_chk_fail, implying canary mismatch occurred somewhere (could be in this function or a callee).",
+            "Review DecryptCertExchange: parameters include pointer and length of input buffer (param_6 and param_7). It checks (param_6 == 0) || (param_7 < 1) then early exit, so null/empty not processed. Then Decode_DER_ASN1_ST(param_6) -> lVar2. If 0, error path. Else calls Convert_ASN1_to_EncCertExchangeMessage(lVar2, &local_10), expecting return 1 else error. On success, converts EncCertExchangeMessage to CertExchangeMessage (EncCertExchangeMessage_to_CertExchangeMessage) and uses resulting structure (local_18) for memcpy sizes. In this function, all memcpys use sizes read from struct fields combined with malloc; so as long as the struct is internally consistent, no overflow. The corruption would more likely stem from helpers dealing with ASN.1 decoding or big integers, not from DecryptCertExchange's own memcpy.",
+            "Review JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt: it uses JNIEnv function pointers to get the byte[] length and elements (GetArrayLength and GetByteArrayElements/critical). It then allocates a native buffer __s of that size, zeroes it with memset, memcpy from __src to __s with same size, releases the Java array elements with mode 2 (JNI_ABORT or similar) and then calls DecryptCertExchange(DAT_..., __s, __size). So attacker-controlled input is the JNI byte array from Java. Length is fully controlled by Java but is used consistently for malloc and memcpy (__size), so no overflow here. Range of length is limited by jint and size_t conversion; no overflow shown. Thus the dangerous parsing is in DecryptCertExchange and its helpers, which process arbitrary ASN.1 provided via this byte array.",
+            "Taint/attacker control: the DER/ASN.1 message passed into DecryptCertExchange is derived directly from a Java byte[] whose contents/length can come from external sources (network, file, etc.) in realistic app operation. JNI does not validate that DER is well-formed; only minimal length>0 and pointer!=0. Therefore Decode_DER_ASN1_ST, Convert_ASN1_to_EncCertExchangeMessage, EncCertExchangeMessage_to_CertExchangeMessage, and any big integer conversions operate on attacker-controlled ASN.1. The stack canary failure in Convert_ASN1_to_EncCertExchangeMessage points strongly at a buffer overflow or similar memory write in this function or a callee using attacker data (e.g., ASN.1 length fields, big integer sizes).",
+            "Look inside Convert_ASN1_to_EncCertExchangeMessage more closely for uses of attacker-derived lengths: it calls Get_DER_Child(param_1,0,2) and (1,4) and (2,0x10), assigning resulting pointers to plVar4 fields. Then calls Convert_BINT_to_Binary(*plVar4, local_10). local_10 is a 4-byte array; Convert_BINT_to_Binary will likely write a flag into local_10[0]. If that function is buggy, it could overwrite stack including canary. However we don't see its body. Also, plVar4 either comes from *param_2 or a fresh Create_EncCertExchangeMessage(); both are heap structs, so stack canary shouldn't be affected by writing within them. Thus the only way stack is corrupted is if some function overruns its local buffers or misuses pointers. Given that input is attacker controlled and these are ASN.1/bignum operations, it is highly plausible this is a real memory corruption vulnerability rather than harness artifact.",
+            "Check for harness-specific misuse: JNI code obtains __size via JNIEnv->GetArrayLength and copies exactly that many bytes. Fuzz harness uses same JNI bridge as production, per entry: Fuzz Harness Entry = Java_com_ubikey_jni_UbikeyJni_jdecrypt, which matches production bridge. There is no indication of harness passing null JNIEnv or null array; if param_3 were null, JNI call at offset 0x558 would crash differently, not via __stack_chk_fail in Convert_ASN1_to_EncCertExchangeMessage. So environment-induced null deref is unlikely. The only app-level checks on ASN.1 are decode return codes; no bounds validation performed before handing data to internal ASN.1/bignum routines.",
+            "Given stack canary abortion, presence of complex ASN.1 & big integer parsing over attacker-controlled buffer with minimal validation, and use in security-sensitive context (certificate exchange decryption), this is a likely stack-based buffer overflow or similar memory corruption vulnerability deep in Convert_ASN1_to_EncCertExchangeMessage or its callees. Even though the exact overflow site is in a helper not decompiled here, the existence of __stack_chk_fail indicates out-of-bounds write and potential exploitability (code execution) under non-sanitized builds. Hence classify as a vulnerability, with CWE-121/787 style. Severity high due to potential for arbitrary code execution in native library when processing untrusted cert exchange messages.",
+            "Call sequence from entry: Java_com_ubikey_jni_UbikeyJni_jdecrypt (JNI) -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage -> __stack_chk_fail -> abort. JNI bridge and DecryptCertExchange propagate attacker-controlled ASN.1 into the vulnerable parsing routine without sufficient validation. The library map shows functions in libUbikeyJni.so only; no evidence of external allocator bugs.",
+            "Confidence: around 0.8-0.85. We have direct indication of stack canary failure plus clear taint path from attacker input to ASN.1 parsing code, but lack the inner body of helper functions, so can't 100% localize overflow. Still, far beyond speculative. Classify as vulnerable, high severity, suggest focused audit of ASN.1/bignum converters and additional bounds checks."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.82,
+          "reasons": [
+            "Stack canary failure (__stack_chk_fail) in Convert_ASN1_to_EncCertExchangeMessage indicates stack memory corruption",
+            "ASN.1/bignum parsing functions operate on attacker-controlled DER data from Java byte[] via JNI with minimal validation",
+            "JNI bridge and DecryptCertExchange correctly propagate input length, so corruption is likely in internal parsing logic, not harness misuse",
+            "Crash path is reachable from real JNI entry used in app, not a special fuzz-only stub"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "00110190",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n... DecryptCertExchange(...,__s,__size);",
+              "note": "JNI bridge passes arbitrary Java byte[] as ASN.1 input to DecryptCertExchange with length from GetArrayLength."
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "001218a0",
+              "file": "libUbikeyJni.so",
+              "snippet": "if ((param_6 == 0) || (param_7 < 1)) { ... }\nlVar2 = Decode_DER_ASN1_ST(param_6);\n...\niVar1 = Convert_ASN1_to_EncCertExchangeMessage(lVar2,&local_10);\n",
+              "note": "Only minimal checks on input pointer/length; ASN.1 parser invoked on attacker-controlled data."
+            },
+            {
+              "function": "Convert_ASN1_to_EncCertExchangeMessage",
+              "address": "001210bc",
+              "file": "libUbikeyJni.so",
+              "snippet": "local_8 = *(long *)PTR___stack_chk_guard_0016bf58;\n...\nif (local_8 == *(long *)PTR___stack_chk_guard_0016bf58) {\n  return;\n}\n/* WARNING: Subroutine does not return */\n__stack_chk_fail(uVar3);",
+              "note": "Function aborts via __stack_chk_fail when canary is corrupted, implying stack overflow likely due to ASN.1/bignum processing of attacker data."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 00110190",
+            "DecryptCertExchange @ 001218a0",
+            "Convert_ASN1_to_EncCertExchangeMessage @ 001210bc",
+            "__stack_chk_fail",
+            "abort"
+          ],
+          "recommendations": [
+            "Audit Convert_ASN1_to_EncCertExchangeMessage, Decode_DER_ASN1_ST, Convert_BINT_to_Binary, and related ASN.1/bignum helpers for improper bounds checks on lengths and buffer sizes",
+            "Add robust validation of DER/ASN.1 structures and length fields before converting to internal structs, rejecting malformed or oversized inputs early",
+            "Enable compiler hardening (stack protector, PIE, RELRO) in release builds and add targeted fuzzing around certificate exchange parsing to reproduce and minimize this crash"
+          ],
+          "assumptions": [
+            "Java-level callers can provide attacker-influenced byte[] data to jdecrypt (e.g., from network or file)",
+            "The stack canary failure originates from an overflow in Convert_ASN1_to_EncCertExchangeMessage or its callees, not from unrelated memory corruption"
+          ],
+          "limitations": [
+            "Bodies of helper functions like Decode_DER_ASN1_ST, Convert_BINT_to_Binary, and EncCertExchangeMessage_to_CertExchangeMessage were not available",
+            "Java call graph/path into UbikeyJni.jdecrypt beyond JNI signature was not inspected, so exact external input sources are inferred"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:29",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 19249,
+          "output_tokens": 2596
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/com.kbankwith.smartbank/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame below allocator/sanitizer: top frame is __memcpy (libc), next is Decode_DER_ASN1_ST in libUbikeyJni.so → this is the first application-level frame. However, decompiled code shows memcpy is safely bounded there; the likely problematic memcpy is actually in DecryptCertExchange or the JNI wrapper. Still, follow instructions: analyze Decode_DER_ASN1_ST first.",
+            "Decompile Decode_DER_ASN1_ST: it parses DER ASN.1 length fields. For short-form length (bVar2 >= 0) it does size = bVar2; offset=2. For long-form (high bit set) it computes the length from subsequent length bytes into uVar7, checks if (int)uVar7 < 0, then sets __size = (int)uVar7 and offset = uVar1 + 2, where uVar1 = bVar2 & 0x7f (number of length bytes). It allocates malloc(__size), then memcpy(__dest, param_1 + offset, __size). There is no explicit upper bound on __size besides positivity; but this is linear within the passed-in buffer. The function itself has no idea of the source buffer’s actual allocated size. In fuzzing, passing a small buffer with a large encoded DER length can cause memcpy to read out of bounds (or hit allocator/sanitizer), which matches the crash at __memcpy.",
+            "Backward data-flow in Decode_DER_ASN1_ST: src pointer is param_1 + iVar10, len is __size from DER length fields. Both are entirely derived from param_1 contents. The function does some sign checking but no bounds check against actual input length. The vulnerability (out-of-bounds read) is therefore present if caller does not ensure param_1 is a large enough buffer or does not pass an explicit length. Decode_DER_ASN1_ST signature is undefined8 *Decode_DER_ASN1_ST(undefined1 *param_1); only pointer, no length parameter, so it can never be safe for arbitrary untrusted input. It assumes the whole DER structure is in a sufficiently large, contiguous buffer.",
+            "Move up to caller DecryptCertExchange: signature DecryptCertExchange(..., long param_6, int param_7). It explicitly checks if (param_6==0 || param_7<1) then returns. Then calls lVar2 = Decode_DER_ASN1_ST(param_6); i.e., passes only the pointer (param_6) but ignores param_7 (the input length). So any length/size information is discarded; Decode_DER_ASN1_ST works blindly. This confirms unsafe design. After successful parse, DecryptCertExchange then copies fields using memcpy with lengths taken from structure fields, but those structures come from ASN.1 decoding of the same untrusted buffer. If Decode_DER_ASN1_ST already overreads, the structures may themselves be malformed/attacker-controlled. However, the root out-of-bounds read is the unchecked memcpy in Decode_DER_ASN1_ST given attacker-controlled DER length fields.",
+            "Now to JNI entry: Java_com_ubikey_jni_UbikeyJni_jdecrypt(env, this, jbyteArray). Decompiled JNI: it calls env->GetArrayLength(env, param_3) into iVar1, casts to size_t __size. Then env->GetByteArrayElements(env, param_3, 0) into __src. Then allocates __s = malloc(__size), memset 0, memcpy(__s, __src, __size), then ReleaseByteArrayElements(..., __src, 2), then calls DecryptCertExchange(global_key_material, ..., __s, __size). So JNI does correctly track the byte array length from Java and passes it as param_7 to DecryptCertExchange. However, DecryptCertExchange discards param_7 when calling Decode_DER_ASN1_ST and only passes the pointer. Thus, the only thing bounding Decode_DER_ASN1_ST is whatever DER length happens to be encoded in the first bytes, which is fully attacker-controlled through the Java byte[] contents.",
+            "Java layer: jdecrypt is called from Java_com_ubikey_jni_UbikeyJni_jdecrypt, but actual Java methods aren’t provided; however, the fuzzer harness fuzz_one_input clearly controls the jbyteArray data. In the real app, this jbyteArray is very likely derived from network or certificate data (function names suggest certificate exchange). In either case, untrusted or semi-trusted input controls the ASN.1 buffer; there is no evidence of length validation at Java level beyond just array length, which is correct but doesn’t protect against embedded DER length tricks when the native decoder ignores the array length.",
+            "Crash semantics: Process termination at __memcpy aligns with an out-of-bounds read from src in Decode_DER_ASN1_ST when __size computed from DER length exceeds actual available bytes in param_1 buffer allocated from Java size. glibc’s memcpy does not inherently crash on large sizes, but under sanitizers or hardening (ASAN, scudo, hardened libc) an out-of-bounds read will be detected, leading to termination. So this is a likely OOB read driven by attacker-controlled length. DecryptCertExchange’s other memcpy calls copy from decoded structures to freshly malloc’d buffers; their lengths come from structure fields potentially corrupted earlier, but those target buffers are sized based on the same lengths, so less likely to overflow, though corrupted lengths could cause large allocations/DoS. The main, clear vulnerability is unchecked memcpy in Decode_DER_ASN1_ST using length read from untrusted buffer without verifying it is within the buffer’s true size.",
+            "This meets vulnerability criteria: attacker-controlled input (Java byte[] from user/fuzzer/network) directly influences ASN.1 length bytes; these decide the memcpy length without validation; the function has no visibility of true buffer size (no length parameter used), so cannot safely constrain read. This is a classical CWE-125 Out-of-bounds Read (and possibly CWE-787 in some environments if dst smaller, but here dst is malloc(__size), so the immediate issue is src OOB). This can be exploited for information disclosure (reading beyond buffer into adjacent heap data) or at least causes a crash (DoS). The impact could be higher if other parts of the decoder trust decoded fields to allocate/copy, but that’s less clear from available code.",
+            "Environment vs real-world: This path is reached via JNI from a single bridge used by app crypto; the fuzzer uses fuzz_one_input to directly invoke it with arbitrary bytes. In production, the same function will be invoked with external certificate exchange messages. ASN.1 is inherently attacker-controlled in many protocols, so this is realistic. There is no evidence of surrounding format/length enforcement that would prevent malicious DER lengths from reaching Decode_DER_ASN1_ST. Therefore, this is not merely a harness artifact; it is a genuine, reachable bug.",
+            "Severity and confidence: Out-of-bounds read in crypto/ASN.1 parser on attacker-controlled input is typically at least high severity due to potential information leak and reliable DoS. There is clear code-level evidence; control flow and data-flow from input to memcpy length are fully understood. Thus classification: vulnerable, high severity, high confidence (~0.95)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "Decode_DER_ASN1_ST computes memcpy length from ASN.1 length fields in attacker-controlled buffer without checking against actual buffer size",
+            "DecryptCertExchange discards the input length parameter when calling Decode_DER_ASN1_ST, so the decoder cannot validate bounds",
+            "JNI bridge passes arbitrary Java byte[] directly as DER buffer; fuzzer and likely real app can fully control contents, making OOB read at memcpy realistic"
+          ],
+          "cwe_ids": [
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "0x00117718",
+              "file": "libUbikeyJni.so",
+              "snippet": "__dest = malloc(__size);\npuVar4[2] = __dest;\nif (__dest != (void *)0x0) {\n  memcpy(__dest,param_1 + iVar10,__size);\n  return puVar4;\n}",
+              "note": "Length __size is derived from DER length bytes in param_1 without validating against the real buffer length"
+            },
+            {
+              "function": "DecryptCertExchange",
+              "address": "0x001218a0",
+              "file": "libUbikeyJni.so",
+              "snippet": "if ((param_6 == 0) || (param_7 < 1)) { ... }\nlVar2 = Decode_DER_ASN1_ST(param_6);",
+              "note": "param_7 (true input size) is ignored when calling Decode_DER_ASN1_ST, so no bounds checking is possible"
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "address": "0x00110190",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemcpy(__s,__src,__size);\n...\nDecryptCertExchange(...,__s,__size);",
+              "note": "JNI copies arbitrary Java byte[] into native buffer and passes pointer+length to DecryptCertExchange, giving attacker full control over DER bytes"
+            },
+            {
+              "function": "__memcpy",
+              "file": "libc",
+              "note": "Crash occurs in memcpy called from Decode_DER_ASN1_ST, consistent with out-of-bounds read when __size exceeds available source bytes"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Decode_DER_ASN1_ST -> memcpy"
+          ],
+          "recommendations": [
+            "Change Decode_DER_ASN1_ST and callers to take an explicit buffer length and validate that computed ASN.1 length + header offset does not exceed this length before memcpy",
+            "In DecryptCertExchange, pass the input length (param_7) to Decode_DER_ASN1_ST and reject messages where DER length fields exceed the outer buffer size",
+            "Add robust ASN.1 parsing with strict bounds checks or use a well-audited ASN.1 library instead of custom code; add tests/fuzzing specifically for overlong and malformed length encodings"
+          ],
+          "assumptions": [
+            "Java code does not perform additional DER structural validation before invoking jdecrypt",
+            "Input to jdecrypt is attacker-controlled or at least externally sourced (e.g., network or certificate data)",
+            "Crash at __memcpy is due to out-of-bounds read on source buffer rather than unrelated allocator corruption"
+          ],
+          "limitations": [
+            "Exact libc/allocator behavior at crash site is not visible; diagnosis is inferred from code and stack",
+            "Java-side call graph beyond JNI bridge is not inspected, so additional validations there (if any) are unknown",
+            "Potential further exploitation beyond information leak/DoS (e.g., precise heap layout impact) is not analyzed"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:08",
+          "llm_requests": 3,
+          "llm_tool_calls": 6,
+          "input_tokens": 19349,
+          "output_tokens": 2647
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,261 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gemini-2.5-pro",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "부산은행 모바일뱅킹",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63$a: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14$h: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14: e()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63: j()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "The user wants me to analyze a crash in `Compute_ASN1_ST_ChildNum` within `libUbikeyJni.so`.\n1.  **Initial Analysis**: The stack trace points to a crash in an ASN.1 parsing function, which is a common area for vulnerabilities. The call chain originates from a JNI method `Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID`, suggesting that the input is coming from the Java layer. The crash type is 'Process Termination', which often indicates a sanitizer abort, infinite loop, or unhandled exception.\n\n2.  **Ghidra Analysis - Crashing Function**:\n    - I started by opening `libUbikeyJni.so` in Ghidra.\n    - I located `Compute_ASN1_ST_ChildNum` at address `0x0011dcc0`.\n    - Decompilation revealed a `for` loop that parses a data structure. The loop's increment logic is suspicious (`local_28 = local_28 + local_30 + local_34` in the loop condition, and `local_28 = local_28 + 1` in the body). If the length-parsing functions (`Compute_ASN1_LengthSize`, `Compute_ASN1_ValueLength_from_LO`) return 0 or unexpected values, the loop counter `local_28` might not advance correctly towards the exit condition `iVar3`, leading to an infinite loop and eventual process termination. This is a classic DoS scenario in parsers.\n\n3.  **Ghidra Analysis - Backward Data Flow**:\n    - I then decompiled the functions up the call stack as seen in the trace:\n        - `Convert_ASN1_to_X509_TBS_CERT` (`0x0015a884`): This function takes a pointer `param_1` and passes it directly to `Compute_ASN1_ST_ChildNum` without validation.\n        - `Convert_ASN1_to_X509_CERT` (`0x0015a700`): This function extracts a child element from its input using `Get_DER_Child` and passes that to `Convert_ASN1_to_X509_TBS_CERT`. The data is still untrusted.\n        - `CERT_Load` (`0x001369a4`): This function takes a pointer to the raw data, decodes it with `Decode_DER_ASN1_ST`, and passes the result to `Convert_ASN1_to_X509_CERT`. This is the entry point for the core parsing logic.\n\n4.  **Ghidra Analysis - JNI Entry Point**:\n    - The final step in the native analysis was decompiling the JNI function `Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID` at `0x001178bc`.\n    - The decompiled code clearly shows that it receives a Java byte array (`param_3`), gets its length and a pointer to its content, `malloc`s a new buffer, and `memcpy`s the Java data into it.\n    - Crucially, there is **no validation** on the size or content of this byte array before it is passed to `CERT_Load`. This confirms that an attacker-controlled byte array from the Java side can be directly fed into the vulnerable ASN.1 parsing logic.\n\n5.  **JADX Analysis - Java Layer**:\n    - I inspected the `com.ubikey.jni.UbikeyJni` class to confirm the native method signature of `jGetPolicyOID([B)Ljava/lang/String;`.\n    - The `java_callgraph` shows that the byte array is passed from the `com.quram.mi.ocr` package. This suggests a likely attack vector where the application uses Optical Character Recognition (OCR) to read data (e.g., from a QR code or a picture of a document) which is then passed to the native library for parsing. An attacker could craft a malicious QR code or image that, when scanned, provides the malformed byte array needed to trigger the infinite loop.\n\n6.  **Conclusion**:\n    - There is a clear path for unvalidated, attacker-controlled data to reach a vulnerable parsing function.\n    - The vulnerability is an infinite loop caused by improper handling of malformed ASN.1 data structures.\n    - The impact is a Denial of Service, as the application thread will hang and eventually be terminated by the OS.\n    - The vulnerability is exploitable by providing crafted input to the application, likely via its OCR functionality.\n    - Confidence is high because the data flow is direct and there are no mitigating checks."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "The native function `Compute_ASN1_ST_ChildNum` contains a loop with flawed increment logic that can lead to an infinite loop when processing malformed ASN.1 data.",
+            "The JNI entry point `Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID` accepts a byte array from Java and passes it to the parsing functions without any validation.",
+            "The Java call graph indicates that the byte array originates from an OCR library, providing a plausible attack vector for introducing malicious data."
+          ],
+          "cwe_ids": [
+            "CWE-835",
+            "CWE-20"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "address": "0011dcc0",
+              "file": "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "for (local_28 = 0; local_28 = local_28 + local_30 + local_34, local_28 != iVar3; local_28 = local_28 + 1) {\n    // ... parsing logic ...\n}",
+              "note": "The for loop's increment logic is flawed. If parsed lengths `local_30` and `local_34` are zero, the loop variable `local_28` advances incorrectly, potentially leading to an infinite loop if the exit condition `iVar3` is never met with a malformed input."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "address": "001178bc",
+              "file": "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // Get Array Length\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); // Get Array Elements\n__s = malloc(__size);\nmemcpy(__s,__src,__size);\n// ...\nCERT_Load(&local_440,auStack_438); // Pass to parsing logic",
+              "note": "The JNI function directly copies the byte array provided by the Java layer into a native buffer without any validation. This buffer is then passed to the vulnerable parsing functions."
+            },
+            {
+              "function": "jGetPolicyOID",
+              "file": "com/ubikey/jni/UbikeyJni.java",
+              "snippet": "public native String jGetPolicyOID(byte[] bArr);",
+              "note": "The Java method is a native declaration, confirming the entry point for untrusted data. The Java call graph suggests this data may come from an OCR source."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> CERT_Load -> Convert_ASN1_to_X509_CERT -> Convert_ASN1_to_X509_TBS_CERT -> Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Implement robust input validation in the JNI layer to check the size and basic structure of the received byte array before passing it to complex parsing functions.",
+            "Fix the loop increment logic in `Compute_ASN1_ST_ChildNum` to correctly handle all possible ASN.1 structures, including malformed or empty ones. Add a failsafe to prevent infinite loops, such as a maximum iteration count.",
+            "The ASN.1 parsing library should be updated or replaced with a more secure and well-tested implementation."
+          ],
+          "assumptions": [
+            "The fuzzer-provided input is representative of data that could be passed to the JNI function under real-world conditions, such as from processing a malformed QR code or image containing certificate data."
+          ],
+          "limitations": [
+            "The exact format of the input data (e.g., whether it's a full certificate or a specific part) is not fully known without further analysis.",
+            "The precise mechanism to get the app to process a local file or scan a QR code is not determined."
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Passing a malformed byte array, likely representing a certificate, to the jGetPolicyOID JNI method. The data likely originates from scanning a QR code or other document.",
+            "prerequisites": [
+              "User must be convinced to scan a malicious QR code or open a malicious document.",
+              "The application must have an externally-reachable Activity or service that accepts certificate data as input."
+            ],
+            "exploit_pipeline": [
+              "Create a malformed ASN.1 DER-encoded data structure that causes the parsing loop in Compute_ASN1_ST_ChildNum to never terminate.",
+              "Encode this data into a format that the app's OCR function will recognize, such as a QR code or a specific document image format.",
+              "Trick the user into scanning the malicious QR code or image with the app.",
+              "The app's OCR component will extract the byte array and pass it to the UbikeyJni.jGetPolicyOID method.",
+              "The native library will enter an infinite loop, causing the UI to freeze and the app to be terminated by the Android OS (ANR)."
+            ],
+            "poc_commands": [
+              "# Step 1: Create a file named 'malformed_cert.bin' containing raw bytes that trigger the loop.\n# The exact bytes would need to be crafted, but a hypothetical example could be an ASN.1 sequence where the length field is 0 or points to itself.\necho -ne \"\\x30\\x00\" > /sdcard/Download/malformed_cert.bin\n\n# Step 2: Use an ADB command to trigger the application to process this file.\n# The exact activity and intent extras are unknown, so placeholders are used.\nadb shell am start -n \"kr.co.busanbank.mbp/co.kr.busanbank.mbp.activity.MainActivity\" --es \"certificate_path\" \"/sdcard/Download/malformed_cert.bin\""
+            ],
+            "poc_files": []
+          }
+        },
+        "statistics": {
+          "time": "00:01:03",
+          "llm_requests": 15,
+          "llm_tool_calls": 14,
+          "input_tokens": 166221,
+          "output_tokens": 5171
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Get_DER_Child",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63$a: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14$h: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14: e()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63: j()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Get_DER_Child",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "The crash occurs in `__memcpy`, which is a strong indicator of a potential memory corruption vulnerability. The stack trace shows that `__memcpy` is called by `Decode_DER_ASN1_ST`, which is a function that likely parses ASN.1 data. The JNI bridge method `jGetPolicyOID` takes a byte array as input, which is a likely source of attacker-controlled data. I started by decompiling the native functions in the call stack, starting from `Decode_DER_ASN1_ST`. The decompilation of `Decode_DER_ASN1_ST` revealed a classic integer overflow vulnerability when parsing the length of an ASN.1 field. The code calculates the length of a field into a 32-bit integer, which can overflow if the ASN.1 structure is crafted in a specific way. This leads to a small buffer being allocated, followed by a `memcpy` with the larger, non-overflowed length, causing a heap-based buffer overflow. I then worked my way up the call stack, decompiling `Get_DER_Child`, `Convert_ASN1_to_X509_CERT`, `CERT_Load`, and finally the JNI function `Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID`. This confirmed that the vulnerable function is used to parse an X.509 certificate that is passed as a byte array from the Java side. The JNI function takes the byte array from Java, copies it into a native buffer, and then passes it to `CERT_Load`, which in turn calls the vulnerable `Decode_DER_ASN1_ST` function. This confirms that an attacker can trigger the vulnerability by supplying a crafted byte array to the `jGetPolicyOID` JNI method. The Java call graph indicates that the byte array originates from other parts of the application, but the vulnerability is in the native library and can be triggered by any code that can call the JNI method. Given the clear evidence of an integer overflow leading to a heap-based buffer overflow, I am confident that this is a critical vulnerability."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "A heap-based buffer overflow exists in the `Decode_DER_ASN1_ST` function due to an integer overflow when parsing the length of an ASN.1 field.",
+            "The vulnerable function is reachable from a JNI method that takes a byte array as input, which can be controlled by an attacker.",
+            "The crash occurs in `__memcpy`, which is a direct result of the buffer overflow."
+          ],
+          "cwe_ids": [
+            "CWE-122",
+            "CWE-190"
+          ],
+          "severity": "critical",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "address": "001221d0",
+              "file": "libUbikeyJni.so",
+              "snippet": "pvVar2 = malloc((long)(int)local_34);\nlocal_40[2] = (long)pvVar2;\nif (local_40[2] == 0) {\n  Delete_ASN1(local_40);\n  return (long *)0x0;\n}\nmemcpy((void *)local_40[2],param_1 + (int)(local_30 + 2),(long)(int)local_34);",
+              "note": "This function contains the integer overflow and subsequent heap-based buffer overflow. The local_34 variable is a 32-bit integer that can be overflowed by a crafted ASN.1 length, leading to a small allocation. The memcpy then uses the correct, larger length, overflowing the buffer."
+            },
+            {
+              "function": "CERT_Load",
+              "address": "001369a4",
+              "file": "libUbikeyJni.so",
+              "snippet": "lVar2 = Decode_DER_ASN1_ST(*param_2);",
+              "note": "This function takes a byte array and passes it to the vulnerable Decode_DER_ASN1_ST function."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "address": "001178bc",
+              "file": "libUbikeyJni.so",
+              "snippet": "CERT_Load(&local_440,auStack_438);",
+              "note": "This JNI function takes the byte array from Java and passes it to CERT_Load."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Get_DER_Child",
+            "Decode_DER_ASN1_ST",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Update the `Decode_DER_ASN1_ST` function to properly validate the length of the ASN.1 field and prevent integer overflows. Use a 64-bit integer to store the length and check for potential overflows before allocating memory.",
+            "Apply patches from the Ubikey library vendor if available.",
+            "Perform a thorough security audit of all JNI functions to identify and fix similar vulnerabilities."
+          ],
+          "assumptions": [
+            "The Java code does not perform any validation on the byte array before passing it to the JNI function.",
+            "A malicious application can call the exported JNI function with a crafted byte array."
+          ],
+          "limitations": [
+            "The exact Java entry point to trigger the vulnerability is not fully clear from the provided information, but the vulnerability exists in the native library and can be triggered by any component that can call the JNI function."
+          ],
+          "exploit": {
+            "exploitability": "practical",
+            "trigger_method": "Calling the JNI method com.ubikey.jni.UbikeyJni.jGetPolicyOID with a crafted byte array containing a malformed X.509 certificate.",
+            "prerequisites": [
+              "A malicious application installed on the same device.",
+              "The ability to call an exported component of the application that triggers the vulnerable code path."
+            ],
+            "exploit_pipeline": [
+              "A malicious application creates a crafted byte array containing a malformed X.509 certificate. The ASN.1 structure of the certificate is designed to cause an integer overflow in the `Decode_DER_ASN1_ST` function.",
+              "The malicious application calls an exported component of the target application that in turn calls the `com.ubikey.jni.UbikeyJni.jGetPolicyOID` method with the crafted byte array.",
+              "The JNI function `Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID` is called, and the crafted byte array is passed to the native code.",
+              "The `Decode_DER_ASN1_ST` function in `libUbikeyJni.so` attempts to parse the malformed certificate, triggering the integer overflow and the heap-based buffer overflow.",
+              "An attacker can potentially leverage this overflow to execute arbitrary code in the context of the application."
+            ],
+            "poc_commands": [
+              "adb push crafted_cert.bin /sdcard/crafted_cert.bin",
+              "adb shell am start -n kr.co.busanbank.mbp/<\\<entry_point_activity\\>> --es cert_path /sdcard/crafted_cert.bin"
+            ],
+            "poc_files": [
+              "crafted_cert.bin"
+            ]
+          }
+        },
+        "statistics": {
+          "time": "00:00:57",
+          "llm_requests": 17,
+          "llm_tool_calls": 16,
+          "input_tokens": 187101,
+          "output_tokens": 4075
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,163 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "AhnLab V3 Mobile Plus",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libKeySharp_Android_Core.so": [
+              "Java_com_lumensoft_ks_KSNative_cmpUpdate3"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "1. The crash occurs in the JNI function Java_com_lumensoft_ks_KSNative_cmpUpdate3, which is part of a CMP (Certificate Management Protocol) certificate update flow in libKeySharp_Android_Core.so.",
+            "2. The JNI entry point at 0x0011f434 receives: param_1 (JNIEnv*), param_2 (jobject), param_3 (jbyteArray - first byte array), param_4 (jbyteArray - second byte array), param_5 (jint - integer). It calls GetByteArrayElements (offset 0x5c0) on both byte arrays to get native pointers, then passes the raw pointers and the integer to FUN_0010a80c.",
+            "3. FUN_0010a80c sets a global state variable DAT_0016814c = 8, then calls FUN_0010c700(param_2, param_3) where param_2 is the second byte array pointer (from server response) and param_3 is the integer parameter. If successful, it sets DAT_0016814c = 0x13 and calls FUN_0010f190(param_1) which is the first byte array pointer.",
+            "4. FUN_0010c700 parses ASN.1/DER-encoded data from the server response. It calls FUN_0010ff14 (parse TLV tag/length), FUN_0010c31c (parse CMP response body), and FUN_0010c5f0 (dispatch based on message type). These are all parsing functions that operate on the raw byte array content.",
+            "5. The Java caller is KSCmp.updatePWD(), which receives the byte arrays from network operations. The second byte array (param_4/bArr3) is a 6144-byte stack buffer filled by native CMP functions. The third parameter (bArrB2.length) is the length from a network response read via method b() which reads from a socket.",
+            "6. Critical observation: In the Java code for updatePWD, the call is: cmpUpdate3(bArr3, bArrB2, bArrB2.length) where bArrB2 comes from b() which reads from network. The length bArrB2.length is the actual Java array length which is bounded by the b() method to max 32768 bytes. However, inside native code, FUN_0010c700 receives the raw pointer to bArrB2 data and processes it as ASN.1 data.",
+            "7. The native parsing functions like FUN_0010ff14, FUN_0010c31c, FUN_0010c5f0, etc. parse the ASN.1 structure from the network response. These parsers read length fields from the data itself and use those to determine how much data to copy. FUN_001338c4 is a memcpy-like function used throughout.",
+            "8. In FUN_0010c31c, there's a loop parsing CMP response fields. In case 0 and case 1, it calls FUN_001338c4 to copy data into a stack buffer acStack_468[1032] using local_46c as the size, which is parsed from the ASN.1 length field in the input data. There's a check 'if (7 < local_470)' for the tag type but NO bounds check on local_46c (the parsed length) before copying into the 1032-byte stack buffer.",
+            "9. Specifically in FUN_0010c31c at case 0: FUN_001338c4(acStack_468, param_1 + iVar5, local_46c) copies local_46c bytes from input into a 1032-byte stack buffer. If the attacker-controlled server response contains an ASN.1 field with a length > 1032, this is a classic stack buffer overflow.",
+            "10. Similarly in FUN_0010b1f0, FUN_0010b9f8, and other parsing functions, data is copied from attacker-controlled input (server response) into fixed-size stack buffers without adequate bounds checking on the parsed length fields.",
+            "11. The input comes from network data (CMP server response), making this remotely exploitable via a MitM attack or compromised CMP server. The b() method in Java does limit the total response to 32768 bytes but individual ASN.1 fields within can still overflow fixed-size stack buffers.",
+            "12. The stack trace shows 'previous frame identical to this frame' which suggests stack corruption - consistent with a stack buffer overflow overwriting the return address or frame pointer, causing an infinite loop in the stack unwinder.",
+            "13. FUN_0010f190 similarly constructs data using parsed values from the first byte array and writes to memory based on parsed field sizes. Multiple FUN_001338c4 calls copy data without checking destination buffer sizes.",
+            "14. This is a genuine vulnerability: attacker-controlled network data (CMP server response) is parsed in native code with insufficient bounds checking, leading to stack buffer overflows in multiple ASN.1 parsing functions. The stack corruption evidenced by the 'previous frame identical' error confirms memory corruption occurred."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.82,
+          "reasons": [
+            "Network-derived CMP server response data is parsed in native ASN.1 parsing functions without adequate bounds checking on parsed length fields",
+            "FUN_0010c31c copies attacker-controlled data into fixed-size stack buffers (1032 bytes) using lengths parsed from the input data itself, with no bounds validation against the destination buffer size",
+            "Multiple similar patterns exist in FUN_0010b1f0, FUN_0010b9f8, FUN_0010bdbc where stack buffers of fixed sizes receive data based on attacker-controlled ASN.1 length fields",
+            "Stack trace shows 'previous frame identical to this frame' - classic indicator of stack corruption from buffer overflow",
+            "The data path is: network socket -> Java b() method -> JNI cmpUpdate3 -> native ASN.1 parsers -> stack buffer overflow"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787",
+            "CWE-120"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libKeySharp_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "FUN_0010c31c",
+              "address": "0x0010c31c",
+              "file": "KScmpdec.c",
+              "snippet": "case 0: FUN_001338c4(acStack_468, param_1 + iVar5, local_46c); -- copies local_46c bytes (parsed from input) into 1032-byte stack buffer with no bounds check",
+              "note": "Stack buffer overflow: local_46c is derived from ASN.1 length field in attacker-controlled network data"
+            },
+            {
+              "function": "Java_com_lumensoft_ks_KSNative_cmpUpdate3",
+              "address": "0x0011f434",
+              "snippet": "uVar3 = GetByteArrayElements(param_1, param_4, 0); FUN_0010a80c(uVar2, uVar3, param_5);",
+              "note": "JNI entry passes raw network response bytes directly to native parser without validation"
+            },
+            {
+              "function": "FUN_0010ff14",
+              "address": "0x0010ff14",
+              "snippet": "Parses ASN.1 TLV length field from input: supports 1-byte, 2-byte, and 3-byte length encodings, returning length values up to 65535",
+              "note": "Length values parsed from attacker-controlled data are used as copy sizes without bounds checking"
+            },
+            {
+              "function": "KSCmp.updatePWD",
+              "file": "com/lumensoft/ks/KSCmp.java",
+              "snippet": "byte[] bArrB2 = b(); iCmpUpdate2 = KSNative.getInstance().cmpUpdate3(bArr3, bArrB2, bArrB2.length);",
+              "note": "bArrB2 comes from network socket via b() method, length can be up to 32768 bytes"
+            }
+          ],
+          "call_sequence": [
+            "ActivityCertUpdateBilling$UpdateRunnable.run()",
+            "ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert()",
+            "KSCmp.updatePWD() -> reads network data via b()",
+            "KSNative.cmpUpdate3(byte[], byte[], int)",
+            "Java_com_lumensoft_ks_KSNative_cmpUpdate3 @ 0x0011f434",
+            "FUN_0010a80c @ 0x0010a80c",
+            "FUN_0010c700 @ 0x0010c700",
+            "FUN_0010c31c @ 0x0010c31c (stack buffer overflow in ASN.1 parsing)"
+          ],
+          "recommendations": [
+            "Add bounds checking in all ASN.1 parsing functions (FUN_0010c31c, FUN_0010b1f0, etc.) to validate that parsed length fields do not exceed destination buffer sizes before calling FUN_001338c4 (memcpy)",
+            "Consider using heap-allocated buffers sized to the actual parsed length instead of fixed-size stack buffers for CMP response parsing",
+            "Implement TLS certificate pinning for CMP server connections to reduce MitM attack surface"
+          ],
+          "assumptions": [
+            "The fuzzer provided malformed CMP protocol data that triggered the buffer overflow",
+            "FUN_001338c4 is a memcpy implementation (confirmed by decompilation)",
+            "The Java b() method reads data from a network socket as part of CMP protocol exchange"
+          ],
+          "limitations": [
+            "The exact crash instruction is unknown (stack trace shows '??' frames)",
+            "Could not fully decompile updatePwdCert() Java method due to Jadx decompilation failure",
+            "Cannot confirm exact field that caused overflow without runtime analysis",
+            "Stack canary (__stack_chk_guard) is present in some functions but may not protect all vulnerable paths"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Man-in-the-middle attack on CMP protocol connection or compromised CMP server sending malformed ASN.1 response during certificate update",
+            "prerequisites": [
+              "Network position to intercept CMP protocol traffic (MitM) or control of CMP server",
+              "Target app must initiate a certificate update operation (updatePWD flow)",
+              "Knowledge of CMP protocol message format to craft valid-looking but malicious response"
+            ],
+            "exploit_pipeline": [
+              "1. Set up MitM position on network path between app and CMP server (e.g., via ARP spoofing on local network or rogue WiFi AP)",
+              "2. Wait for target app to initiate certificate update (cmpUpdate3 flow) and intercept the CMP response",
+              "3. Craft a malicious CMP response with an ASN.1 OCTET STRING field whose length exceeds 1032 bytes, containing shellcode or ROP chain payload",
+              "4. Forward the crafted response to the app, triggering stack buffer overflow in FUN_0010c31c when parsing the oversized field",
+              "5. Achieve code execution or crash - stack canaries may need to be bypassed depending on which specific function is overflowed"
+            ],
+            "poc_commands": [
+              "adb push crafted_cmp_response.bin /sdcard/Download/payload.bin",
+              "# Note: Actual exploitation requires MitM setup and network interception",
+              "# The vulnerability is triggered during live CMP protocol exchange, not via file input",
+              "# Use a proxy tool to intercept and replace CMP server response with crafted ASN.1 data"
+            ],
+            "poc_files": [
+              "crafted_cmp_response.bin"
+            ],
+            "notes": "Stack canaries (__stack_chk_guard) are present in several parsing functions which would prevent simple exploitation. However, some intermediate functions may lack canaries, and the overflow could potentially be used for information disclosure or controlled crash. The 'previous frame identical' error in the stack trace confirms stack corruption occurred during fuzzing."
+          }
+        },
+        "statistics": {
+          "time": "00:04:11",
+          "llm_requests": 1,
+          "llm_tool_calls": 0,
+          "input_tokens": 86425,
+          "output_tokens": 2986
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,251 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.skysoft.kkbox.android/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "app_name",
+      "package": "com.skysoft.kkbox.android",
+      "min_sdk": 21,
+      "target_sdk": 29,
+      "version_name": "6.4.60",
+      "version_code": "60546"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+          "StackTrace": [
+            "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so": [
+              "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify crash site: Only native frame is Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample in libACRCloudEngine.so, which we decompiled.",
+            "Understand logic: Function gets a buffer via virtual call (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) into __src, works if param_3 != 0, param_4 > 0, and param_6 in {1,2}. Then branches on param_7 (sample format 0x20 or 0x10).",
+            "For param_7==0x20 (likely 32‑bit PCM), it computes uVar1 from param_4: uVar1 = (param_4+3); if param_4>=0 uses param_4; then uVar1 = uVar1>>2. So effectively ceil(param_4/4) but with some odd signed checks. Then uVar3 = uVar1<<1; that is number of 16‑bit samples; uVar7 = (ulong)uVar3 length passed to operator_new__ to allocate tmp buffer (__dest). No explicit overflow/upper‑bound checks beyond an ad‑hoc signed overflow guard for param_4+3.",
+            "Filling tmp buffer: If param_8==0 and param_4>3, it loops lVar4 from 0 while lVar4 < (int)uVar1 and writes 16‑bit values from 32‑bit source: *(undefined2 *)((long)__dest + lVar4*2) from *(undefined2 *)((long)__src + lVar4*4+2). This is consistent: dest index i*2 inside buffer of size 2*uVar1 bytes, and uVar3==2*uVar1, so in‑bounds given correct allocation. For param_8!=0 it uses float scaling but same indices. No out‑of‑bounds here given uVar3 and uVar1 relationship.",
+            "Param_7==0x10 case: __n = (size_t)(int)param_4; if __n<0 then uVar2=0xffffffffffffffff for operator_new__; then memcpy(__dest,__src,__n). This is the key unsafe area: if param_4 is negative, it is cast to size_t, becoming a huge positive number, but they try to cap allocation size using signed comparison, not unsigned, then blindly memcpy with size __n (negative cast) while allocation uses uVar2 which becomes 0xffffffffffffffff (~MAX_SIZE_T). That likely leads to allocation failure (bad_alloc / abort) or enormous allocation; memcpy with size_t equal to huge value reading from __src with only param_4 bytes valid (and backing buffer size coming from virtual allocator) may cause heap overflow or crash if allocator returns smaller buffer.",
+            "But they do: if ((long)__n < 0) { uVar2 = 0xffffffffffffffff; } so allocation size is either __n (if non‑negative in signed 64‑bit sense) or MAX if negative. However, __n is size_t, so cast from int param_4; if param_4<0, __n is large (e.g. 0xfffffffffffffffc). As a signed long, (long)__n < 0 is true, so they set uVar2 to all‑ones (still huge). So for negative param_4, they call operator_new__ with MAX size and memcpy with size __n (still huge). This is a logic bug w.r.t. using signed length without validation. However, this path only occurs when param_7==0x10; in that case, they treat source as 16‑bit PCM and copy param_4 bytes; caller must ensure param_4 non‑negative and consistent with source buffer length.",
+            "Input control: JNI signature params: (long *param_1, jlong param_2, jlong param_3, uint param_4, ulong param_5, uint param_6, int param_7, int param_8). In JNI, Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample likely gets int/long arguments directly from Java. Fuzzer enters via this JNI function directly (app_native_function and JNI bridge same). That means param_3, param_4, param_5, param_6, param_7, param_8 are directly under fuzzer (and in real app, under app logic processing user audio). There is no local range checking on param_4 or param_7/8 beyond the basic checks: param_3!=0, param_4>0, param_6-1<2. No bounds check to ensure param_4 fits the source buffer retrieved by virtual method at *param_1+0x5c0.",
+            "Memory safety risk: For param_7==0x10 and large param_4, __n is large; they allocate __dest of size uVar2==__n (if __n non‑negative as signed long), then memcpy __n bytes from __src into __dest. Whether this is safe depends on __src backing buffer length. That backing length is not passed explicitly, only param_4 is used here. The allocator at vtable+0x5c0 presumably returns a buffer of at least param_4 bytes (since they call with param_4) in the normal use case. Under fuzzing, param_3 and param_4 are arbitrary, so allocator might give shorter; however, we lack its implementation. We cannot see memcpy crash specifically because stack trace doesn’t show further frames; process termination is symbol name, not SIGSEGV details.",
+            "However, in the param_7==0x20 path, they do more complex math but still base allocation on derived sample count from param_4 without upper bounds; if param_4 extremely large positive, uVar3 may overflow 32‑bit and then sign‑extended into uVar7; they have one check for param_4+3 signed overflow, but not for shift and eventual cast to size_t. But decompiled code suggests they treat uVar1 as uint (32‑bit) and then uVar3=uVar1<<1 (also 32‑bit), then assign to 64‑bit uVar7 = (ulong)(int)uVar3. If uint overflow happens, that wraps in 32 bits, then cast. operator_new__ accepts uVar7, so effectively they allocate based on wrapped length; loops bounded by (int)uVar1 also use wrapped values. So allocation and use stay consistent; the primary risk is that param_4 may be incompatible with the actual size of __src buffer returned from virtual allocator; again we cannot assess without vtable target.",
+            "Resampling: They then call do_resample(__dest,iVar6>>1,param_6,rate,&local_70,&local_74,8000,3); iVar6 is (int)uVar7, with sign adjust, then >>1; potential for negative / overflow if uVar7 large; but they cap local_74 output via do_resample implementation which we do not see. However, __dest size is uVar7 bytes; __dest was allocated with exactly uVar7 (or uVar2) bytes, and do_resample presumably respects input length parameter. No clear overflow from this snippet alone.",
+            "Crash nature: Termination string is function name, not siginfo; fuzz harness log suggests crash occurred during native_1resample; could be from inside do_resample, operator_new__, memcpy, or virtual methods at *param_1+0x5c0/0x600/0x580/0x680. Without more stack, we cannot tie to a concrete out‑of‑bounds. But from code, a realistic bug is bad handling of negative param_4 in param_7==0x10 path (size_t casting and allocating MAX) which can easily cause allocation failure and process abort (DoS), but not necessarily exploitable memory corruption; however, if allocator succeeds with huge chunk or partial, memcpy(__n) overreads __src beyond its buffer, causing heap OOB read/write. Because param_4 is directly attacker‑controlled via JNI, this is a potential memory corruption vulnerability.",
+            "Environment vs real app: In production, Java side most likely validates param_4 as audio buffer length >=0 and consistent with actual buffer; fuzz harness bypasses that and uses arbitrary values, including negative. So the specific negative‑length issue might be harness‑only. Still, even for positive but mismatched lengths there is a risk if the vtable+0x5c0 buffer size does not truly guarantee >=param_4 bytes, but likely it does, since it gets param_4 as argument. Given this is a closed engine, we should not assume external validation or robust allocator; but absence of checks in JNI means any misuse by Java or other code using this JNI could trigger the same issue.",
+            "Decision: We do not have direct evidence of crash cause (no SIGSEGV in memcpy, etc.), but we see clearly unsafe treatment of signed param_4 converted to size_t with ad‑hoc negative check that actually uses the already‑converted size_t, leading to potential massive allocation and memcpy with attacker‑controlled size. This is a classical integer sign/size mismatch that can produce OOB access. Because param_4 is controllable from Java and there are no checks here, I will treat this as a likely memory‑safety vulnerability, albeit with medium confidence since allocator semantics and real Java usage are unknown. Severity high since it can produce heap OOB read/write or at least large allocation DoS from untrusted inputs if Java exposes control."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "JNI function Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample directly consumes attacker-controlled length param_4 and format param_7 without validation",
+            "In the param_7==0x10 path, param_4 is cast from signed int to size_t and then used for both allocation and memcpy size with a flawed negative-length check using the already-cast size_t, leading to potential huge allocation and memcpy with untrusted size",
+            "The function relies on an external allocator via vtable+0x5c0 to provide __src but never verifies that __src is at least param_4 bytes long, so a large or negative param_4 can cause out-of-bounds read/write during memcpy or resampling",
+            "The fuzz harness can reach this JNI entry directly, demonstrating the path is reachable; in a real app, improper or missing checks in Java would similarly expose the bug"
+          ],
+          "cwe_ids": [
+            "CWE-190",
+            "CWE-680",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "file": "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so",
+              "snippet": "__n = (size_t)(int)param_4;\nuVar2 = __n;\nif ((long)__n < 0) {\n  uVar2 = 0xffffffffffffffff;\n}\n__dest = operator_new__(uVar2);\nmemcpy(__dest,__src,__n);",
+              "note": "Signed int length param_4 is cast to size_t, then negative check and allocation perform inconsistent handling, allowing massive size values into memcpy."
+            },
+            {
+              "function": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "file": "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so",
+              "snippet": "__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n...\nmemcpy(__dest,__src,__n);",
+              "note": "Source buffer length is not validated against attacker-controlled __n derived from param_4."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample"
+          ],
+          "recommendations": [
+            "In the JNI native_1resample implementation, validate param_4 on entry: enforce param_4 >= 0, reasonable upper bound, and consistent with the actual audio buffer length",
+            "Replace the flawed size computation with strictly unsigned arithmetic and explicit range checks before casting to size_t and passing to operator_new__ and memcpy",
+            "Add internal assertions or error returns if the virtual allocator at *param_1+0x5c0 cannot provide a buffer of at least param_4 bytes, and avoid calling memcpy with untrusted sizes"
+          ],
+          "assumptions": [
+            "JNI mapping of Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample exposes param_4 and param_7 directly from Java without additional native-side validation",
+            "The virtual allocator at vtable+0x5c0 may not internally clamp param_4 to a safe range, so misuse can propagate to memcpy",
+            "Java-side callers may be influenced by user-controlled or external audio inputs and may not fully sanitize lengths"
+          ],
+          "limitations": [
+            "Exact crash site (memcpy vs do_resample vs allocator) is unknown because only top-level function name is in the trace",
+            "Implementation details of the vtable methods at offsets 0x5c0, 0x600, 0x580, 0x680 and of do_resample are not available, so the precise out-of-bounds behaviour cannot be confirmed",
+            "Java-side argument validation is not visible, so exposure to untrusted callers is inferred from typical JNI usage and fuzzing harness rather than proven"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Crafted Java call into ACRCloudRecognizeEngine.native_resample with malicious length and format parameters",
+            "prerequisites": [
+              "Ability to execute or influence Java code that calls ACRCloudRecognizeEngine.native_resample (e.g., via in-app plugin, untrusted media pipeline, or IPC-exposed component)",
+              "Control over length parameter corresponding to param_4 and sample format param_7 (set to 0x10)",
+              "Lack of strict validation on param_4 at the Java level"
+            ],
+            "exploit_pipeline": [
+              "Identify or create a Java code path that invokes ACRCloudRecognizeEngine.native_resample with attacker-controlled buffer length and format arguments",
+              "Supply a negative or extremely large value for the length parameter when param_7==0x10 so that native code computes a huge size_t __n and uVar2 for allocation",
+              "Trigger the call so that operator_new__ is invoked with a huge uVar2 and memcpy(__dest,__src,__n) attempts to move more data than __src actually contains, causing heap out-of-bounds or allocator failure",
+              "Observe process crash or memory corruption; refine input values to stabilize behaviour (e.g., targeting heap layout to attempt controlled overwrite if allocator succeeds)"
+            ],
+            "poc_commands": [
+              "adb shell am instrument -w -e class com.acrcloud.rec.engine.ACRCloudRecognizeEngineTest com.skysoft.kkbox.android.test/androidx.test.runner.AndroidJUnitRunner",
+              "adb shell am start -n com.skysoft.kkbox.android/.MainActivity --es poc_native_resample_params \"len=-1,format=0x10,rate=44100,channels=2\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/acrcloud_resample_poc.raw"
+            ],
+            "notes": "Exact Java entry point and test harness class names are unknown; PoC commands assume existence of a test or debug path to call native_resample with arbitrary parameters. Replace component names and extras with actual ones from the target app when available."
+          }
+        },
+        "statistics": {
+          "time": "00:00:59",
+          "llm_requests": 4,
+          "llm_tool_calls": 4,
+          "input_tokens": 25324,
+          "output_tokens": 3472
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so": [
+              "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, next is the app JNI function Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample, which we decompiled via Ghidra.",
+            "Inside native_1resample, the only memcpy call is in the param_7 == 0x10 branch: __n = (size_t)(int)param_4; uVar2 = __n; if ((long)__n < 0) uVar2 = 0xffffffffffffffff; __dest = operator_new__(uVar2); memcpy(__dest,__src,__n).",
+            "So allocation size (uVar2) is either equal to __n, or 0xffffffffffffffff for negative values. But __n is size_t cast from param_4 (uint), so __n is never negative; the (long)__n < 0 branch is dead. Effectively, operator_new__ is called with size param_4 bytes, then memcpy copies param_4 bytes from __src to __dest.",
+            "__src is obtained from a virtual method (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0). That looks like some ACRCloud buffer accessor. The code never validates that the backing buffer length is at least param_4 bytes; it simply trusts param_4’s value passed in from the JNI arguments.",
+            "The crash was in __memcpy, consistent with a buffer overflow read from __src or write into __dest. A write overflow is unlikely since __dest was just allocated with length equal to __n (param_4), so memcpy’s destination is large enough. The likely issue is that param_4 exceeds the actual buffer size of __src, causing out-of-bounds read. That’s an application-level bug: length is fully attacker-controlled via the JNI bridge and not checked against source buffer size.",
+            "The fuzz harness calls the JNI directly, so this is reachable from untrusted Java-side callers. In the real app, Java parameters are likely derived from audio data sizes and thus still attacker-influenced (e.g., crafted media inputs). No bounds checks appear before memcpy nor implicit validation in this function.",
+            "There is another numeric branch for param_7 == 0x20 (float/32-bit case) where they recompute uVar1/uVar3 and operator_new__ with adjusted length; that branch does not use memcpy and instead loops with explicit indexing within the computed bounds; it appears safer. The bug is confined to the param_7 == 0x10 branch where PCM16 data is processed by blindly copying param_4 bytes.",
+            "The SCARRY4 and negative checks suggest remaining compiler-introduced overflow checks, but they do not validate param_4 against actual buffer size and do not prevent param_4 from being arbitrarily large relative to the source buffer.",
+            "Given we have a direct unsafe memcpy, attacker-controlled length from JNI, and a crash in memcpy, this is a genuine, likely exploitable out-of-bounds read (and potentially write if allocator returns smaller than requested or if integer mismatches occur). This maps to CWE-787 (Out-of-bounds Write) or at least CWE-125 (Out-of-bounds Read). Given typical audio buffer contexts, we treat it as memory-corruption-capable and thus high severity.",
+            "We lack visibility into the exact implementation of the virtual method at *param_1+0x5c0, so we can’t assert whether it internally enforces that its returned pointer supports at least param_4 bytes. However, the common pattern is that length is separate; since no explicit check is present here, we assume this is a bug. Confidence is moderately high but not absolute; I choose 0.8."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.8,
+          "reasons": [
+            "Crashing function is __memcpy called from Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample in libACRCloudEngine.so.",
+            "JNI function uses memcpy(__dest,__src,__n) where __n is directly derived from uint param_4 without any bounds check against the size of __src.",
+            "Source pointer __src is obtained from a virtual buffer accessor (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) with no validation that the buffer is at least param_4 bytes long, creating a likely out-of-bounds read.",
+            "The dst buffer is freshly allocated with size equal to param_4, so the overflow is almost certainly on the source side, consistent with memcpy crashing.",
+            "Parameters (including length param_4 and format param_7) are passed directly from Java/JNI, providing an attacker-controlled path to the vulnerable memcpy length."
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "file": "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so",
+              "snippet": "__n = (size_t)(int)param_4;\nuVar2 = __n;\nif ((long)__n < 0) {\n  uVar2 = 0xffffffffffffffff;\n}\n__dest = operator_new__(uVar2);\nmemcpy(__dest,__src,__n);",
+              "note": "Length param_4 from JNI is directly used for allocation and memcpy without checking against source buffer size."
+            },
+            {
+              "function": "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+              "file": "APKs_FINAL/com.skysoft.kkbox.android/lib/arm64-v8a/libACRCloudEngine.so",
+              "snippet": "__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n...\n// no validation of size of __src vs param_4 before memcpy",
+              "note": "Source pointer comes from a virtual accessor; the function does not ensure returned buffer is at least param_4 bytes."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_acrcloud_rec_engine_ACRCloudRecognizeEngine_native_1resample",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add explicit length validation ensuring param_4 does not exceed the actual size of the buffer returned via (*param_1+0x5c0) before calling memcpy.",
+            "Prefer using a safe copy routine that takes both source and destination sizes, or propagate the valid length from the buffer provider instead of trusting a separate JNI parameter.",
+            "Harden JNI boundary by validating param_4, param_6, param_7 on the Java side and adding assertions or early returns on invalid combinations to prevent untrusted callers from causing overflows."
+          ],
+          "assumptions": [
+            "The virtual method at (*param_1+0x5c0) does not automatically guarantee that its returned buffer is at least param_4 bytes, since no such contract is visible in this function.",
+            "The JNI parameters, including length param_4 and format param_7, are derived from or controllable by untrusted inputs such as audio data length or caller-specified parameters.",
+            "The crash in __memcpy is caused by out-of-bounds access rather than unrelated allocator or hardware faults."
+          ],
+          "limitations": [
+            "Implementation details of the virtual method at (*param_1+0x5c0) are unknown; it might internally validate requested sizes, but no such linkage is visible here.",
+            "JNI signature and precise Java-side call sites for native_resample are not available, so exact attacker-control level for the parameters is inferred.",
+            "No ASAN/UBSAN logs are available to distinguish between OOB read vs write; assessment is based on code inspection and typical patterns."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Untrusted Java invocation of native_resample with oversized length parameter for given buffer.",
+            "prerequisites": [
+              "Ability to invoke ACRCloudRecognizeEngine.native_resample from Java (directly or indirectly).",
+              "Control over the input buffer contents and the length argument passed as param_4.",
+              "Device running the vulnerable libACRCloudEngine.so version."
+            ],
+            "exploit_pipeline": [
+              "Craft a Java or harness caller that loads the ACRCloud engine and obtains a handle corresponding to param_1/param_3 with a real audio buffer smaller than a large length value.",
+              "Call native_resample with param_7 == 0x10 and param_4 set larger than the actual audio buffer size returned via (*param_1+0x5c0).",
+              "This forces memcpy to read beyond the real buffer bounds from __src into a sufficiently large __dest heap buffer, corrupting adjacent memory or crashing.",
+              "Observe process crash or attempt to leverage the out-of-bounds read/write for information disclosure or heap grooming depending on environment constraints."
+            ],
+            "poc_commands": [
+              "adb shell am start -n <package>/<SomeActivity> --es mode \"fuzz_resample\" --es payload \"/sdcard/Download/payload.pcm\"",
+              "adb push crafted_audio.pcm /sdcard/Download/payload.pcm"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.pcm"
+            ],
+            "notes": "Exact Java entry point and activity name for triggering native_resample are unknown; PoC assumes an exported or reachable component that wraps this JNI call. Replace <package> and <SomeActivity> with actual identifiers once identified."
+          }
+        },
+        "statistics": {
+          "time": "00:00:36",
+          "llm_requests": 4,
+          "llm_tool_calls": 3,
+          "input_tokens": 25092,
+          "output_tokens": 2089
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,171 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "AhnLab V3 Mobile Plus",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpUpdate3"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ],
+            "APKs_FINAL/com.ahnlab.v3mobileplus/lib/arm64-v8a/libzkeylib.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Step 1: Identify the crash site. The crash occurs in ks_memcpy, called from _dPKIHeader. The termination is in ks_memcpy (custom memcpy), indicating a memory access violation during a copy operation.",
+            "Step 2: Analyze _dPKIHeader (@ 0x00125790). This function parses an ASN.1/DER-encoded PKIHeader structure. It uses a local stack buffer `acStack_468` (char[1032]) as the destination for multiple ks_memcpy and __dOCTETSTRING calls.",
+            "Step 3: Critical vulnerability - In the switch cases within _dPKIHeader, the `local_46c` variable stores a length parsed from the input data (via __dCONTEXTSPECIFIC, __dSEQUENCE, __get_len, __dOCTETSTRING). This length is directly derived from the input byte stream without any bounds checking against the stack buffer size (1032 bytes).",
+            "Step 4: In case 0 and case 1, `ks_memcpy(acStack_468, param_1 + uVar15, local_46c)` copies `local_46c` bytes into a 1032-byte stack buffer. The length `local_46c` is parsed from the TLV length field of the ASN.1 structure. If a crafted input specifies a length > 1032 (or even > 1032 for the stack buffer), a classic stack buffer overflow occurs.",
+            "Step 5: Similarly, in __dOCTETSTRING (@ 0x001296e8), the function calls `ks_memcpy(param_1, param_2 + lVar5)` where param_1 is the stack buffer acStack_468 and the length *param_3 is parsed from the input. No bounds check on the length against the destination buffer.",
+            "Step 6: In case 5, `ks_memcpy(puVar4 + 0xf4, acStack_468, local_46c)` copies data to a global context at offset 0xf4 with length from input. The global context structure size is unknown but fixed, so large lengths could overflow it too.",
+            "Step 7: In case 7, `ks_memcpy(acStack_468, lVar1 + iVar6, local_46c)` again uses input-derived length to copy into the stack buffer.",
+            "Step 8: Trace backward to JNI entry. Java_com_koscom_cert_ca_CANative_cmpUpdate3 gets byte arrays from JNI (param_3, param_4), calls GetByteArrayElements to get raw pointers, then calls CMP_Update_3(uVar2, uVar3, param_5). CMP_Update_3 calls cmpdec_PKIMessage(param_2, param_3) which calls _dPKIHeader(param_1 + iVar12). The param_2/param_1 here originates from the second byte array (param_4 in JNI = bArr2 in Java).",
+            "Step 9: In Java, KSCmp.updatePWD calls cmpUpdate3(bArr3, bArrB2, bArrB2.length). bArrB2 comes from b() which reads data from the network: `this.b.readFully(bArr2)` where bArr2 is up to 32768 bytes (validated: 1 <= length <= 32768). The data is a server response. So the input to _dPKIHeader is network data from a CA server.",
+            "Step 10: Attack vector assessment. The data parsed by _dPKIHeader comes from the network (a CA server response). In a man-in-the-middle (MITM) scenario or compromised server scenario, an attacker could craft a malicious PKI message with oversized length fields in ASN.1 TLV structures. This would cause ks_memcpy to write beyond the 1032-byte stack buffer, resulting in a stack buffer overflow.",
+            "Step 11: The length parsing functions (__dSEQUENCE, __dCONTEXTSPECIFIC, __get_len, __dOCTETSTRING) all parse lengths from the raw byte data and can return lengths up to 65535 (2-byte length encoding), while the stack buffer is only 1032 bytes. No validation is performed between the parsed length and the buffer size.",
+            "Step 12: The stack canary check at the end of _dPKIHeader (stack_chk_fail) would detect the overflow and abort, but the overflow itself is a real vulnerability - it could be exploited before the canary check in some scenarios, or if stack canaries are not present on all builds.",
+            "Step 13: Classification: This is a genuine stack buffer overflow vulnerability (CWE-121/CWE-787) in a network-facing PKI message parser. The input is attacker-influenceable via MITM on the certificate update network communication. The length values used in ks_memcpy are directly derived from the attacker-controlled input without bounds checking against the fixed-size stack buffer."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "_dPKIHeader uses a 1032-byte stack buffer (acStack_468) but copies data with lengths parsed directly from ASN.1 TLV input without bounds checking",
+            "Length fields in the ASN.1 parser support up to 65535 bytes (2-byte length encoding), far exceeding the 1032-byte stack buffer",
+            "Multiple ks_memcpy calls in switch cases 0, 1, 5, and 7 use input-derived lengths without any size validation against the destination buffer",
+            "__dOCTETSTRING also copies to the same stack buffer with input-derived lengths without bounds checking",
+            "The input data originates from network (CA server response via KSNet.readFully), making it attacker-influenceable in MITM scenarios"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787",
+            "CWE-120"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libCertJavaClient.so"
+          ],
+          "evidence": [
+            {
+              "function": "_dPKIHeader",
+              "address": "0x00125790",
+              "file": "KScmpdec.c",
+              "snippet": "ks_memcpy(acStack_468, param_1 + uVar15, local_46c); // case 0/1: local_46c from input, acStack_468 is char[1032]",
+              "note": "Stack buffer overflow: local_46c is parsed from ASN.1 TLV length field and can exceed 1032 bytes"
+            },
+            {
+              "function": "__dOCTETSTRING",
+              "address": "0x001296e8",
+              "snippet": "ks_memcpy(param_1, param_2 + lVar5); // param_1 = acStack_468, length = *param_3 from input",
+              "note": "Called from cases 3, 5, 6 in _dPKIHeader, copies input-derived length into stack buffer without bounds check"
+            },
+            {
+              "function": "_dPKIHeader",
+              "address": "0x00125a10",
+              "snippet": "ks_memcpy(puVar4 + 0xf4, acStack_468, local_46c); // case 5: copies to global context with input-derived length",
+              "note": "May also overflow the global context structure if local_46c is large"
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpUpdate3",
+              "address": "0x00115f68",
+              "snippet": "iVar1 = CMP_Update_3(uVar2, uVar3, param_5);",
+              "note": "JNI entry point passes raw byte array data to CMP_Update_3 which calls cmpdec_PKIMessage -> _dPKIHeader"
+            },
+            {
+              "function": "KSCmp.updatePWD",
+              "file": "com.lumensoft.ks.KSCmp",
+              "snippet": "byte[] bArrB2 = b(); iCmpUpdate2 = KSNative.getInstance().cmpUpdate3(bArr3, bArrB2, bArrB2.length);",
+              "note": "b() reads up to 32768 bytes from network; this data becomes the input to _dPKIHeader"
+            }
+          ],
+          "call_sequence": [
+            "Java: ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert()",
+            "Java: KSCmp.updatePWD() -> reads network data via b() -> KSNative.cmpUpdate3(bArr3, bArrB2, bArrB2.length)",
+            "JNI: Java_com_koscom_cert_ca_CANative_cmpUpdate3 @ 0x00115f68",
+            "Native: CMP_Update_3 @ 0x00123af4 -> cmpdec_PKIMessage @ 0x00125bd0",
+            "Native: _dPKIHeader @ 0x00125790 -> ks_memcpy @ 0x00146034 (stack buffer overflow)"
+          ],
+          "recommendations": [
+            "Add bounds checking in _dPKIHeader before every ks_memcpy call: validate that local_46c <= sizeof(acStack_468) before copying",
+            "Add bounds checking in __dOCTETSTRING to validate the parsed length against a maximum parameter or destination size",
+            "Consider using heap-allocated buffers with dynamic sizing instead of fixed stack buffers for ASN.1 parsing",
+            "Implement TLS certificate pinning for CA server communication to reduce MITM risk"
+          ],
+          "assumptions": [
+            "The fuzz harness correctly simulates malformed PKI server responses passed through cmpUpdate3",
+            "The stack buffer acStack_468 is 1032 bytes based on Ghidra's decompilation (char[1032])",
+            "The network data received by b() can be influenced by an attacker in a MITM position"
+          ],
+          "limitations": [
+            "Could not fully decompile updatePwdCert() in Java due to JADX decompilation failure",
+            "Exact trigger conditions depend on ASN.1 field ordering within the PKI message",
+            "Stack canary presence may prevent practical exploitation on modern builds, but the bug is still a real vulnerability"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Man-in-the-middle attack on certificate update network communication, injecting a crafted PKI response with oversized ASN.1 TLV length fields",
+            "prerequisites": [
+              "Network MITM position between app and CA server during certificate update flow",
+              "Ability to intercept and modify the PKI response (second round-trip in CMP update protocol)",
+              "User must initiate a certificate update/renewal operation in the app"
+            ],
+            "exploit_pipeline": [
+              "1. Position attacker as MITM on network path between app and CA server (e.g., rogue WiFi, ARP spoofing)",
+              "2. Wait for user to initiate certificate update via ActivityCertUpdateBilling",
+              "3. Intercept the CA server's PKI response (second network read in updatePWD flow)",
+              "4. Replace with crafted PKI message containing a CONTEXT_SPECIFIC field (tag 0/1) with TLV length > 1032 bytes, causing stack buffer overflow in _dPKIHeader",
+              "5. Overflow overwrites stack canary and return address, potentially achieving code execution (if canary bypass is possible) or at minimum crashing the app (DoS)"
+            ],
+            "poc_commands": [
+              "adb shell am start -n com.ahnlab.v3mobileplus/com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling --es subjectDn 'CN=test' --es old_password 'test123' --ei authType 1",
+              "# Simultaneously run MITM proxy to inject crafted PKI response with oversized length field"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_pki_response.der"
+            ],
+            "notes": "Practical exploitation requires MITM positioning. The stack canary provides a defense layer but the underlying buffer overflow is a genuine code vulnerability. The oversized length in an ASN.1 CONTEXT_SPECIFIC field (cases 0, 1, 7) directly triggers the overflow in acStack_468[1032]."
+          }
+        },
+        "statistics": {
+          "time": "00:02:52",
+          "llm_requests": 34,
+          "llm_tool_calls": 44,
+          "input_tokens": 1207317,
+          "output_tokens": 5384
+        }
+      }
+    ]
+  }
+}

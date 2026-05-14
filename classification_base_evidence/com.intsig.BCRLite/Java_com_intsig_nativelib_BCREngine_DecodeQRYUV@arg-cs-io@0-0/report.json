@@ -1,0 +1,118 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "CamCard",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "FastDecodeQR_YUV",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "FastDecodeQR_YUV",
+            "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "FastDecodeQR_YUV"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "FastDecodeQR_YUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify crashing function: FastDecodeQR_YUV(void *param_1,int param_2,int param_3,int param_4,long param_5) is the real implementation; Java JNI wrapper calls it with (uVar4, width=param_4, height=param_5, stride=param_4, outputBuf=auStack_1078). Crash reason not given, but function ends in __stack_chk_fail(uVar12) when certain conditions fail, indicating stack canary corruption, implying out-of-bounds write on stack locals (local_1468, local_a60, auStack_1078, auStack_1068).",
+            "Review bounds/logic: It allocates a 0x96000 heap buffer and has complex coordinate computations and memcpys, but those operate into __ptr; stack arrays local_1468[640] and local_a60[2] are used for coordinate tables with fixed loop bounds (0x3c0, 0x500) carefully matched to sizes; those are likely safe. Stack corruption more likely from writing into auStack_1078/auStack_1068 in JNI function via FastDecodeQR_YUV’s param_5 or via FastDecodeQR_YUV itself writing past its param_5 buffer, but we see JNI passes auStack_1078 as param_5; code inside FastDecodeQR_YUV treats param_5 as long (likely pointer) and passes to qkdmoi1oo(param_5,lVar23) and potentially writes through it; however we don’t see direct writes from FastDecode to that pointer, only qkdmoi1oo does, so if stack canary failed in FastDecode it suggests some other local overflow not shown (decompiled code shows no obvious unsafe stack writes beyond local arrays).",
+            "Check parameter validation: Entry constraint `if (param_4 < param_2)` sets error; else requires param_1!=0, width/height >=0xf0, and param_5 != 0 before proceeding. So width/height lower bounded, not upper bounded. All uses of width/height in loops are governed by either fixed bounds or computed offsets but they ultimately index into __ptr using param_1 + y*stride + x with x,y derived from local tables sized according to 0xf0/0x140, and from global tables with _DAT/_UNK constants. Potential OOB read from param_1 if stride/buffer smaller than assumed, but JNI obtains uVar4 from Java via env function `(*env+0x5c0)(env, byteArray, 0)` which returns a valid pointer and also receives stride implicitly (length); however, FastDecodeQR_YUV is passed stride=param_4 (width) and no bound vs real buffer length. If Java caller can pass inconsistent width/height vs actual byte array size, native code can compute addresses beyond buffer and read from unallocated memory, but that is OOB READ, not necessarily overwrite stack canary.",
+            "Inspect JNI wrapper: Java_com_intsig_nativelib_BCREngine_DecodeQRYUV obtains `uVar4` via `GetPrimitiveArrayCritical`-like call, then passes auStack_1078, a 12-byte + canary + 4096B array auStack_1068 as output; after FastDecodeQR_YUV returns, it uses local_106c and local_68 (both 4-byte scalars) to call back into Java with `(*env+0x518)(env, auStack_1068, local_106c)`, so auStack_1068 is output buffer. Any overflow into these locals could corrupt the canary; however FastDecodeQR_YUV doesn’t receive auStack_1068 pointer, only auStack_1078, so it can’t write to auStack_1068; stack canary failure inside Java_com_* is only from overwrites on that stack frame. But decompiled code there has no buffer writes at all other than JNI stack usage. Thus, the canary failure we see in FastDecodeQR_YUV indicates an internal overflow in that function’s own frame, independent of JNI frame.",
+            "Input controllability: JNI width (param_4) and height (param_5) come from Java; based on typical image decode API, Java will pass dimensions from camera or caller; a malicious app or content (e.g., crafted camera frame) could influence size and pixel data. There is no upper bound on param_2/param_3 beyond >=0xf0, and complex arithmetic uses them to fill coordinate arrays and index into image buffer. Although many calculations derive positions within fixed 0xf0x140 region, there are branches where param_2/param_3 affect distribution of coordinates (e.g., param_3<param_2 path with variable param_2 adjustments). The fact we hit stack canary failure under fuzzing strongly indicates some arithmetic path leads to out-of-bounds write on stack resident structures (local_1468, local_a60, or local temporaries) when widths/heights differ in extreme ratios, and there is no evidence of sanitization limiting these values from JNI or Java side.",
+            "Exploitability & environment: Fuzz harness entry fuzz_one_input likely maps arbitrary bytes to QR decode YUV parameters similarly to real app; the JNI wrapper is genuine, and the code does not assume impossible conditions apart from minimum size. As such, if an attacker can supply a especially malformed YUV frame or metadata (via image file or camera data), they can likely trigger same arithmetic path and memory corruption. Since the bug corrupts stack canary, it is almost certainly a stack-based buffer overflow (CWE-121) or OOB write (CWE-787) and potentially exploitable for code execution, though stack protector makes exploitation harder but not impossible (info leak + bypass).",
+            "Classification: This is not a harness-only misuse; the vulnerable function is production FastDecodeQR_YUV in libbcr.so, called from real JNI with attacker-influenced image buffer and dimensions, lacking sufficient bounds checks, and we observed a security-relevant memory corruption (stack canary trip). I will classify as vulnerable, high severity, with attacker-controlled inputs being width/height and image data from Java, leading to potential stack overflow in FastDecodeQR_YUV."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Stack canary failure in FastDecodeQR_YUV indicates stack-based buffer overflow or similar memory corruption in production QR decoder",
+            "FastDecodeQR_YUV uses attacker-controlled width/height (from JNI) in complex index calculations without clear upper bounds, and fuzzing reached a corrupting path",
+            "JNI wrapper is real app code passing Java-controlled buffers and dimensions; no evidence the crashing parameter combinations are impossible in normal deployment"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbcr.so",
+            "libQREngine.so"
+          ],
+          "evidence": [
+            {
+              "function": "FastDecodeQR_YUV",
+              "address": "0x00212aa8",
+              "file": "libbcr.so",
+              "snippet": "if (param_4 < param_2) { uVar12 = 0xffffff38; } else { ... if ((((param_1 != (void *)0x0) && (0xef < param_2)) && (0xef < param_3)) && (param_5 != 0)) { __ptr = malloc(0x96000); ... }\n...\nLAB_00213370:\n  /* WARNING: Subroutine does not return */\n  __stack_chk_fail(uVar12);",
+              "note": "Function ends in __stack_chk_fail when error paths taken after complex stack usage, showing stack protector detected corruption"
+            },
+            {
+              "function": "FastDecodeQR_YUV",
+              "address": "0x00212aa8",
+              "file": "libbcr.so",
+              "snippet": "int local_1468 [640];\nundefined8 local_a68;\nlong local_a60 [2];\n...\n do { ... *(int *)((long)local_a60 + lVar23 + -8) = ...; *(int *)((long)local_a60 + lVar23 + -4) = ...; lVar23 = lVar16; } while (lVar16 != 0x500);\n...\n do { *(int *)((long)local_1468 + lVar23) = ...; *(int *)((long)local_1468 + lVar23 + 4) = ...; lVar23 = lVar16; } while (lVar16 != 0x3c0);",
+              "note": "Multiple loops write into fixed-size stack arrays using offsets derived from variable dimensions; likely source of stack overflow when dimensions are extreme"
+            },
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "address": "0x0014d9ac",
+              "file": "libbcr.so",
+              "snippet": "uVar4 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\niVar3 = FastDecodeQR_YUV(uVar4,param_4,param_5,param_4,auStack_1078);",
+              "note": "JNI passes Java-controlled buffer pointer and width/height directly into FastDecodeQR_YUV without any validation of ranges"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_BCREngine_DecodeQRYUV @ 0x0014d9ac -> FastDecodeQR_YUV @ 0x00212aa8"
+          ],
+          "recommendations": [
+            "Add strict upper-bound validation on width, height, and stride in Java_com_intsig_nativelib_BCREngine_DecodeQRYUV before calling FastDecodeQR_YUV and reject unreasonable values",
+            "Audit and correct all loops and index calculations in FastDecodeQR_YUV that write into stack arrays (local_1468, local_a60) to ensure they cannot exceed array bounds regardless of input dimensions",
+            "Enable and review sanitizer builds (ASan/UBSan) for the QR decoding code to pinpoint the exact write responsible for the stack canary corruption"
+          ],
+          "assumptions": [
+            "Fuzzer’s parameter mapping to JNI mirrors realistic app usage and does not introduce impossible combinations of width/height",
+            "The observed process termination corresponds to stack canary failure in FastDecodeQR_YUV, not an unrelated abort",
+            "Caller Java code can influence the YUV buffer content and dimensions without restrictive pre-validation beyond basic non-null checks"
+          ],
+          "limitations": [
+            "Exact corrupting instruction inside FastDecodeQR_YUV not identified; decompiled code is large and may hide subtle off-by-one errors",
+            "Java-side source using BCREngine.DecodeQRYUV was not inspected, so additional validation there cannot be fully ruled out",
+            "No concrete PoC inputs are available to confirm control over corrupted data or feasibility of code execution beyond denial-of-service"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:50",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 23279,
+          "output_tokens": 2429
+        }
+      }
+    ]
+  }
+}

@@ -40,7 +40,7 @@ async def get_jadx_metadata(model_name: Optional[str] = None, verbose: bool = Fa
     if verbose: print_message(BLUE, "PROMPT", APPMETADATA_METADATA)
     if model_name == "gemini-cli":       
         appMetadata, _ = query_gemini_cli(APPMETADATA_METADATA, "Extract app metadata from the currently open Jadx project.", AppMetadata, verbose=verbose, debug=debug)
-    elif (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-")):
+    elif (model_name.startswith("gpt-") and not model_name.startswith("gpt-oss")) or (model_name.startswith("gemini-") or model_name.startswith("claude-")):
         async with get_agent(APPMETADATA_METADATA, AppMetadata, [server], model_name=model_name) as j_agent:
             j_meta = await j_agent.run("Extract app metadata from the currently open Jadx project.")
         appMetadata: AppMetadata = j_meta.output            

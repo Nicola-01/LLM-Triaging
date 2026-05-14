@@ -1,0 +1,239 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/nh.smart.banking/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "nh.smart.banking",
+      "min_sdk": 21,
+      "target_sdk": 31,
+      "version_name": "2.8.3",
+      "version_code": "125"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "StackTrace": [
+            "memmove",
+            "ASNAny_New",
+            "IW_Sign_DSA",
+            "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so": [
+              "ASNAny_New",
+              "IW_Sign_DSA",
+              "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+              "Java_com_penta_issacweb_IssacWebAPI_DSASign"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level frame below allocator/sanitizer: top native frame is memmove (libc). Next frame is ASNAny_New in libIWAndroid.so, which is the first application-level function to inspect.",
+            "Decompiled ASNAny_New shows it allocates a 0x60-byte structure, sets up function pointers and state, then parses ASN.1-like data from *param_2. It computes indexes iVar4 and iVar2 into *param_2, validates tag byte when a flag bit is set, adjusts for an indefinite-length encoding pattern, then calculates length = iVar2 - iVar4, allocates a buffer of that length, and calls memcpy(__dest, lVar3 + iVar4, length).",
+            "Potential vulnerability spot: memcpy length and source boundary. The buffer length is based on iVar2 and iVar4 derived from param_2 and its metadata. There is a guard: if (iVar2 <= (int)param_2[1]) { ... memcpy ... } else free(__ptr) and return 0. So memcpy’s length is at most param_2[1] (the available bytes), preventing out-of-bounds read from *param_2. Also, length is used directly for malloc(size_t) and memcpy, so destination is exactly allocated for that length, preventing overflow of destination.",
+            "The crash report mentions memmove, but the decompiled code currently shows memcpy; likely in the actual binary it resolved to memmove or the allocator optimized it. Either way, the memory movement operation is bounded by param_2[1] and malloc’s size, so not inherently unsafe provided param_2[1] correctly represents the source buffer size.",
+            "Need to assess attacker control: param_2 comes from upstream parsing logic (ASN.1 context). In this crash path, ASNAny_New is called from ASNAny_NewFromBuffer via AD_Any (indirect call) in IW_Sign_DSA. In IW_Sign_DSA, uVar7 = ASNBuf_NewFromBuffer(param_5, strlen(param_5)); uVar7 = AD_Any(..., uVar7, 0); later that is passed to AlgorithmIdentifier_Set. ASNAny_New takes (param_1, param_2, param_3) where param_2 is likely some internal buffer/offset struct produced by ASNBuf_NewFromBuffer. The attacker can control param_5 (JNI string content), so they control what bytes are in that buffer, but not param_2[1] or the internal cursor fields without going through the ASNBuf/New and AD_Any logic. The internal struct presumably ensures param_2[1] is the real buffer length and current cursor in range; if malformed length, the iVar2 <= param_2[1] check prevents reading past buffer end.",
+            "To comply with MCP mandatory steps: We already decompiled IW_Sign_DSA (first app frame above ASNAny_New’s caller) and Java_com_penta_issacweb_IssacWebAPI_DSASign (JNI entry). IW_Sign_DSA does a Base64_Decode into a fixed 0x400-byte stack buffer auStack_408, recording decoded length in local_45c, then sets up a private key structure and calls CKM_Sign. Base64_Decode signature: Base64_Decode(dst, dst_size, &out_len, src). This enforces that decoded output does not exceed 0x400 bytes, so no overflow there.",
+            "Next, ASNBuf_NewFromBuffer(param_5, strlen(param_5)) wraps an input buffer (param_5) whose data comes from Java. PARAM_5 in IW_Sign_DSA is passed directly from JNI bridge; no explicit bounds check besides strlen, which uses NUL termination implied by Java strings. This can be large, but ASNBuf_NewFromBuffer and AD_Any must operate within that buffer; ASNAny_New’s memcpy is bounded by param_2[1] and uses malloc(len), so even if param_5 is huge, it only allocates and copies up to available bytes. Potential issue is large allocations (DoS), but here len <= param_2[1] == buffer length, which can be up to size_t; if the app allows arbitrarily large strings from Java into native, memory exhaustion is possible but that’s a generic resource-exhaustion class, not a classical unsafe memmove crash.",
+            "The crash termination is memmove, not ASAN or SIGSEGV; likely an abort inside memmove due to overlapping or invalid pointers, but given memcpy/memmove arguments here, dest is result of malloc(len) and src is inside original buffer; they may overlap only if malloc returns pointer inside *param_2, which is extremely unlikely in normal allocators. A more likely cause is that param_2’s fields (length, indices) have become inconsistent (e.g., param_2[1] smaller than actual pointer arithmetic, or negative values resulting in huge size_t). However, ASNAny_New explicitly checks iVar2 <= (int)param_2[1] and uses length = iVar2 - iVar4 where both are ints derived by adding small offsets; if the struct got corrupted due to earlier bugs, that corruption would originate in other ASN code, not this memcpy itself.",
+            "Following mandatory backtrace: JNI entry Java_com_penta_issacweb_IssacWebAPI_DSASign obtains three Java strings via function pointers (**(code **)(*param_1 + 0x548/0x5c0)), then passes them to IW_Sign_DSA. These helper functions likely convert jstring to UTF-8 C strings and are provided by the JavaVM environment in libart. Java strings are fully attacker-controlled via the IssacWebAPI interface exposed to app/possibly network input. Thus, attacker controls param_5 and param_4 (some key or data) to IW_Sign_DSA. But within IW_Sign_DSA, unsafe operations are limited: Base64_Decode is bounds-checked, ASNBuf_NewFromBuffer just wraps without copying, CKM_Sign uses validated lengths (local_45c and buffer pointer), and ASNAny_New’s memcpy is bounded as above. No direct out-of-bounds or unchecked length arithmetic tied directly to untrusted input is visible here.",
+            "Since the reported crash is during fuzzing, the harness may be passing arbitrarily malformed ASN and Base64 data that internal library code does not expect under real app use. But still, for a *vulnerability*, we need untrusted input to cause memory corruption, not just logical failure or internal abort. The observed code uses defensive checks (iVar2 <= param_2[1], free+return on mismatch) rather than blindly trusting lengths. Therefore, a memmove crash may indicate an issue elsewhere (e.g. in FUN_001439e4 or other ASN functions) which we do not see here; but with the given decompilation, there is no proof of an out-of-bounds copy caused directly by JNI inputs.",
+            "Given lack of evidence of out-of-bounds or use-after-free and presence of length checks around memcpy, this specific crash is more likely an environmental/harness artifact or a bug in unseen parts of the ASN library rather than a clearly exploitable memory safety issue in ASNAny_New/IW_Sign_DSA/DSASign. Without visibility into FUN_001439e4 and ASNBuf_NewFromBuffer, we can’t fully rule out deeper ASN parsing bugs, but from this crash alone we cannot attribute a concrete vulnerability.",
+            "Therefore classify as not clearly vulnerable, with low-medium confidence; mark as non-confirmed potential but not enough evidence to treat as a real vulnerability in this path."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.4,
+          "reasons": [
+            "First app-level memcpy/memmove in ASNAny_New bounds its length by param_2[1] and allocates destination with malloc(length), preventing straightforward overflows",
+            "Base64_Decode in IW_Sign_DSA writes into a fixed-size stack buffer with an explicit max size (0x400) argument, avoiding overflow despite attacker-controlled input",
+            "JNI entry Java_com_penta_issacweb_IssacWebAPI_DSASign passes attacker-controlled strings to IW_Sign_DSA, but within visible code there is validation/bounding on buffer operations, and no direct out-of-bounds or use-after-free is evident",
+            "Crash reason ‘memmove’ without SIGSEGV/ASAN context suggests internal library failure rather than confirmed memory corruption, and critical helper ASN functions (e.g., FUN_001439e4, ASNBuf_NewFromBuffer) are not visible for further proof"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APK_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so"
+          ],
+          "evidence": [
+            {
+              "function": "ASNAny_New",
+              "file": "APK_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "if (iVar2 <= (int)param_2[1]) {\n  lVar3 = *param_2;\n  ...\n  iVar2 = iVar2 - iVar4;\n  *(int *)(__ptr + 10) = iVar2;\n  __dest = malloc((long)iVar2);\n  __ptr[0xb] = __dest;\n  memcpy(__dest,(void *)(lVar3 + iVar4),(long)iVar2);\n  return __ptr;\n}\nfree(__ptr);\nreturn 0;",
+              "note": "Length for memcpy is bounded by param_2[1] and destination buffer is allocated exactly to that length."
+            },
+            {
+              "function": "IW_Sign_DSA",
+              "file": "APK_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "memset(auStack_408,0,0x400);\nlocal_45c = 0;\nBase64_Decode(auStack_408,0x400,&local_45c,param_4);",
+              "note": "Base64_Decode is constrained by a 0x400-byte stack buffer and returns length via local_45c; no obvious overflow."
+            },
+            {
+              "function": "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+              "file": "APK_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "memset(auStack_808,0,0x800);\nuVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x548))(param_1,param_5,0);\nuVar4 = (**(code **)(*param_1 + 0x548))(param_1,param_6,0);\nIW_Sign_DSA(auStack_808,uVar2,param_4,uVar3,uVar4);",
+              "note": "JNI method takes Java strings and forwards them, but native function uses bounded operations for key buffer and ASN data as far as visible."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_penta_issacweb_IssacWebAPI_DSASign -> IW_Sign_DSA -> AD_Any (via function pointer) -> ASNAny_New -> memcpy/memmove"
+          ],
+          "recommendations": [
+            "Instrument and inspect ASNBuf_NewFromBuffer and FUN_001439e4 to confirm that param_2[1] and index calculations are always consistent with buffer size",
+            "Add defensive length checks and error handling around ASN parsing to avoid crashes on malformed or excessively large inputs",
+            "Use fuzzing with sanitizers (ASAN/UBSAN) on the entire ASN/crypto library to identify any deeper memory safety issues beyond this specific crash"
+          ],
+          "assumptions": [
+            "param_2[1] in ASNAny_New faithfully represents the size of the ASN buffer and is maintained consistently by ASNBuf_NewFromBuffer and related helpers",
+            "The memmove crash reported corresponds to the memcpy call in ASNAny_New or an equivalent in optimized builds",
+            "JNI helper calls for accessing Java strings behave as standard and do not corrupt memory"
+          ],
+          "limitations": [
+            "No decompilation of helper ASN functions such as FUN_001439e4 or ASNBuf_NewFromBuffer, so deeper parsing bugs cannot be fully ruled out",
+            "Crash context lacks precise faulting address and signal (e.g., SIGSEGV vs. abort) making exact root cause uncertain",
+            "Assessment is based solely on visible decompiled code; optimizer transformations or stripped symbols in other modules might change behavior"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:41",
+          "llm_requests": 2,
+          "llm_tool_calls": 4,
+          "input_tokens": 14036,
+          "output_tokens": 2800
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "ASNAny_New",
+            "IW_Sign_DSA",
+            "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so": [
+              "ASNAny_New",
+              "IW_Sign_DSA",
+              "Java_com_penta_issacweb_IssacWebAPI_DSASign",
+              "Java_com_penta_issacweb_IssacWebAPI_DSASign"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: IW_Sign_DSA and ASNAny_New are in libIWAndroid.so; allocator/sanitizer frames are not shown. The likely fault is inside ASNAny_New (top frame shown as ?? then ASNAny_New). We decompiled Java_com_penta_issacweb_IssacWebAPI_DSASign and IW_Sign_DSA from libIWAndroid.so.",
+            "In Java_com_penta_issacweb_IssacWebAPI_DSASign, a 0x800-byte stack buffer auStack_808 is zeroed and passed as the first argument (output buffer) to IW_Sign_DSA. No obvious unsafe operation there besides potential misuse of param_1’s function pointers, but crash trace points deeper (ASNAny_New).",
+            "In IW_Sign_DSA, we see key steps: (1) strlen(param_5); (2) ASNBuf_NewFromBuffer(param_5, sVar6); (3) AD_Any(..., uVar7, 0); then (4) Base64_Decode(auStack_408,0x400,&local_45c,param_4); later (5) CKM_Sign and Base64_Encode(param_1,0x800,*local_458,*(local_458+1)).",
+            "Base64_Decode is bounded by a fixed 0x400-byte destination buffer and uses &local_45c as output length; no obvious overflow there assuming library honors size parameter. Base64_Encode has a fixed 0x800 destination; but length arguments come from *local_458 and *(local_458+1) (apparently [ptr,len]). That could overflow if CKM_Sign returns more data than fits, but we lack decompilation of CKM_Sign or Base64_Encode. However, the stack trace indicates crash in ASNAny_New, not here.",
+            "The AD_Any/ASNAny_New path: uVar7 = ASNBuf_NewFromBuffer(param_5, sVar6); uVar7 = AD_Any(..., uVar7, 0); The crash frame ASNAny_New suggests internal ASN.1 handling. The input here is param_5, a char* from JNI side, probably a string like algorithmOid, curve name, or similar. They call strlen on it and create an ASN.1 buffer without validation. If param_5 is controlled by attacker, malformed or very long values could trigger bugs in ASN.1 codec (ASNAny_New). But we do not see direct overflow in IW_Sign_DSA itself; the bug is presumably in library function ASNAny_New. We haven’t decompiled ASNAny_New, but it’s in same lib and likely processes that buffer.",
+            "Data-flow / taint: param_5 in IW_Sign_DSA is directly the 5th argument from Java_com_penta_issacweb_IssacWebAPI_DSASign. In JNI entry, param_5 is derived from a JNI argument using a param_1 method pointer at +0x548 with (param_1,param_5,0). Those callbacks likely convert jstring/jbyteArray into internal buffers. There is no validation or limits in the JNI stub: arguments are passed straight into IW_Sign_DSA. Fuzzer controls those JNI args, so param_5 is attacker-controlled and reaches ASNAny_New via ASNBuf_NewFromBuffer and AD_Any.",
+            "Because the actual crash location (ASNAny_New) is not decompiled, we cannot definitively state the memory error, but the combination of ASN.1 generic parsing and attacker-controlled buffer is classic for out-of-bounds or malformed ASN parsing. However, fuzz harness might also be passing null/invalid pointers (e.g., param_5 null or not a valid C string), causing strlen(NULL) or similar, which is a crash but not necessarily reachable in production if app always passes valid strings.",
+            "Still, in realistic use, IssacWebAPI_DSASign is a cryptographic signing API exposed to app code that can be influenced by remote inputs (e.g., certificates, keys, algorithm identifiers coming from server). If the app forwards server-controlled ASN.1 data into this routine, then malformed ASN.1 might crash ASNAny_New, leading to DoS at least. Given this is an ASN.1 parsing helper, many historical bugs are memory corruption, but we have no direct proof of overflow from decompilation here.",
+            "Given evidence: we see attacker-controlled input (param_5) feeding an ASN.1 parsing routine that crashes (ASNAny_New). There’s insufficient proof that this is more than a null deref or safe abort inside ASNAny_New, since its implementation is unknown. Therefore, classify as possible but unconfirmed vulnerability, leaning towards DoS-level at best. Severity medium, confidence moderate (~0.6).",
+            "We also note a possible secondary risk in Base64_Encode(param_1,0x800,*local_458,*(local_458 + 1)) where output length is not explicitly checked against 0x800 in this function, but we must assume Base64_Encode enforces its own bounds or CKM_Sign guarantees size; no crash trace suggests that path yet."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.6,
+          "reasons": [
+            "Attacker-controlled JNI input (5th argument) flows into IW_Sign_DSA and then into ASNAny_New without validation.",
+            "Crash stack indicates failure inside ASNAny_New, an ASN.1 parsing routine typically prone to memory issues when handling malformed buffers.",
+            "JNI bridge and IW_Sign_DSA do not perform bounds checks or sanity validation on param_5 before passing it to ASNBuf_NewFromBuffer/AD_Any."
+          ],
+          "cwe_ids": [
+            "CWE-20"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APK_FINALS/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_penta_issacweb_IssacWebAPI_DSASign @ 0x00124460",
+              "address": "0x00124460",
+              "file": "APK_FINALS/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "memset(auStack_808,0,0x800);\nuVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x548))(param_1,param_5,0);\nuVar4 = (**(code **)(*param_1 + 0x548))(param_1,param_6,0);\nIW_Sign_DSA(auStack_808,uVar2,param_4,uVar3,uVar4);",
+              "note": "JNI wrapper passes attacker-controlled arguments via function pointers into IW_Sign_DSA without checks."
+            },
+            {
+              "function": "IW_Sign_DSA",
+              "file": "APK_FINALS/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "sVar6 = strlen(param_5);\nuVar7 = ASNBuf_NewFromBuffer(param_5,sVar6);\nuVar7 = (**(code **)PTR_AD_Any_001e9f20)(PTR_AD_Any_001e9f20,uVar7,0);",
+              "note": "param_5 (attacker-controlled) is converted into an ASN.1 buffer and parsed generically, leading to crash in ASNAny_New per stack trace."
+            },
+            {
+              "function": "IW_Sign_DSA",
+              "file": "APK_FINALS/nh.smart.banking/lib/arm64-v8a/libIWAndroid.so",
+              "snippet": "Base64_Decode(auStack_408,0x400,&local_45c,param_4);",
+              "note": "Shows another attacker-influenced input path (param_4) but decoding is bounded by 0x400 destination; not directly implicated in this crash."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_penta_issacweb_IssacWebAPI_DSASign @ 0x00124460 -> IW_Sign_DSA -> ASNBuf_NewFromBuffer -> AD_Any -> ASNAny_New"
+          ],
+          "recommendations": [
+            "Inspect and decompile ASNAny_New/AD_Any/ASNBuf_NewFromBuffer to confirm the exact failure mode (null deref vs. memory corruption).",
+            "Add validation and length checks for param_5 in the JNI bridge or IW_Sign_DSA before calling ASNBuf_NewFromBuffer/AD_Any; reject unexpected or malformed values.",
+            "Harden ASN.1 parsing code (ASNAny_New) with strict bounds checking and robust error handling to avoid crashes on malformed input."
+          ],
+          "assumptions": [
+            "Fuzzer-supplied JNI parameters reflect inputs that app or remote data could influence in production.",
+            "Crash site `ASNAny_New` implies a failure caused by malformed ASN.1 data derived from param_5.",
+            "Base64 and CKM_Sign helper functions behave correctly and are not the immediate crash source for this trace."
+          ],
+          "limitations": [
+            "Implementation of ASNAny_New/ASNBuf_NewFromBuffer/AD_Any is not decompiled, so the precise bug (OOB, null deref, etc.) is unknown.",
+            "Stack trace top frame is `??`, so exact instruction causing termination is missing.",
+            "No visibility into higher-level Java call graph to confirm how attacker controls IssacWebAPI_DSASign arguments."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious data passed through app into IssacWebAPI.DSASign JNI method, specifically the string corresponding to param_5 (likely an ASN.1/algorithm descriptor).",
+            "prerequisites": [
+              "Attacker can influence inputs that the app passes into IssacWebAPI.DSASign (e.g., via network-delivered keys/parameters).",
+              "Application uses this JNI method for processing or signing untrusted or semi-trusted ASN.1-related data."
+            ],
+            "exploit_pipeline": [
+              "Craft a malformed or extreme-length value for the parameter that maps to native param_5, targeting weaknesses in ASNAny_New parsing.",
+              "Deliver this value through a protocol or UI path that causes the app to call IssacWebAPI.DSASign with it (e.g., importing a certificate or key from remote server).",
+              "When JNI calls Java_com_penta_issacweb_IssacWebAPI_DSASign, the value flows into IW_Sign_DSA and then into ASNAny_New, which crashes while parsing.",
+              "Resulting crash causes denial-of-service for the app process; if ASNAny_New has a deeper memory corruption bug, further exploitation might be possible with tailored payloads."
+            ],
+            "poc_commands": [
+              "adb push /path/to/crafted_input.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n <PACKAGE>/<ACTIVITY> --es input_file \"/sdcard/Download/payload.bin\"",
+              "# Use in-app actions to import or process the payload so that it eventually reaches IssacWebAPI.DSASign."
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "The PoC path is illustrative because the exact Java API and activity that feed IssacWebAPI.DSASign are unknown; replace <PACKAGE>/<ACTIVITY> and parameter names based on the actual app. Further reverse-engineering of ASNAny_New is required to determine whether this is exploitable memory corruption or only a crash-level bug."
+          }
+        },
+        "statistics": {
+          "time": "00:00:48",
+          "llm_requests": 4,
+          "llm_tool_calls": 4,
+          "input_tokens": 25698,
+          "output_tokens": 2540
+        }
+      }
+    ]
+  }
+}

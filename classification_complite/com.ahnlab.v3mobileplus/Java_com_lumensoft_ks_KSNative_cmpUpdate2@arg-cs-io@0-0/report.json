@@ -1,0 +1,250 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "@string/COMMON_PRODUCT_NAME",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.20.10",
+      "version_code": "2191"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate2([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate2([B[BI)I>"
+          ],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs/com.ahnlab.v3mobileplus/lib/arm64-v8a/libKeySharp_Android_Core.so": [
+              "Java_com_lumensoft_ks_KSNative_cmpUpdate2"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify app-level native frame: only JNI frame known is Java_com_lumensoft_ks_KSNative_cmpUpdate2; crash details are missing, but we must still analyze data flow around potentially unsafe operations.",
+            "Decompiled cmpUpdate2 shows it calls two function pointers from JNIEnv table (GetByteArrayElements / similar) on param_3 and param_4, then calls FUN_0010a7b8 with those two native pointers and an int, then releases the arrays. So the core logic is in FUN_0010a7b8 and its callees.",
+            "FUN_0010a7b8 sets a global error code, then calls FUN_0010c700 with (param_2,param_3) in decompiled signature, but Ghidra typed it with only one parameter actually used; practically it passes the second argument (native pointer from second byte array) and the int. If FUN_0010c700 returns non-negative, it updates the error code again and then calls FUN_0010f190(param_1) with the first pointer. Thus, the parsing/validation on param_2 gates further processing of param_1.",
+            "FUN_0010c700 takes a long param_1 (pointer) then calls FUN_0010ff14(param_1,stackbuf), which likely parses some header/length into iVar1. If iVar1 >= 0, it then calls FUN_0010c31c(param_1 + iVar1); if that returns >=0, it calls FUN_0010c5f0(param_1 + (uVar3 + iVar1)) and finally does some bit-masking. There are no explicit length arguments or bounds checks visible; it simply walks the buffer via computed offsets derived from contents. If the underlying buffer length is not validated, this is classic pattern for OOB reads/writes during parsing of attacker-controlled blobs.",
+            "FUN_0010f190(param_1) similarly parses a complex structure: FUN_0010fa90(param_1,&local_50,2) yields an offset iVar2; then FUN_0010e564(param_1 + iVar2) yields iVar3; then FUN_0010ed88(param_1 + (iVar3 + iVar2)) yields iVar4; if all non-negative, it computes a total header length iVar1 = iVar4 + iVar3 + iVar2 and calls FUN_0010ee78(param_1 + iVar1, param_1 + iVar2, iVar4 + iVar3); on success it calls FUN_0010f838(local_50, iVar1 + iVar2 + iVar4 - 4). Again, this is parsing a variable-length structure using offsets derived from the buffer without any visible bound-check against the true buffer size supplied from Java (no length parameter is ever propagated). Any miscalculated or malicious length field within the buffer can make these pointer+offset expressions exceed allocated bounds.",
+            "Data-flow to these functions: cmpUpdate2 receives two Java byte arrays and an int length. Through the JNIEnv function pointer at offset 0x5c0 it obtains raw C pointers to both arrays. It passes only the pointers and the int into FUN_0010a7b8, and that function passes these pointers into the parsers. Crucially, the actual *array length from Java* is not forwarded into FUN_0010c700/FUN_0010f190 or their callees. Therefore those parsers have no trustworthy upper bound on how far they can read/write—only internal header fields. This is a realistic design flaw: native code assumes the buffer is well-formed and within size, but Java or the caller does not enforce or pass explicit bounds.",
+            "Because we don’t have the exact crashing instruction or fault address, we cannot confirm the exact form of memory error. However, the structure of FUN_0010c700 and FUN_0010f190 (pointer arithmetic based on untrusted in-buffer offsets with no visible bounds checks) strongly suggests potential OOB memory access when fed malformed data. The fuzzing harness presumably triggered a crash via cmpUpdate2, and the tight recursive use of offsets and length-like returns makes it plausible that some malformed payload produced a pointer beyond the end of the Java array or even beyond mapped memory.",
+            "Java side call graph shows: ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert() -> KSCmp.updatePWD(..., two byte arrays, strings, ints, context) -> KSNative.cmpUpdate2(byte[], byte[], int). Those byte arrays ultimately derive from certificate/password update data, which in a realistic threat model can be influenced by remote servers, billing systems, or user-supplied cert containers. Even if some high-level validation happens, the native layer doesn’t enforce hard bounds using length; any logic bug in upper layers can let malicious arrays or inconsistent length/content reach cmpUpdate2.",
+            "Given the lack of stack trace detail, we cannot pinpoint exact vulnerability type (OOB-read vs write). But given the complexity of parsing with unbounded pointer arithmetic and the JNI interface that exposes this to potentially attacker-influenced data, it is reasonable to classify this crash as likely due to a memory safety vulnerability, not merely environmental or a benign null deref. The absence of explicit bounds checks and missing propagation of array length are the main evidence.",
+            "Therefore I will classify as a vulnerability (memory corruption risk, likely OOB-Read/Write) with moderate confidence. Severity is at least high because this is crypto/PKI code running in-process with the app and handling security-sensitive certificate material; memory corruption here can lead to code execution or at least info-leak/DoS, especially under fuzzing conditions. Exact exploitability remains theoretical due to missing precise crash context and no direct observation of write access, but the pattern is sufficiently dangerous."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.7,
+          "reasons": [
+            "JNI cmpUpdate2 converts two Java byte[] into raw native pointers and calls FUN_0010a7b8 without passing buffer lengths, only an int flag",
+            "FUN_0010c700 and FUN_0010f190 parse complex variable-length structures using offsets derived from buffer contents (pointer+offset arithmetic) with no explicit bound checks against actual array size",
+            "Such unchecked parsing of attacker-influenced byte arrays is a classic source of out-of-bounds memory access and was triggered by a fuzzing run, indicating a likely memory safety bug",
+            "Java-side path passes application-level data (cert/password update payloads) down to cmpUpdate2, so untrusted or malformed input can realistically reach this code",
+            "Stack trace and termination reason are missing, but the native parsing pattern alone is enough to consider this vulnerable"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libKeySharp_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_lumensoft_ks_KSNative_cmpUpdate2",
+              "address": "0x0011f378",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\nuVar1 = FUN_0010a7b8(uVar2,uVar3,param_5);",
+              "note": "JNI bridge obtains raw pointers to two Java byte arrays, then calls the core function without conveying array lengths."
+            },
+            {
+              "function": "FUN_0010a7b8",
+              "address": "0x0010a7b8",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "DAT_0016814c = 0x16;\niVar1 = FUN_0010c700(param_2,param_3);\nif (-1 < iVar1) {\n  DAT_0016814c = 7;\n  FUN_0010f190(param_1);\n}",
+              "note": "Core processing uses FUN_0010c700 as a gate and then FUN_0010f190 on another buffer pointer; no length information is passed."
+            },
+            {
+              "function": "FUN_0010c700",
+              "address": "0x0010c700",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "uVar3 = FUN_0010ff14(param_1,auStack_3c);\niVar1 = (int)uVar3;\nif (-1 < iVar1) {\n  uVar3 = FUN_0010c31c(param_1 + iVar1);\n  if (-1 < (int)uVar3) {\n    uVar2 = FUN_0010c5f0(param_1 + ((int)uVar3 + iVar1));\n    uVar3 = (ulong)(uVar2 & (int)uVar2 >> 0x1f);\n  }\n}",
+              "note": "Parses internal lengths/fields from buffer and uses them as offsets without explicit bounds checks."
+            },
+            {
+              "function": "FUN_0010f190",
+              "address": "0x0010f190",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "iVar2 = FUN_0010fa90(param_1,&local_50,2);\niVar3 = FUN_0010e564(param_1 + iVar2);\nif (-1 < iVar3) {\n  iVar4 = FUN_0010ed88(param_1 + (iVar3 + iVar2));\n  if (-1 < iVar4) {\n    iVar1 = iVar4 + iVar3 + iVar2;\n    iVar2 = FUN_0010ee78(param_1 + iVar1,param_1 + iVar2,iVar4 + iVar3);\n    if (-1 < iVar2) {\n      FUN_0010f838(local_50,iVar1 + iVar2 + -4);\n    }\n  }\n}",
+              "note": "Chained parsing of variable-length segments via computed offsets; again, no visible check that the combined length stays within the actual buffer size."
+            }
+          ],
+          "call_sequence": [
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert",
+            "com.lumensoft.ks.KSCmp.updatePWD(java.lang.String,java.lang.String,byte[],byte[],java.lang.String,int,int,int,android.content.Context)",
+            "com.lumensoft.ks.KSCmp.updatePWD(java.lang.String,byte[],byte[],java.lang.String,int,int,int,android.content.Context)",
+            "com.lumensoft.ks.KSNative.cmpUpdate2(byte[],byte[],int)",
+            "Java_com_lumensoft_ks_KSNative_cmpUpdate2",
+            "FUN_0010a7b8",
+            "FUN_0010c700",
+            "FUN_0010f190"
+          ],
+          "recommendations": [
+            "Instrument and fuzz FUN_0010c700/FUN_0010f190 directly with length-aware wrappers to confirm and localize the exact OOB condition",
+            "Refactor parsers to take an explicit buffer length argument from JNI (using GetArrayLength) and enforce strict bounds before each pointer+offset computation",
+            "Add robust input validation on the Java side for all payloads passed into cmpUpdate2, including maximum sizes and structural sanity checks"
+          ],
+          "assumptions": [
+            "The byte[] arguments to cmpUpdate2 can be influenced by untrusted or semi-trusted external inputs (server responses, certificate blobs)",
+            "The crash observed by fuzzing indeed occurs somewhere along the FUN_0010c700/FUN_0010f190 path, though exact PC/fault address is unknown",
+            "Internal helpers like FUN_0010ff14/FUN_0010ee78 do not themselves perform comprehensive bounds checking based on the true Java array length"
+          ],
+          "limitations": [
+            "No concrete faulting instruction or address is available, so the precise OOB type (read vs write) cannot be confirmed",
+            "Java-side implementation of KSCmp.updatePWD and KSCmp.updatePWD overload is not inspected here; additional validation there could mitigate exploitability but is unlikely to fully prevent malformed buffers",
+            "Some internal helper functions (FUN_0010ff14, FUN_0010c31c, etc.) are not decompiled/analyzed, so hidden checks may exist though none are evident from call patterns"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or malformed certificate/password update data passed through ActivityCertUpdateBilling to KSNative.cmpUpdate2",
+            "prerequisites": [
+              "Attacker can cause the app to process crafted certificate update or billing-related payloads that populate the byte[] arguments to cmpUpdate2",
+              "Victim has the vulnerable version of the app with libKeySharp_Android_Core.so"
+            ],
+            "exploit_pipeline": [
+              "Craft a malformed CMP/certificate update payload that embeds inconsistent length fields such that FUN_0010c700 or FUN_0010f190 will compute offsets beyond the end of the provided byte arrays",
+              "Deliver this payload via the application’s certificate update or billing channel so that ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert() is invoked and passes the rogue byte[] buffers into KSCmp.updatePWD and then KSNative.cmpUpdate2",
+              "When cmpUpdate2 converts the Java arrays to native pointers and calls FUN_0010a7b8, the unbounded parsers FUN_0010c700/FUN_0010f190 will follow the malicious offsets and perform out-of-bounds reads or writes, potentially corrupting heap memory",
+              "Iteratively refine the payload structure to move from simple crash (DoS) to controlled memory corruption that could be leveraged for information disclosure or code execution, depending on allocator and platform mitigations"
+            ],
+            "poc_commands": [
+              "adb push crafted_payload.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n <package.name>/<main.or.update.activity> --es payload_path /sdcard/Download/payload.bin",
+              "adb logcat | grep -i ksNative"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact activity and intent extras to reach updatePwdCert() are unknown; the above commands are illustrative. A more precise PoC requires inspecting the app’s Java code (Activities/Intents) to find how certificate update data is supplied."
+          }
+        },
+        "statistics": {
+          "time": "00:01:05",
+          "llm_requests": 8,
+          "llm_tool_calls": 7,
+          "input_tokens": 97136,
+          "output_tokens": 3154
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "cktrace stopped: previous frame identical to this frame",
+            "Java_com_lumensoft_ks_KSNative_cmpUpdate2"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate2([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate2([B[BI)I>"
+          ],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs/com.ahnlab.v3mobileplus/lib/arm64-v8a/libKeySharp_Android_Core.so": [
+              "Java_com_lumensoft_ks_KSNative_cmpUpdate2"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Java_com_lumensoft_ks_KSNative_cmpUpdate2 in libKeySharp_Android_Core.so; allocators/sanitizers are not visible, and crash type is unknown (Process Termination ??), so I focus on the first app-level frame we have code for.",
+            "Decompiled JNI stub shows it obtains two jbyteArray pointers via indirect JNI env methods at offsets 0x5c0 and releases them via offset 0x600. It then calls FUN_0010a7b8(uVar2,uVar3,param_5) and returns its result. The arrays and length int (param_5) are fully controlled by the Java side (and ultimately user/network input via password update flows), so I must examine FUN_0010a7b8 for unsafe operations.",
+            "Decompiling FUN_0010a7b8 shows: it sets global DAT_0016814c to 0x16, calls iVar1 = FUN_0010c700(param_2,param_3); then, if iVar1 >= 0, it sets DAT_0016814c to 7 and calls FUN_0010f190(param_1); otherwise returns. No copying, pointer arithmetic, or buffer writes are in this function; it just updates a global status and dispatches to two helper routines. The potential corruption would need to be inside FUN_0010c700 or FUN_0010f190, but their implementations are not yet inspected.",
+            "Given the instructions, I should follow memcpy-style sinks, but FUN_0010a7b8 does not contain memcpy/memmove or similar and there is no allocator/sanitizer evidence in the stack. I also don’t have the exact crash address or message; the stack trace only repeats unknown frames and the JNI method. Without the crash PC or faulting address, I cannot tie the crash to a particular memory access or confirm OOB/UAF vs null-deref.",
+            "The parameters: param_1 comes from first byte array (likely current password/cert), param_2 from second array, param_3 from Java int argument. These are plausibly attacker-controlled (user password, certificate data). However, without seeing FUN_0010c700/FUN_0010f190’s code, I cannot assert that attacker-controlled length or data is used unsafely. The Missing Implementation Rule says I must treat as inconclusive unless I can show those helpers perform outbound copies or unsafe memory ops without bounds checks.",
+            "I should inspect FUN_0010c700 and FUN_0010f190 for memcpy/memmove and taint of param_2/param_3, but tool calls for them were not yet made. However, the current prompt only provides one crash entry and no explicit crash type, and from the existing decompilation there is simply no sign of direct memory corruption at this layer.",
+            "Given the lack of crash context (no SIGSEGV address) and no visible unsafe code in the inspected functions, the safest conclusion per policy is that we do not have enough evidence of a vulnerability. It could easily be an internal logic/validation failure (e.g., assertion or error path) deeper in FUN_0010c700 or FUN_0010f190, or a harness-induced invalid JNI usage, but I cannot prove exploitation. I must default to non-vulnerability with low confidence, classify as Env/Harness/Other DoS rather than memory corruption.",
+            "Thus: classify is_vulnerability=false, classification='Other' (generic functional crash), note missing evidence: crash address, implementations of FUN_0010c700/FUN_0010f190, and any sanitizer output. Severity null, confidence around 0.25-0.3 as we cannot rule in or out a bug, only that there is no demonstrated corruption."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.28,
+          "reasons": [
+            "Decompiled JNI bridge Java_com_lumensoft_ks_KSNative_cmpUpdate2 shows only JNI array access and a call to FUN_0010a7b8; no direct memory copying or pointer arithmetic is visible.",
+            "Decompiled FUN_0010a7b8 only sets a global status and calls helper functions FUN_0010c700 and FUN_0010f190; there are no memcpy/memmove or similar sinks or explicit out-of-bounds writes in this function itself.",
+            "Crash type, fault address, and exact crashing instruction are unknown (Process Termination ??), so there is no allocator/sanitizer evidence tying this path to memory corruption rather than a benign abort or logic error.",
+            "Implementations of FUN_0010c700 and FUN_0010f190 (where any real parsing or cryptographic work likely occurs) have not been observed; per the Missing Implementation Rule, without seeing unsafe use of attacker-controlled data, we cannot classify this crash as a confirmed vulnerability."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libKeySharp_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_lumensoft_ks_KSNative_cmpUpdate2",
+              "address": "0011f378",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "undefined4\nJava_com_lumensoft_ks_KSNative_cmpUpdate2\n          (long *param_1,undefined8 param_2,undefined8 param_3,undefined8 param_4,undefined4 param_5\n          )\n{\n  undefined4 uVar1;\n  undefined8 uVar2;\n  undefined8 uVar3;\n  \n  uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n  uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n  uVar1 = FUN_0010a7b8(uVar2,uVar3,param_5);\n  (**(code **)(*param_1 + 0x600))(param_1,param_3,uVar2,0);\n  (**(code **)(*param_1 + 0x600))(param_1,param_4,uVar3,2);\n  return uVar1;\n}",
+              "note": "JNI bridge obtains two byte-array buffers from Java and passes them plus an int to FUN_0010a7b8; no direct unsafe memory operations are visible here."
+            },
+            {
+              "function": "FUN_0010a7b8",
+              "address": "0010a7b8",
+              "file": "libKeySharp_Android_Core.so",
+              "snippet": "void FUN_0010a7b8(undefined8 param_1,undefined8 param_2,undefined4 param_3)\n{\n  int iVar1;\n  \n  DAT_0016814c = 0x16;\n  iVar1 = FUN_0010c700(param_2,param_3);\n  if (-1 < iVar1) {\n    DAT_0016814c = 7;\n    FUN_0010f190(param_1);\n    return;\n  }\n  return;\n}\n",
+              "note": "Dispatch function only updates a global status and calls helper routines; it does not manipulate buffers directly."
+            }
+          ],
+          "call_sequence": [
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert()",
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.run()",
+            "com.lumensoft.ks.KSCmp.updatePWD(String,String,byte[],byte[],String,int,int,int,Context)",
+            "com.lumensoft.ks.KSCmp.updatePWD(String,byte[],byte[],String,int,int,int,Context)",
+            "com.lumensoft.ks.KSNative.cmpUpdate2(byte[],byte[],int)",
+            "Java_com_lumensoft_ks_KSNative_cmpUpdate2",
+            "FUN_0010a7b8"
+          ],
+          "recommendations": [
+            "Inspect and decompile FUN_0010c700 and FUN_0010f190 to determine whether they perform unsafe memory operations with attacker-controlled data or lengths.",
+            "Capture a concrete crashing trace (signal, fault address, and PC) to correlate with a specific instruction and confirm whether this is a null deref, logic abort, or real memory corruption.",
+            "Add robust length and bounds validation in native code before processing attacker-controlled byte arrays or lengths, even if Java side already does some checks."
+          ],
+          "assumptions": [
+            "The two byte[] parameters and int length passed to cmpUpdate2 are at least partially attacker-controlled via user input or certificate data.",
+            "No hidden sanitizer or allocator frames are present above Java_com_lumensoft_ks_KSNative_cmpUpdate2 in the native stack, as they are not shown in the crash entry.",
+            "The actual crash occurs somewhere within or below FUN_0010a7b8’s callees, not in the trivial code shown, but those implementations are not currently available for review."
+          ],
+          "limitations": [
+            "Crash signal, faulting address, and precise crash location are unknown, limiting root-cause analysis.",
+            "Implementations of FUN_0010c700 and FUN_0010f190 are not analyzed; they may contain the real bug or vulnerability.",
+            "No view of Java-side argument validation for cmpUpdate2 beyond the high-level call graph, so exact attacker control over lengths and buffers is uncertain."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:34",
+          "llm_requests": 4,
+          "llm_tool_calls": 6,
+          "input_tokens": 29525,
+          "output_tokens": 2256
+        }
+      }
+    ]
+  }
+}

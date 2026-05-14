@@ -1,0 +1,165 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "claude-opus-4-6",
+      "apk_path": "APKs_FINAL/com.microsoft.office.outlook/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "Outlook",
+      "package": "com.microsoft.office.outlook",
+      "min_sdk": 28,
+      "target_sdk": 33,
+      "version_name": "4.2330.0",
+      "version_code": "42330820"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "??",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.microsoft.cortana.sdk.conversation.ConversationImpl: decodeStreamingAudio([BILjava/nio/ByteBuffer;)Lcom/microsoft/bing/cortana/jni/DecoderResult;>",
+          "JavaCallGraph": [
+            "<com.microsoft.cortana.shared.cortana.streamingplayer.CommuteStreamingDecoder: decodeOnce()I> -> <com.microsoft.cortana.shared.cortana.streamingplayer.CommuteStreamingDecoder: run()V> -> <com.microsoft.cortana.sdk.conversation.ConversationImpl: decodeStreamingAudio([BILjava/nio/ByteBuffer;)Lcom/microsoft/bing/cortana/jni/DecoderResult;>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/com.microsoft.office.outlook/lib/arm64-v8a/libcortana-jni.so": [
+              "Java_com_microsoft_bing_cortana_jni_CortanaJni_decodeStreamingAudio"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "1. The crash is an abort triggered by __stack_chk_fail, indicating a stack buffer overflow detected by the stack canary/protector.",
+            "2. The crash occurs in libcortana-jni.so, triggered via JNI method Java_com_microsoft_bing_cortana_jni_CortanaJni_decodeStreamingAudio.",
+            "3. The JNI entry point (0x001240e8) receives a byte array (indata), an int (offset), and a ByteBuffer from Java. It calls FUN_00127150 with: param_1=audio_buffer_ptr, param_2=sign-extended byte array length (from GetArrayLength), param_3=sign-extended offset, param_4=ByteBuffer direct address, param_5=pointer to output_length on stack.",
+            "4. FUN_00127150 is the main decode loop. It iterates up to 30 times (w25 starts at 0xffffffe2 = -30, increments to 0). In each iteration, it reads a 16-bit length from the input buffer at offset param_3, then calls FUN_001478fc (the decoder) which writes decoded audio into a stack buffer auStack_870 (2048 bytes), then memcpy's the result to the output ByteBuffer at position *param_5.",
+            "5. FUN_001478fc calls FUN_00147ae4, which is the core audio decoder. FUN_00147ae4 has local stack buffers: auStack_f68[1920] and auStack_7e8[1928]. The decoder processes audio frames and writes decoded samples to these buffers.",
+            "6. FUN_00147d80 (called from FUN_00147ae4) also has a stack buffer auStack_870[2048]. Critically, at 0x00147e4c, it performs: memcpy(param_1 + 0x90e, param_2, -(uVar4 >> 0x1f) & 0xfffffffe00000000 | uVar4 << 1). Here uVar4 comes from param_1[0xafa] which is a field in the decoder state. The size expression 'uVar4 << 1' converts sample count to byte count. If uVar4 (sample count) is large enough, this memcpy could overflow.",
+            "7. More importantly, in FUN_00127150, the memcpy at 0x001271f0 copies local_878 bytes (output of FUN_001478fc) from auStack_870 (2048-byte stack buffer) to param_4 + *param_5 (the ByteBuffer). The ByteBuffer is allocated as 24000 bytes (from CommutePCMCache constructor: ByteBuffer.allocateDirect(24000)). The loop runs up to 30 iterations, and each iteration can produce decoded audio. If the cumulative output exceeds the ByteBuffer capacity, it overflows.",
+            "8. However, the __stack_chk_fail suggests the overflow happened on a STACK buffer, not the ByteBuffer. Looking at the deep call chain: FUN_00147ae4 has stack buffers of ~1920+1928 bytes. FUN_00147d80 has an ~2048 byte stack buffer. FUN_0015689c has stack buffers including local_628[120*4]=480 bytes and asStack_448[480*2]=960 bytes.",
+            "9. The key vulnerability: the input data (byte array) comes from CommuteStreamingDownloader.getData() which accumulates network-downloaded audio data. This data is attacker-controlled (comes from a URL). The offset is tracked by the decoder. Malformed audio data could cause the decoder to produce more output samples than expected, overflowing stack buffers in the decoder functions.",
+            "10. In FUN_00147ae4, the memcpy at 0x00147c70 copies '(long)*param_7 << 1' bytes from __src (which could be auStack_7e8, a 1928-byte buffer) to param_6 (the output). The *param_7 value comes from the decoder (FUN_00147d80 writes *param_3 = (short)uVar4, i.e., the sample count). If the sample count is manipulated via malformed input to exceed buffer capacity, stack overflow occurs.",
+            "11. In FUN_00147d80, the memcpy at 0x00147e4c: memcpy(param_1 + 0x90e, param_2, uVar4 << 1) where param_2 points to either auStack_7e8 (a stack buffer of 1928 bytes in FUN_00147ae4) or param_6 (the output buffer). If uVar4 (from param_1[0xafa]) is large, reading from a small stack buffer could overflow.",
+            "12. The __stack_chk_fail confirms the stack canary was corrupted, meaning a stack buffer was indeed overflowed. Given that the input data originates from network-downloaded streaming audio, an attacker controlling the audio stream can craft malformed codec frames that cause the decoder to write beyond stack buffer boundaries.",
+            "13. This is a genuine stack buffer overflow vulnerability (CWE-121/CWE-787) in the audio decoder, triggered by malformed streaming audio data from a network source."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "Stack canary corruption (__stack_chk_fail) confirms a stack buffer overflow occurred in the audio decoding path.",
+            "Multiple fixed-size stack buffers (1920-2048 bytes) in the decoder chain (FUN_00147ae4, FUN_00147d80, FUN_0015689c) are written with sizes derived from decoded audio frame parameters without adequate bounds checking.",
+            "Input data originates from network-downloaded streaming audio (CommuteStreamingDownloader fetches from a URL), making it attacker-controllable.",
+            "The memcpy in FUN_00127150 copies decoder output to a 24000-byte ByteBuffer over up to 30 iterations without cumulative size checks against buffer capacity.",
+            "The decoder's sample count (uVar4 from param_1[0xafa]) directly controls memcpy sizes in FUN_00147d80 and FUN_00147ae4 without sufficient validation."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libcortana-jni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_microsoft_bing_cortana_jni_CortanaJni_decodeStreamingAudio",
+              "address": "0x001240e8",
+              "snippet": "sxtw x1,w23  // sign-extend array length\nsxtw x2,w21  // sign-extend offset\nbl 0x00127150  // call decode function with attacker-controlled byte array",
+              "note": "JNI entry point passes attacker-controlled byte array and offset to FUN_00127150 without size validation"
+            },
+            {
+              "function": "FUN_00127150",
+              "address": "0x00127150",
+              "snippet": "memcpy((void *)(param_4 + *param_5), auStack_870, local_878);\n*param_5 = *param_5 + sVar4; // accumulates output offset over up to 30 iterations",
+              "note": "Loop runs up to 30 times copying decoded audio to output without checking cumulative output size against ByteBuffer capacity (24000 bytes)"
+            },
+            {
+              "function": "FUN_00147d80",
+              "address": "0x00147e4c",
+              "snippet": "memcpy(param_1 + 0x90e, param_2, -(uVar4 >> 0x1f) & 0xfffffffe00000000 | uVar4 << 1);",
+              "note": "uVar4 comes from decoder state param_1[0xafa], which is derived from input-dependent codec parameters. Size not bounded against stack buffer sizes in callers."
+            },
+            {
+              "function": "FUN_00147ae4",
+              "address": "0x00147c70",
+              "snippet": "memcpy(param_6, __src, (long)*param_7 << 1); // copies decoded samples, size from decoder output",
+              "note": "Copies decoded samples where size (*param_7) comes from decoder processing of attacker-controlled audio data. __src may be 1928-byte stack buffer auStack_7e8."
+            },
+            {
+              "function": "CommuteStreamingDecoder.decodeOnce",
+              "file": "com.microsoft.cortana.shared.cortana.streamingplayer.CommuteStreamingDecoder",
+              "snippet": "byte[] data = commuteStreamingDownloader.getData();\n... decodeStreamingAudio(data, this.offset, this.soldierCache.getCache())",
+              "note": "Data comes from network download (CommuteStreamingDownloader fetches from URL). ByteBuffer is only 24000 bytes (CommutePCMCache allocates ByteBuffer.allocateDirect(24000))."
+            }
+          ],
+          "call_sequence": [
+            "CommuteStreamingDecoder.run()",
+            "CommuteStreamingDecoder.decodeOnce()",
+            "ConversationImpl.decodeStreamingAudio(byte[], int, ByteBuffer)",
+            "Java_com_microsoft_bing_cortana_jni_CortanaJni_decodeStreamingAudio @ 0x001240e8",
+            "FUN_00127150 @ 0x00127150 (decode loop with memcpy to output)",
+            "FUN_001478fc @ 0x001478fc (frame decoder wrapper)",
+            "FUN_00147ae4 @ 0x00147ae4 (core decoder with stack buffers)",
+            "FUN_00147d80 @ 0x00147d80 (inner decoder with memcpy to state/stack)",
+            "__stack_chk_fail (stack canary corrupted)"
+          ],
+          "recommendations": [
+            "Add bounds checks in FUN_00127150 to verify cumulative output size (*param_5 + local_878) does not exceed the ByteBuffer capacity before each memcpy call.",
+            "Add validation in FUN_00147d80 and FUN_00147ae4 to ensure decoder output sample counts (uVar4/param_7) do not exceed stack buffer sizes before memcpy operations.",
+            "Consider using heap-allocated buffers instead of fixed-size stack buffers for decoder output, or use maximum frame size constants with runtime assertions."
+          ],
+          "assumptions": [
+            "The audio streaming data from CommuteStreamingDownloader originates from a network URL and is thus attacker-controllable in a MITM or compromised-server scenario.",
+            "The __stack_chk_fail was triggered in one of the decoder functions (FUN_00147ae4, FUN_00147d80, or FUN_0015689c) due to a stack buffer overflow from crafted audio frames.",
+            "The '??' frames in the stack trace correspond to the audio decoder functions in the call chain."
+          ],
+          "limitations": [
+            "Exact crashing function unknown due to stripped/missing symbols in stack trace ('??' frames).",
+            "Cannot fully trace all codec parameter derivations to determine exact malformed input needed.",
+            "The precise relationship between input byte patterns and decoder state fields (e.g., param_1[0xafa]) requires deeper codec analysis."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Serve a crafted streaming audio response from a malicious or compromised server that Cortana's CommuteStreamingDownloader fetches, containing malformed codec frames that cause the decoder to overflow stack buffers.",
+            "prerequisites": [
+              "Ability to serve or MITM the streaming audio URL that the Outlook/Cortana app fetches (e.g., compromised CDN, network MITM, or DNS hijack).",
+              "The app must be in a state where it initiates commute streaming audio playback (CommuteStreamingDecoder.run())."
+            ],
+            "exploit_pipeline": [
+              "1. Set up a malicious server or perform MITM on the streaming audio endpoint used by Cortana.",
+              "2. Craft an audio payload with malformed frame headers: set 16-bit length fields to maximally encode large frame sizes, and embed codec parameters that cause the decoder to output more samples than the 2048-byte stack buffers can hold.",
+              "3. Serve the crafted payload when the app requests streaming audio data.",
+              "4. The app downloads the data via CommuteStreamingDownloader, which triggers decodeOnce() -> decodeStreamingAudio() -> native decoder chain.",
+              "5. The decoder overflows a stack buffer, corrupting the stack canary and potentially the return address, leading to code execution or crash."
+            ],
+            "poc_commands": [
+              "adb push crafted_audio_stream.bin /sdcard/Download/payload.bin",
+              "# Note: Direct file-based triggering requires hooking the streaming downloader. In practice, serve crafted_audio_stream.bin from a controlled HTTP endpoint.",
+              "adb shell am start -n com.microsoft.office.outlook/.MainActivity"
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_audio_stream.bin"
+            ],
+            "notes": "The stack canary (SSP) prevents direct exploitation on modern Android, but the underlying buffer overflow is real. With SSP bypass techniques or in builds without SSP, this could lead to RCE. Even with SSP, it causes a reliable crash (DoS) when processing malicious streaming audio."
+          }
+        },
+        "statistics": {
+          "time": "00:05:27",
+          "llm_requests": 2,
+          "llm_tool_calls": 0,
+          "input_tokens": 115745,
+          "output_tokens": 7023
+        }
+      }
+    ]
+  }
+}

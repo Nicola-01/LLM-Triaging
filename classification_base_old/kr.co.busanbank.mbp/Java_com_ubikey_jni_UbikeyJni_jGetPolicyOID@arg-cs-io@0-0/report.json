@@ -1,0 +1,180 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "부산은행 모바일뱅킹",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Compute_ASN1_ST_ChildNum, but decompilation shows it is just an indirection through PTR_Compute_ASN1_ST_ChildNum_00181d50 with no visible body. So the real logic lies in an external implementation not present in this lib; we cannot inspect it directly.",
+            "Next frame down is Convert_ASN1_to_X509_TBS_CERT which is also a pure function pointer thunk. Likewise Convert_ASN1_to_X509_CERT and CERT_Load are pure thunks. Thus the only analyzable application-level function in the chain is the JNI entry Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID.",
+            "Decompiling jGetPolicyOID shows: it calls a JNI env function at offset 0x558 to get a length iVar2 for param_3 (likely GetArrayLength), casts this to size_t __size, calls another env function at offset 0x5c0 to get a pointer __src to the array contents, then allocates __s = malloc(__size), memset(__s,0,__size), memcpy(__s,__src,__size). Then it releases the original array via env function at 0x600, and proceeds to process __s via BINSTR_*/CERT_* routines, finally constructing Java string results.",
+            "Potential issue: if malloc(__size) fails, __s == NULL, but the code unconditionally calls memset(__s,0,__size) and memcpy(__s,__src,__size) before checking __s for NULL. That is a clear NULL-pointer dereference/use, leading to crash. However, this is only reachable when malloc fails, which for normal certificate sizes on Android is unlikely under typical conditions, but still theoretically possible under memory pressure.",
+            "Another angle: integer truncation or mismatch between iVar2 (int) and size_t, but on 64-bit ARM size_t is 64-bit and int is 32-bit, so explicit cast to size_t is safe for non-negative iVar2; no sign checks are shown, but the JNI GetArrayLength-style calls return non-negative lengths and are trusted. So out-of-bounds due to length miscalculation is unlikely here.",
+            "The crash reported is in Compute_ASN1_ST_ChildNum, not obviously linked to the malloc/NULL issue. To link user-controlled data to that, we would need to see how CERT_Load and downstream Convert_ASN1_to_X509_* use __s. However, all those functions are thunks to external pointers; their implementations are not visible. Without that, we cannot assert a specific out-of-bounds or UAF. We do know that __s contents come entirely from attacker-controlled param_3 (byte array), which is fuzzed, and they are passed into ASN.1/X.509 parsing routines. ASN.1 parsers are historically vulnerable, so it’s plausible that malformed ASN.1 leads to internal memory corruption in Compute_ASN1_ST_ChildNum or the called code.",
+            "However, given only a crash label \"Process Termination : Compute_ASN1_ST_ChildNum\" and no signal type (SIGSEGV, abort, etc.), plus no visibility into the body of Compute_ASN1_ST_ChildNum or Convert_ASN1_to_X509_TBS_CERT, we cannot definitively demonstrate memory unsafety vs. an internal bounds-checked abort. The function name suggests it computes child counts in ASN.1 trees; if it asserts on structural inconsistencies, fuzzed data could trigger an internal abort that is not exploitable.",
+            "Still, the presence of complex ASN.1 parsing with no visible validation in the JNI layer means that untrusted Java-provided bytes directly reach native parsing. The fact that fuzzing found a crash in the parser root (Compute_ASN1_ST_ChildNum) strongly suggests a genuine parser robustness bug. Given the nature of ASN.1 parsers, many such crashes are due to out-of-bounds access or integer issues. But our confidence cannot be maximal because we lack implementation code and crash signal details.",
+            "On severity: if Compute_ASN1_ST_ChildNum performs unsafe memory accesses based on parsed ASN.1 lengths, this could be a high/critical memory corruption issue potentially exploitable with attacker-supplied certificates or messages. At minimum, it is a denial-of-service (native crash) on malformed input delivered through the public JNI API, which itself is meaningful. Thus classify as vulnerable, medium-to-high confidence, severity at least medium (DoS) and possibly higher, but we should not overstate without concrete corruption evidence.",
+            "Affected library is libUbikeyJni.so; call sequence from fuzz entry is fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> CERT_Load -> Convert_ASN1_to_X509_CERT -> Convert_ASN1_to_X509_TBS_CERT -> Compute_ASN1_ST_ChildNum (via thunks). We also note the definite bug in jGetPolicyOID around lack of malloc failure handling; even if that is not the current crash root, it is a genuine memory-safety flaw tied to attacker-controlled length via JNI array size, reinforcing the presence of vulnerabilities."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.72,
+          "reasons": [
+            "JNI method jGetPolicyOID copies attacker-controlled byte[] into native heap buffer without any semantic validation before passing it to complex ASN.1/X.509 parsing routines (CERT_Load, Convert_ASN1_to_X509_*, Compute_ASN1_ST_ChildNum).",
+            "Crash occurs inside Compute_ASN1_ST_ChildNum, the core ASN.1 child-number computation used by many converters, indicating malformed ASN.1 data from the fuzzer can drive the parser into an invalid state; given typical ASN.1 parser designs this is likely due to unsafe memory access rather than a graceful error path.",
+            "jGetPolicyOID contains a concrete memory-safety bug: it calls memset and memcpy on the result of malloc(__size) before checking for NULL, leading to undefined behavior / crash on allocation failure with attacker-influenced length."
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-20",
+            "CWE-787"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> CERT_Load -> Convert_ASN1_to_X509_CERT -> Convert_ASN1_to_X509_TBS_CERT -> Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Fix jGetPolicyOID to check malloc return before using it, handle allocation failures gracefully, and enforce strict max size limits on incoming byte arrays from Java.",
+            "Obtain and audit implementations of Compute_ASN1_ST_ChildNum and related ASN.1/X.509 conversion routines for bounds checks on lengths and indices; add robust error handling for malformed ASN.1 structures.",
+            "Add targeted fuzzing and ASan/UBSan builds for the ASN.1 parsing stack to reproduce and classify crashes (OOB, UAF, etc.), and add regression tests for the triggering inputs."
+          ],
+          "assumptions": [
+            "The fuzzer controls the Java byte[] passed as param_3 to jGetPolicyOID, similar to real application inputs (certificates or messages).",
+            "Compute_ASN1_ST_ChildNum and Convert_ASN1_to_X509_* are part of an internal ASN.1 parser whose code resides in another linked module not visible in this analysis.",
+            "Process termination in Compute_ASN1_ST_ChildNum corresponds to a crash rather than a deliberate clean error return."
+          ],
+          "limitations": [
+            "Implementation bodies of Compute_ASN1_ST_ChildNum and Convert_ASN1_to_X509_* are not available, so the exact corruption mechanism cannot be confirmed.",
+            "No explicit crash signal (e.g., SIGSEGV vs abort) or register state is provided, limiting root-cause precision.",
+            "Callers of CERT_Load/ASN.1 functions besides jGetPolicyOID may impose additional constraints not visible in this single stack trace."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:54",
+          "llm_requests": 4,
+          "llm_tool_calls": 8,
+          "input_tokens": 23468,
+          "output_tokens": 1901
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Get_DER_Child",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Get_DER_Child",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy; first app-level frame below it is Decode_DER_ASN1_ST, but that is just an indirect call through a function pointer. The decompiled JNI function Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID contains an explicit memcpy, which very likely maps to the crashing __memcpy call.",
+            "In the JNI function, the flow is: obtain a length via (*env+0x558)(env, param_3) → iVar2; cast to size_t __size; get a pointer __src via (*env+0x5c0)(env, param_3, 0); allocate __s = malloc(__size); memset(__s,0,__size); memcpy(__s,__src,__size). There is no null check before memcpy; only after memcpy do they check if (__s == NULL).",
+            "If malloc returns NULL while __size > 0, memcpy(__s, __src, __size) is executed with a NULL dest pointer, causing a crash inside memcpy. This is a classic missing NULL-check / unsafe memory operation.",
+            "The length and source pointer originate from JNI env functions operating on a Java object (likely a byte array or string) coming from the caller. The fuzzer (and in production, arbitrary app code) controls param_3, which controls the buffer length and in turn whether __size can be large enough to cause malloc to fail, or other unusual conditions. Therefore the crash is driven by attacker-influenced input, not a pure harness artifact.",
+            "Additionally, there is no check that __src is non-NULL or that __size matches any real allocated region; if the JNI call returns an invalid pointer, memcpy can cause undefined behaviour. However, in normal JNI behaviour, GetByteArrayElements / GetStringUTFChars should be valid; the key bug is the missing check for malloc failure before memcpy.",
+            "This bug is a memory-safety issue (NULL pointer deref / invalid dest in memcpy) that leads at minimum to a process crash (DoS). While exploitation beyond DoS (e.g., RCE) is unlikely from this specific pattern (it crashes when malloc fails), it is still a clear vulnerability: untrusted input size can trigger an unsafe memcpy with no bounds or allocation-success checks.",
+            "The indirect functions Decode_DER_ASN1_ST, Get_DER_Child, Convert_ASN1_to_X509_CERT, and CERT_Load are thunks via function pointers; we don’t have their bodies here. But the immediate crash site we can reason about is the memcpy in the JNI function, which is completely under the app’s control without validation and is sufficient to classify.",
+            "Given the direct code evidence and clear attacker-control path (JNI argument → length → malloc/ memcpy), this is a genuine bug with high confidence. The realistic impact is at least application-level DoS via crafted certificate/policy input or large arrays passed to this native method.",
+            "Therefore, classify as vulnerable, CWE-476 (NULL pointer dereference) and arguably CWE-787/CWE-120-like misuse of memcpy, with severity medium (DoS in crypto/cert parsing path)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "JNI native method jGetPolicyOID calls memcpy(__s,__src,__size) immediately after malloc(__size) without checking if __s is NULL",
+            "If malloc fails for attacker-controlled size, memcpy is invoked with a NULL dest pointer, causing a crash in __memcpy",
+            "Length and source pointer derive from JNI env operations on inputs controlled by the Java caller / fuzzer, so untrusted input can trigger this path"
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-787"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> memcpy @ 00112270"
+          ],
+          "recommendations": [
+            "In Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID, check that malloc(__size) returned non-NULL before calling memcpy; if NULL, handle the error gracefully and avoid using the buffer",
+            "Also validate that __size is reasonable (e.g., cap maximum length) before allocating and copying, to avoid excessive memory use",
+            "Add defensive checks for NULL __src and consider using safer wrappers that handle allocation and copy failures, with unit tests covering large and malformed inputs"
+          ],
+          "assumptions": [
+            "JNI function pointers at offsets 0x558 and 0x5c0 behave like standard GetArrayLength/GetXxxElements and can be influenced by the Java-supplied parameter",
+            "The crashing __memcpy in the stack trace corresponds to the memcpy invocation in Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+          ],
+          "limitations": [
+            "No direct body of Decode_DER_ASN1_ST or lower-level DER/X509 routines, so additional bugs there are not assessed",
+            "Exact mapping between the seen __memcpy frame and the memcpy @ 00112270 is inferred from standard library and naming, not explicitly symbol-resolved"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:41",
+          "llm_requests": 5,
+          "llm_tool_calls": 10,
+          "input_tokens": 29388,
+          "output_tokens": 1341
+        }
+      }
+    ]
+  }
+}

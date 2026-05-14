@@ -1,0 +1,109 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "FastDecodeQR_YUV",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "FastDecodeQR_YUV",
+            "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+          "JavaCallGraph": [],
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "FastDecodeQR_YUV"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "FastDecodeQR_YUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is FastDecodeQR_YUV in libQREngine.so, which is the real implementation taking (void *yuv, int width, int height, int stride, long outStruct). The wrapper in libbcr.so just forwards via a function pointer, so the QR engine implementation is the first app-level frame below any allocator/sanitizer.",
+            "Inside FastDecodeQR_YUV, there is dynamic allocation of a fixed-size buffer __ptr = malloc(0x96000), followed by extensive image resampling / warping. Numerous memcpy and byte copy loops are present, but they operate into the malloc'ed buffer or other internal pointers with indices derived from width/height/stride and several lookup tables. Before any operation, the function validates basic properties: param_1 != NULL, width >= 0xf0, height >= 0xf0, stride >= width, and param_5 != 0. If these checks fail, it sets an error code and returns early, eventually leading to __stack_chk_fail with that error code only if stack guard mismatches (normal Android stack canary).",
+            "The fuzzer harness likely reports a crash when __stack_chk_fail is called, but in this function the only paths to __stack_chk_fail are generic epilogue checks (for both FastDecodeQR_YUV and the JNI wrapper). There is no direct evidence of buffer overflow in the decompiled code: the compiler has inserted stack canaries (local_68 / local_58) and conditionally calls __stack_chk_fail(uVar12/uVar4) if the thread-local guard does not match. This is normal hardened build behavior and not necessarily indicative of an actual stack corruption triggered in this run.",
+            "The YUV pointer and dimensions come from JNI. In Java_com_intsig_nativelib_BCREngine_DecodeQRYUV, the code obtains a pointer uVar4 by calling a JNI env function pointer at *param_1+0x5c0, passing (env, byteArray, 0). That is consistent with GetByteArrayElements or similar on the Java YUV buffer. The width and height (param_4, param_5) are passed directly from Java (JNI parameters) into FastDecodeQR_YUV as width, height, and stride=width. There is no validation in the JNI wrapper itself, so bounds checks are entirely in the native QR function.",
+            "In FastDecodeQR_YUV, all subsequent loops use widths/heights after some adjustments but appear bounded by fixed constants associated with QR code sizes (0x140, 0xf0, 0x3c0, 0x500, etc). There are multiple arrays: local_a60[2], local_1468[640], stack locals, and several global lookup tables. Indexing into local_1468 and local_a60 is always via loop counters that terminate at hard-coded limits (e.g., while(lVar16 != 0x3c0); while(lVar16 != 0x500); while(lVar23 != 0xf0); while(lVar13 != 0x140)), suggesting the compiler has laid out these arrays to match those bounds. There is no obvious path where user-controlled width/height can cause loop bounds to exceed the allocated local array sizes: width/height are only used to compute coordinate pairs written into these fixed arrays, not to change the number of iterations.",
+            "The malloc(0x96000) buffer is used with pointer arithmetic plus offsets like 0x12ac0 and 0x12ee4, etc., leaving roughly 0x96000 - 0x12ac0 (~0x83540) bytes for image data and metadata. The loops writing into this region appear to be constrained to write at most 0xf0 * 0x140 bytes for the main image section plus some metadata fields; that comfortably fits into the allocated buffer. There is no sign of integer overflow in the calculations involving width/height (they are 32-bit ints, but the products are bounded by QR constraints and are compared/adjusted carefully).",
+            "The program termination label in the CrashEntry is simply 'FastDecodeQR_YUV'; combined with fuzzing context, this likely means the fuzzer treated a non-zero return to __stack_chk_fail or some abort path as a crash. However, from the control flow, actual calls to __stack_chk_fail only happen on stack canary mismatch due to an underlying memory error, but the triage information does not show allocator/sanitizer diagnostics (no scudo, asan, or abort messages). It is equally plausible that this is a harness artifact: fuzz_one_input is driving the JNI entry with arbitrary env/arguments that could disrupt the thread-local canary or misuse JNI function pointers, rather than a genuine bug in QR code processing.",
+            "The JNI wrapper itself is straightforward: it calls three env methods (**(code **)(*param_1 + 0x558)), (**(code **)(*param_1 + 0x5c0)), and (**(code **)(*param_1 + 0x600)) without checking return values or array length. In a production JVM, these adhere to the JNI spec and will not return bogus pointers or lengths for valid Java arrays. In the fuzz harness, however, fuzz_one_input may be simulating JNIEnv/objects incorrectly, potentially causing FastDecodeQR_YUV to be invoked with invalid native pointers/lengths not possible in real use. Since the Java call graph is empty, there is no evidence of untrusted network/file input mapping directly to these parameters in-app beyond normal camera YUV buffers, which are constrained by the device camera's resolution and format.",
+            "Given the code-level checks on dimensions and the use of internal fixed-size loops, plus the strong likelihood that any reported crash here is due to the fuzz harness corrupting JNIEnv structures or violating calling conventions, the more plausible classification is 'Env/Harness' rather than a genuine exploitable vulnerability. There is no specific unsafe memcpy or out-of-bounds index demonstrably controlled by attacker data beyond what the app and camera pipeline would allow."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.6,
+          "reasons": [
+            "Crash is reported at FastDecodeQR_YUV but decompiled code shows only standard stack canary checks; no clear out-of-bounds writes/reads tied to attacker-controlled width/height.",
+            "Width, height, and stride are validated (non-null buffer, minimum sizes, stride >= width), and all loops operating on stack arrays and the malloc buffer are bounded by fixed constants matching array sizes.",
+            "JNI wrapper obtains YUV pointer via standard env calls; under normal JVM usage these cannot produce invalid pointers, suggesting fuzz harness misuse (fake JNIEnv/objects) is a more likely cause than an in-app memory bug."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so"
+          ],
+          "evidence": [
+            {
+              "function": "FastDecodeQR_YUV(void *param_1,int param_2,int param_3,int param_4,long param_5)",
+              "address": "00212aa8",
+              "file": "libQREngine.so",
+              "snippet": "if ((((param_1 != (void *)0x0) && (0xef < param_2)) && (0xef < param_3)) && (param_5 != 0)) {\n  __ptr = malloc(0x96000);\n  ...\n}\n...\nif (*(long *)(lVar9 + 0x28) == local_68) {\n  return;\n}\n__stack_chk_fail(uVar12);",
+              "note": "Input pointers and dimensions are validated; __stack_chk_fail only in stack guard epilogue."
+            },
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "address": "0014d9ac",
+              "file": "libbcr.so",
+              "snippet": "uVar4 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\niVar3 = FastDecodeQR_YUV(uVar4,param_4,param_5,param_4,auStack_1078);",
+              "note": "JNI wrapper forwards a buffer pointer and dimensions; no additional unsafe arithmetic here."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_BCREngine_DecodeQRYUV @ 0014d9ac",
+            "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV @ 0014d9ac -> FastDecodeQR_YUV @ 00212aa8"
+          ],
+          "recommendations": [
+            "Reproduce the crash under a realistic JVM/Android runtime (not synthetic JNIEnv) with valid YUV buffers to confirm whether any stack canary failures actually occur.",
+            "If a real crash is observed, instrument FastDecodeQR_YUV with ASan/UBSan and add explicit bounds assertions around all loops using computed coordinates into local_1468/local_a60 and the malloc buffer.",
+            "Ensure the fuzz harness models JNI semantics correctly (real JNIEnv, valid byte arrays) to avoid false positives from invalid native pointers."
+          ],
+          "assumptions": [
+            "The fuzz harness may be providing invalid JNIEnv or object handles not possible in production.",
+            "Camera-sourced YUV data dimensions in the real app will respect the minimum width/height and stride constraints checked in FastDecodeQR_YUV."
+          ],
+          "limitations": [
+            "No direct runtime sanitizer logs or register state from the crashing run are available, so the exact cause of __stack_chk_fail is unknown.",
+            "Java call graph is empty; real Java-side constraints on width/height and buffer sizes could not be inspected."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:44",
+          "llm_requests": 3,
+          "llm_tool_calls": 6,
+          "input_tokens": 23303,
+          "output_tokens": 2209
+        }
+      }
+    ]
+  }
+}

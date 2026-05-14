@@ -1,0 +1,132 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "@string/app_name",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "stream_gets",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "stream_gets",
+            "??",
+            "ms_decode_buf_pnm",
+            "MsDecodeBuffer",
+            "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "MsDecodeBuffer",
+              "Java_com_intsig_nativelib_QREngine_decodeJpgByte",
+              "Java_com_intsig_nativelib_QREngine_decodeJpgByte"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "MsDecodeBuffer"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so": [
+              "stream_gets",
+              "ms_decode_buf_pnm",
+              "MsDecodeBuffer"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libscanner.so": [
+              "MsDecodeBuffer"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Tools for Ghidra/Jadx are returning HTTP 404 and I cannot actually inspect the native implementation of stream_gets, ms_decode_buf_pnm, or MsDecodeBuffer, nor the JNI bridge. I must therefore reason solely from the symbolic stack and names.",
+            "The crash site is in stream_gets inside libmainstone.so, an app-specific native library. The function name strongly suggests a buffered input routine that reads a line from a byte stream into a local buffer, similar to gets()/fgets-style helpers often present in image/codec code.",
+            "The native stack is: stream_gets -> ?? -> ms_decode_buf_pnm -> MsDecodeBuffer -> Java_com_intsig_nativelib_QREngine_decodeJpgByte -> fuzz_one_input -> main. This is a clean data path from fuzzer-controlled bytes into the QR decoding pipeline. MsDecodeBuffer/ms_decode_buf_pnm likely parse image data, and stream_gets is called deep in that parser.",
+            "The termination reason is just 'stream_gets' (not an allocator abort or explicit fatal log), which is ambiguous. It could be a controlled error path that aborts on malformed input, or it could be a crash due to buffer overflow/UB inside stream_gets.",
+            "However, in QR/image decoder code, a helper named stream_gets typically reads a textual line from an input stream into a fixed-size stack buffer, often with insufficient bounds checking. When fuzzing arbitrary JPEG-like data, crashes here are classic indicators of out-of-bounds write or read caused by attacker-controlled input lengths. This pipeline is clearly reachable from untrusted inputs in the real app (the JNI method decodeJpgByte processes camera or gallery images without the harness needing to fake impossible states).",
+            "Because I cannot decompile, I cannot show the exact memcpy or pointer arithmetic, but the function naming, position in the stack, and the fuzzing context (DoS/memory-corruption style) strongly suggest an unsafe read operation in stream_gets with length derived from image data. There is no sign that the harness is doing something impossible like passing NULL where Java never would; it just calls the JNI method with raw byte arrays.",
+            "Thus, I classify this as a likely genuine vulnerability: malformed image buffers can crash the decoding native code through stream_gets. Impact is at least denial-of-service (app crash on crafted image), and potentially memory corruption if stream_gets writes out of bounds, but I cannot prove control over the overwrite without code. So severity is 'medium' with moderate confidence, and CWE is a generic buffer read/write overflow (CWE-787/125) pending confirmation.",
+            "Exploit path is straightforward: attacker supplies crafted JPG data that the app passes through decodeJpgByte (e.g., via camera feed, imported file, or inter-app sharing). A PoC harness can call the JNI method directly from a test activity or via fuzz_one_input, but real-world triggering would be via a crafted image being scanned."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Crash occurs in app-native parsing code stream_gets within libmainstone.so, not in harness-only or allocator code",
+            "Call stack shows direct flow from untrusted byte input (fuzzer / image data) through MsDecodeBuffer into stream_gets",
+            "Function name and context strongly suggest unsafe line-read style routine that is commonly vulnerable to buffer overflows when parsing attacker-controlled data",
+            "No evidence that the crash is due to unrealistic harness behavior (e.g., impossible NULLs); instead it matches typical malformed image parsing failures"
+          ],
+          "cwe_ids": [
+            "CWE-787"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libscanner.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_QREngine_decodeJpgByte -> MsDecodeBuffer -> ms_decode_buf_pnm -> ?? -> stream_gets"
+          ],
+          "recommendations": [
+            "Reverse-engineer and audit stream_gets in libmainstone.so for fixed-size buffers and unchecked reads/writes; ensure length checks against buffer size",
+            "Add robust input validation and size checking in MsDecodeBuffer/ms_decode_buf_pnm before calling stream_gets, rejecting overly long or malformed lines",
+            "Add regression tests with malformed and oversized JPEG/PNM inputs to ensure decodeJpgByte handles untrusted data without crashing"
+          ],
+          "assumptions": [
+            "decodeJpgByte is reachable with attacker-controlled image data in normal app usage (camera, gallery, or shared images)",
+            "stream_gets performs buffered reads into a finite buffer and is not simply a safe wrapper that intentionally aborts",
+            "The fuzz harness is not passing impossible arguments that production Java code never would"
+          ],
+          "limitations": [
+            "Ghidra/Jadx MCP calls failed with HTTP 404, so no direct decompiled code for stream_gets or MsDecodeBuffer",
+            "Exact root cause (out-of-bounds write vs read vs assertion/abort) at stream_gets is unknown",
+            "Lack of Java call graph details prevents mapping to specific activities or intents for PoC"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "malformed image data passed into QREngine.decodeJpgByte",
+            "prerequisites": [
+              "Attacker can cause the app to process an attacker-controlled JPG or similar image (e.g., via share, file open, or camera feed)",
+              "Target device has vulnerable version of com.intsig.BCRLite with this native library set"
+            ],
+            "exploit_pipeline": [
+              "Craft an image file whose encoded data causes MsDecodeBuffer/ms_decode_buf_pnm to drive stream_gets into reading a line or segment exceeding its internal buffer or assumptions",
+              "Deliver this image to the app via a feature that triggers QR or image decoding, causing Java_com_intsig_nativelib_QREngine_decodeJpgByte to be invoked with the crafted bytes",
+              "On decoding, stream_gets encounters the malicious segment and performs an unsafe read, triggering memory corruption or at least an application crash",
+              "Iteratively refine the crafted input (guided by crashes or sanitizers) to move from simple DoS towards more controlled corruption if possible"
+            ],
+            "poc_commands": [
+              "adb push payload.jpg /sdcard/Download/payload.jpg",
+              "adb shell am start -n <package>/<activity> --es image_path /sdcard/Download/payload.jpg",
+              "# Alternatively, run the existing native fuzzer binary on-device:\nadb shell /data/local/tmp/qrfuzz /sdcard/Download/payload.jpg"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.jpg"
+            ],
+            "notes": "Due to missing decompiled code, PoC is specified at a high level. A more precise PoC would come after confirming how decodeJpgByte is wired to activities/intents in the app."
+          }
+        },
+        "statistics": {
+          "time": "00:00:49",
+          "llm_requests": 3,
+          "llm_tool_calls": 6,
+          "input_tokens": 21120,
+          "output_tokens": 1658
+        }
+      }
+    ]
+  }
+}

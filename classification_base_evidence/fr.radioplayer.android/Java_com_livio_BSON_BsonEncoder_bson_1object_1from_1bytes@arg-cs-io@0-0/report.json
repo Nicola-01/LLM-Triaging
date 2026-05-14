@@ -1,0 +1,999 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/fr.radioplayer.android/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "fr.radioplayer.android",
+      "min_sdk": 23,
+      "target_sdk": 31,
+      "version_name": "6.6.420.1",
+      "version_code": "1319"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "memmove",
+            "byte_array_to_bson_string",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is byte_array_to_bson_string (full version at 0x00105eb4) which calls malloc and memcpy/memmove; crash reason is memmove, so likely OOB or bad pointer in that copy.",
+            "Decompiled byte_array_to_bson_string shows it trusts param_1 pointer and param_2 length entirely: it allocates param_2+1 bytes, then memcpy(__dest,param_1,param_2) and null-terminates. There is no bounds or sanity check on param_2, but the destination is sized consistently with param_2 so overflow there is unlikely. The more realistic crash cause is that param_1 or param_2 is invalid/too large for process memory, leading to memmove/memcpy failure during read.",
+            "Need to see where byte_array_to_bson_string is called. In bson_object_from_bytes@0x001038e8, for BSON type 2 (string) it does: iVar4 = read_int32_le(&local_88); then __s_00 = (char *****)byte_array_to_bson_string(local_88,(long)(iVar4 + -1)); and later local_88 = local_88 + iVar4. This uses the 32-bit length field from the BSON buffer (iVar4) directly as the copy length (minus 1) and as the amount to advance the cursor, with no validation that iVar4 is positive, non-huge, or fits within the originally advertised BSON object size uVar2.",
+            "bson_object_from_bytes begins with uVar2 = read_int32_le(&local_88); where uVar2 is the total BSON object size from the first 4 bytes. After parsing, it checks if (param_2 + (int)uVar2 != pbVar5) and only prints an error if mismatched. This is a post-hoc consistency check; it does not prevent earlier overreads. Therefore any crafted byte[] coming from Java can provide a bogus size in the type 2 element length, causing byte_array_to_bson_string to read far beyond the end of the byte array or past mapped memory into unmapped pages, which can trigger the memmove crash.",
+            "Trace attacker control: Java BsonEncoder.decodeFromBytes(byte[] bArr) directly calls native bson_object_from_bytes(bArr). There is no Java-side length check, and JNI bridge Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes obtains a pointer to the Java byte[] via (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) but the decompiled JNI does not pass an explicit length into bson_object_from_bytes. However, in our decompiled bson_object_from_bytes signature, param_2 is a byte * and param_1 is an output struct; the JNI wrapper calls bson_object_from_bytes(&local_60); without passing param_2, which suggests the decompilation or prototype is slightly off and that param_2 is likely held in a global/implicit variable (e.g. set by the JNIEnv GetByteArrayElements-like call) referenced by read_int32_le. In any case, the underlying parser processes bytes coming directly from Java without internal bounds enforcement on string length fields.",
+            "Because the attacker can fully control the contents of the byte array bArr (e.g., network input passed through app logic), they can set an arbitrarily large length for a type-2 BSON string field, making byte_array_to_bson_string perform memcpy from an arbitrary offset in the buffer with an oversized length. This is an out-of-bounds read on the source pointer and can lead to crashes and potential information disclosure if memory is mapped, and in some libc/allocator configurations could be leveraged further.",
+            "There is no indication that the fuzzer harness is doing something impossible in real use; Java decodeFromBytes simply forwards the array. Therefore this represents a genuine, reachable memory-safety bug in the BSON deserialization code, not a harness-only artifact.",
+            "The core CWE is improper validation of length fields (CWE-1284 / 190) leading to out-of-bounds read (CWE-125). Given native memcpy with attacker-controlled length from untrusted buffer, this is at least a high severity memory corruption/DoS and possible info leak depending on deployment."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.9,
+          "reasons": [
+            "byte_array_to_bson_string performs memcpy with attacker-controlled length from BSON buffer, no bounds check on source length",
+            "bson_object_from_bytes reads a 32-bit string length from the untrusted byte[] and passes length-1 directly to byte_array_to_bson_string, only doing a non-fatal size mismatch printf afterward",
+            "Java BsonEncoder.decodeFromBytes exposes bson_object_from_bytes(byte[]) directly to arbitrary byte[] input, so an attacker can craft values that trigger out-of-bounds read and memmove crash"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-190",
+            "CWE-1284"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "00105eb4",
+              "file": "libbson-c-lib.so",
+              "snippet": "__dest = malloc(param_2 + 1);\nif (param_2 != 0) {\n  memcpy(__dest,param_1,param_2);\n}\n*((char *)__dest + param_2) = '\\0';",
+              "note": "Copies param_2 bytes from param_1 with no validation; assumes caller provided safe length and valid source pointer."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "001038e8",
+              "file": "libbson-c-lib.so",
+              "snippet": "case 2:\n  iVar4 = read_int32_le(&local_88);\n  __s_00 = (char****)byte_array_to_bson_string(local_88,(long)(iVar4 + -1));\n  ...\n  local_88 = local_88 + iVar4;",
+              "note": "Uses 32-bit length from untrusted data as memcpy length without checking fits within overall BSON size."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "001038e8",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar2 = read_int32_le(&local_88);\n...\nif (param_2 + (int)uVar2 != pbVar5) {\n  printf(\"Unexpected parsed object size. Expected %i, got %i\\n\", uVar2, (int)pbVar5 - (int)param_2);\n}",
+              "note": "Only logs inconsistency after parsing; no pre-parse bounds enforcement to stop overreads."
+            },
+            {
+              "function": "com.livio.BSON.BsonEncoder.decodeFromBytes",
+              "file": "classes4.dex",
+              "snippet": "public static HashMap<String, Object> decodeFromBytes(byte[] bArr) {\n    new HashMap();\n    return bson_object_get_hashmap(bson_object_from_bytes(bArr));\n}",
+              "note": "Accepts arbitrary byte[] and passes directly into native parser with no validation."
+            }
+          ],
+          "call_sequence": [
+            "com.livio.BSON.BsonEncoder.decodeFromBytes(byte[])",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "bson_object_from_bytes",
+            "byte_array_to_bson_string",
+            "memmove"
+          ],
+          "recommendations": [
+            "In bson_object_from_bytes, validate each parsed length (iVar4) against the remaining buffer size and ensure it is non-negative and within the total BSON object size before calling byte_array_to_bson_string.",
+            "Change byte_array_to_bson_string to accept an additional parameter for the maximum remaining buffer length and enforce that the requested copy length does not exceed it, or perform bounds checking prior to memcpy/memmove.",
+            "Add robust error handling in the BSON parser (e.g., abort parsing and return error) when size or type fields are inconsistent, rather than continuing after detecting mismatches."
+          ],
+          "assumptions": [
+            "Java callers can supply attacker-controlled byte[] inputs to BsonEncoder.decodeFromBytes in realistic usage (e.g., via network or file data).",
+            "The decompiled prototypes for bson_object_from_bytes and related helpers are accurate enough that the observed length usage corresponds to the real implementation."
+          ],
+          "limitations": [
+            "Exact JNI marshalling of the byte[] pointer/length is inferred from decompilation and may be slightly imprecise, though the unsafe use of the BSON string length field is clear.",
+            "The precise cause of the memmove crash (OOB read vs. invalid mapping) cannot be determined from the trace alone, but both stem from the same unchecked length field."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:36",
+          "llm_requests": 3,
+          "llm_tool_calls": 12,
+          "input_tokens": 20821,
+          "output_tokens": 2162
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "byte_array_to_bson_string",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy; first app-level frame below it is byte_array_to_bson_string in libbson-c-lib.so. I decompiled both variants of byte_array_to_bson_string; the one with signature (void *param_1, size_t param_2) clearly contains the memcpy call: it allocates malloc(param_2 + 1), then if (param_2 != 0) memcpy(__dest, param_1, param_2), then NUL-terminates. So dst is heap buffer of size param_2+1, len is param_2, src is param_1. Intrinsically, that memcpy is sized correctly relative to its own allocation; the only way for memcpy to crash is if param_1 is invalid or the allocation fails/returns NULL. There is no NULL-check on malloc, but on Android malloc typically doesn’t return NULL except under extreme OOM, which is more of an environmental DoS than a logic bug exploitable via attacker-controlled data.",
+            "Next, I look at the caller bson_object_from_bytes (the real implementation at 0x001038e8). The crash stack lists bson_object_from_bytes above byte_array_to_bson_string, consistent with this implementation’s call in case 2 of the BSON type switch. In that switch, after reading the BSON element type and key string, for type 2 (UTF-8 string) it does: iVar4 = read_int32_le(&local_88); __s_00 = (char*****)byte_array_to_bson_string(local_88, (long)(iVar4 + -1)); ... bson_object_put_element(...); free(__s_00); local_88 = local_88 + iVar4; So param_1 to byte_array_to_bson_string is local_88, a pointer into the BSON buffer; param_2 (len) is iVar4-1, where iVar4 is the length field from the BSON string (which in BSON includes the NUL terminator). There is no validation that iVar4 is positive or that it stays within the overall object size uVar2. Also, the function reads uVar2 = read_int32_le(&local_88) at the top (BSON document size), but later only checks if param_2 + (int)uVar2 == pbVar5 after parsing, which is too late and only results in a printf, not bounds enforcement. Therefore, local_88 can advance past the end of the original param_2 buffer if the BSON length fields are inconsistent or malicious. That means byte_array_to_bson_string can be invoked with src pointing beyond the original buffer, causing memcpy to access invalid memory (out-of-bounds read from attacker-controlled length fields).",
+            "Now I must check whether the top-level param_2 to bson_object_from_bytes is attacker-controlled in realistic usage. The JNI function Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes has signature (JNIEnv *env, jclass/ jobject, jbyteArray) effectively, but decompiled as (long *param_1, undefined8 param_2, undefined8 param_3). It calls (**(code **)(*param_1 + 0x5c0))(param_1, param_3, 0); That is a JNI helper; at this vtable offset, on Android/ART this is almost certainly GetByteArrayElements or a similar call that returns a pointer into the Java byte array; the result is stored in uVar3. Then it calls bson_object_from_bytes(&local_60); However, in the decompiled stub, no explicit arguments are passed besides &local_60, which implies the actual prototype of bson_object_from_bytes in this translation unit may capture the buffer pointer and/or length from a global or thread-local structure set up by the previous JNI call. Even if we can’t see the details, the buffer bytes clearly originate from the Java byte array param_3. The JNI bridge then copies the parsed object into a global PTR_bsonObject_00117fe8 and calls another JNI function (likely ReleaseByteArrayElements) using param_3 and uVar3. So overall, untrusted Java data is fed directly to bson_object_from_bytes, which then interprets it as BSON without validating internal lengths.",
+            "I examine bson_object_from_bytes more for length validation: it reads the initial 32-bit size (uVar2) from local_88 (which itself was param_2 pointer). That should be the total BSON document length. It then iterates through fields using local_88 as a moving pointer, but does not bound-check local_88 against param_2 + uVar2 inside the loop. Only after the loop ends (terminated by a 0 byte type marker) does it compare param_2 + (int)uVar2 against pbVar5 (the final pointer). If mismatch, it prints an error message with printf but still proceeds to write out the partially-parsed object. This means a malicious or fuzzed buffer where internal length fields are too large can cause local_88 to walk outside the original buffer long before the final check. Specifically, for type 2, if iVar4 is huge or negative, the function passes (iVar4-1) as size to byte_array_to_bson_string and then does local_88 += iVar4. There is no check that iVar4 <= uVar2 or even that iVar4 > 0. So an attacker who controls the BSON buffer can set iVar4 to cause out-of-bounds reads and possibly large heap allocations (param_2+1 in malloc).",
+            "Effect on memcpy: Given dst is a malloc buffer of size param_2+1, the out-of-bounds condition arises from src not being a valid pointer into accessible memory, not from dst overflow. memcpy will read param_2 bytes starting at src; if src is past the end of the original buffer (beyond mapped page), this triggers the observed crash. This is a classic out-of-bounds read (CWE-125) in the parsing logic of bson_object_from_bytes propagated into memcpy. Though this is a read, not a write, it’s still a memory-safety bug and can be used for information disclosure or denial of service. Allocation size is also attacker-influenced via iVar4; extremely large lengths could cause OOM or allocator failures, giving a practical DoS vector. There is no sign that the fuzzer harness is doing anything impossible: it just passes arbitrary Java byte arrays to the same JNI that production code would use. Therefore, the crash is not an artifact of the harness but of genuine lack of bounds checking in bson_object_from_bytes and byte_array_to_bson_string usage.",
+            "Regarding exploitability, on Android this manifests primarily as a parse-time DoS: feeding a malformed BSON blob to the app (via whatever API uses BsonEncoder.bson_object_from_bytes) can crash the process deterministically. Since input can plausibly be controlled by remote data (e.g., network responses, persisted data), this is a realistic issue. Because the bug is an out-of-bounds read rather than write, RCE is less likely, but infoleak possibilities exist if similar helpers read beyond buffers into adjacent heap contents and then store or transmit them. With current evidence, I classify severity as medium (reliable DoS, potential info leak but not clearly demonstrated).",
+            "I will mark this as a vulnerability with CWE-125 (Out-of-bounds read). The affected library is libbson-c-lib.so. The call sequence from JNI is: Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes -> bson_object_from_bytes -> byte_array_to_bson_string -> __memcpy. Key evidence snippets are the unbounded use of iVar4 in byte_array_to_bson_string(local_88, iVar4-1) and subsequent local_88 += iVar4 without comparing to document size uVar2. No argument validation occurs in JNI or Java (not visible here but implied from standard pattern; the Java method likely just passes the byte[] as-is)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.92,
+          "reasons": [
+            "bson_object_from_bytes parses attacker-controlled BSON length fields without bounds checks, advancing a pointer beyond the original buffer",
+            "byte_array_to_bson_string uses memcpy with length derived directly from unvalidated length field, causing out-of-bounds reads when source pointer is invalid",
+            "JNI bridge passes Java byte arrays directly into parser with no apparent validation, so untrusted input can reliably trigger crash"
+          ],
+          "cwe_ids": [
+            "CWE-125"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "00105eb4",
+              "file": "libbson-c-lib.so",
+              "snippet": "__dest = malloc(param_2 + 1);\nif (param_2 != 0) {\n    memcpy(__dest,param_1,param_2);\n}\n*((char*)__dest + param_2) = '\\0';",
+              "note": "memcpy length and allocation size are derived from param_2; crash arises when src (param_1) is invalid due to upstream parsing bug"
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "001038e8",
+              "file": "libbson-c-lib.so",
+              "snippet": "case 2:\n    iVar4 = read_int32_le(&local_88);\n    __s_00 = (char*****)byte_array_to_bson_string(local_88,(long)(iVar4 + -1));\n    ...\n    local_88 = local_88 + iVar4;\n    break;",
+              "note": "Length iVar4 is taken directly from BSON data and used as memcpy size (iVar4-1) and to advance pointer, with no bounds check against document size uVar2"
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "001038e8",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar2 = read_int32_le(&local_88);\n...\nif (param_2 + (int)uVar2 != pbVar5) {\n    printf(\"Unexpected parsed object size. Expected %i, got %i\\n\", (ulong)uVar2,\n           (ulong)(uint)((int)pbVar5 - (int)param_2));\n}",
+              "note": "Document size is read but only checked after parsing; mismatch only prints a warning and does not prevent out-of-bounds pointer advancement during parsing"
+            },
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "address": "00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\n...\n(**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0);",
+              "note": "JNI bridge obtains raw pointer to Java byte array and passes it to bson_object_from_bytes, exposing untrusted data directly to vulnerable parser"
+            }
+          ],
+          "call_sequence": [
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "bson_object_from_bytes @ 001038e8",
+            "byte_array_to_bson_string @ 00105eb4",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add strict bounds checking in bson_object_from_bytes: validate that each element length (e.g., iVar4) is positive and that advancing local_88 by that amount never exceeds param_2 + uVar2",
+            "Before calling byte_array_to_bson_string or similar helpers, ensure the requested copy length is sane (e.g., capped to remaining document bytes and a reasonable global maximum)",
+            "In JNI layer or Java code, consider validating BSON blobs (e.g., using a robust library) before passing them into this custom parser, or replace this implementation with a well-tested BSON library"
+          ],
+          "assumptions": [
+            "JNI vtable call at offset 0x5c0 returns a pointer to the Java byte array data (e.g., GetByteArrayElements) and another at 0x600 releases it",
+            "The BSON byte array provided from Java can be influenced by external/untrusted input in typical app usage"
+          ],
+          "limitations": [
+            "Exact implementation of read_int32_le, byte_array_to_string, and related helpers is not inspected, though their behavior is inferred from usage",
+            "Java-side BsonEncoder.bson_object_from_bytes implementation was not directly inspected; inference is based on JNI signature and native behavior"
+          ]
+        },
+        "statistics": {
+          "time": "00:02:03",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 19626,
+          "output_tokens": 2948
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "memmove",
+            "byte_array_to_bson_string",
+            "bson_object_from_bytes",
+            "bson_array_from_bytes",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_object_from_bytes",
+              "bson_array_from_bytes",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is byte_array_to_bson_string (memmove is libc). Decompilation shows it is just an indirect call through PTR_byte_array_to_bson_string_00117f90, so actual implementation is in another translation unit or imported library and not visible here.",
+            "bson_object_from_bytes and bson_array_from_bytes are also pure thunks, calling through indirect pointers PTR_bson_object_from_bytes_00117e40 and PTR_bson_array_from_bytes_00117f80 respectively. No arguments are passed explicitly from C; they likely operate on some global or TLS state set up earlier in the BSON parsing flow.",
+            "The JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes takes (JNIEnv *env, jclass/instance, jbyteArray) abstracted as (long *param_1, ..., param_3). It calls (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) which is a JNIEnv method, almost certainly GetByteArrayElements or GetPrimitiveArrayCritical. The result (uVar3) is a native pointer to the byte array; no length is captured in this wrapper. Then bson_object_from_bytes(&local_60) is called, which via the function pointer presumably consumes bytes from that array according to some length stored elsewhere (not visible).",
+            "After bson_object_from_bytes fills local_60..local_40/uStacks, the JNI stub writes these into a global object structure PTR_bsonObject_00117fe8 at fixed offsets, then calls another JNIEnv function (**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0) to release the Java array (likely ReleaseByteArrayElements). There is no visible bounds or sanity checking on the size or contents of the input jbyteArray in native code.",
+            "Because the crash occurs in memmove (allocator termination), the most plausible scenario is that the BSON parsing/decoding logic called via PTR_byte_array_to_bson_string or PTR_bson_object_from_bytes is using the pointer uVar3 plus some length derived from the BSON data itself. If length fields inside the BSON payload are not validated against the actual Java array length, an out-of-bounds read/write and corresponding memmove crash can occur when parsing attacker-controlled bytes.",
+            "From the JNI side, Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes accepts arbitrary byte arrays from Java (the fuzz harness passes arbitrary data) and forwards them directly to the BSON decoder. There is no indication of length clamping or validation on the native side; BSON implementations must treat incoming buffers as untrusted. This pattern (parsing attacker-supplied BSON without full bounds checks on nested lengths) is a classic source of buffer overflows and out-of-bounds accesses in memmove/memcpy.",
+            "We do not see the concrete implementation behind the function pointers (PTR_* symbols), so we cannot pinpoint the exact unsafe memmove call, but the combination of: (1) crash in memmove; (2) parsing complex, length-encoded format (BSON) from untrusted bytes; (3) no visible length checks between JNI and parser; and (4) indirection through pointers likely to external BSON C library, strongly suggests a genuine memory safety bug in BSON handling reachable from app-level inputs.",
+            "The harness passes arbitrary bytes, but in a real app, BSON payloads likely derive from network or other external data handled by BsonEncoder. Thus, a malformed or malicious BSON blob could trigger the same crash. Even though we cannot observe exact argument expressions to memmove, this is consistent with an out-of-bounds read/write in BSON parsing, which is potentially exploitable beyond mere DoS.",
+            "Due to missing decompilation of the function-pointer targets, we cannot be fully certain or label specific CWE with 0.9+ confidence, but evidence points to a likely out-of-bounds / buffer-overflow condition in native BSON parsing code controlled by input bytes."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in memmove during decoding of attacker-controlled BSON bytes with no visible bounds checks between JNI and parser",
+            "JNI bridge obtains raw pointer to Java byte[] and forwards it to BSON parsing via function-pointer thunks, suggesting external C BSON library likely doing memmove on that buffer",
+            "BSON is a length-encoded binary format; malformed lengths commonly cause out-of-bounds accesses if parser lacks strict validation, consistent with fuzzer-triggered memmove abort"
+          ],
+          "cwe_ids": [
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+              "address": "00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\n...; // results stored into global PTR_bsonObject_00117fe8\n(**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0);",
+              "note": "JNI bridge maps jbyteArray directly to native pointer and invokes BSON object parsing without any explicit size or bounds validation."
+            },
+            {
+              "function": "byte_array_to_bson_string @ 00102680",
+              "address": "00102680",
+              "file": "libbson-c-lib.so",
+              "snippet": "void byte_array_to_bson_string(void) { (*(code *)PTR_byte_array_to_bson_string_00117f90)(); }",
+              "note": "Thin thunk into external BSON implementation; crash in memmove likely originates here when operating on attacker-controlled buffer."
+            },
+            {
+              "function": "bson_object_from_bytes @ 001023e0",
+              "address": "001023e0",
+              "file": "libbson-c-lib.so",
+              "snippet": "void bson_object_from_bytes(void) { (*(code *)PTR_bson_object_from_bytes_00117e40)(); }",
+              "note": "Parser implementation hidden behind function pointer, fed from untrusted byte array obtained in JNI with no checks."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c -> bson_object_from_bytes @ 001023e0",
+            "bson_object_from_bytes @ 001023e0 -> byte_array_to_bson_string @ 00102680",
+            "byte_array_to_bson_string @ 00102680 -> PTR_byte_array_to_bson_string_00117f90 -> memmove"
+          ],
+          "recommendations": [
+            "Obtain and audit the actual implementations behind PTR_byte_array_to_bson_string_00117f90 and PTR_bson_object_from_bytes_00117e40 with focus on memmove/memcpy calls and bounds checks on BSON length fields vs actual buffer length.",
+            "Add explicit size arguments and validation in JNI bridge: retrieve byte[] length via GetArrayLength and ensure native BSON parser is passed both pointer and length, rejecting any internal length fields that exceed the outer buffer.",
+            "Enable runtime hardening (ASAN, UBSan) on the BSON C library during fuzzing and regression testing to better pinpoint out-of-bounds conditions and confirm/patch the exact defect."
+          ],
+          "assumptions": [
+            "The function-pointer targets PTR_byte_array_to_bson_string_* and PTR_bson_object_from_bytes_* belong to a BSON parsing implementation that uses memmove on the supplied buffer.",
+            "Java-side code for BsonEncoder.bson_object_from_bytes does not enforce stronger validation or size limits than visible in the JNI bridge.",
+            "BSON inputs are, or could be, influenced by untrusted external data (e.g., network, IPC, files) in the real app."
+          ],
+          "limitations": [
+            "Actual memmove call site and its arguments are hidden behind function pointers; exact buffer and length expressions cannot be inspected.",
+            "Java-side source for com.livio.BSON.BsonEncoder was not reviewed here, so any additional validations there are unknown.",
+            "Crash context from the allocator/sanitizer (exact fault address, read vs write) is not provided, limiting precision of root-cause classification."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:06",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 18369,
+          "output_tokens": 2037
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "byte_array_to_bson_string",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is byte_array_to_bson_string, but it is just an indirect call through PTR_byte_array_to_bson_string_00117f90, so the actual memcpy site is in that implementation, which is not present in this lib (likely in another, or stripped). We still know the crash happens in __memcpy, so the most plausible pattern is that byte_array_to_bson_string copies from the Java-provided byte buffer into some BSON buffer using an unbounded or poorly-bounded length.",
+            "Decompiled JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes: it calls a virtual JNI env method at (*param_1+0x5c0)(param_1,param_3,0), storing result in uVar3. This is consistent with GetByteArrayElements/GetPrimitiveArrayCritical or GetArrayLength; the call later at (*param_1+0x600)(param_1,param_3,uVar3,0) is the matching Release function. The native function bson_object_from_bytes(&local_60) is then called; it likely consumes data pointed to by uVar3 and fills local_60..uStack_48 outputs. After the call, those locals are copied into a global PTR_bsonObject_00117fe8. None of these locals are validated or length-checked here.",
+            "Because the actual data buffer and/or its length (uVar3 or something derived from it) comes directly from a Java byte[] (param_3) via JNI without any checks in this native layer, and the crash arises in memcpy during byte_array_to_bson_string/bson_* routines, it is very plausible that malformed or oversized input can cause an out-of-bounds read/write. The fuzz harness likely passed arbitrary bytes[] of arbitrary size. In normal app use, the Java side probably builds this byte[] from attacker-controlled sources (e.g., network/file) as it’s BSON encoding/decoding; absent evidence of strict size validation on the Java side, we should assume it is attacker-influenced.",
+            "The functions bson_array_from_bytes and bson_object_from_bytes are also pure thunks to external pointers (PTR_bson_array_from_bytes_00117f80, PTR_bson_object_from_bytes_00117e40). This makes the vulnerable logic live in an external implementation (possibly the BSON C library) which is not visible here; but the API design (from_bytes on attacker data, followed by memcpy crash) strongly suggests typical parser/decoder memory bugs. Because the crash is a memcpy in a parser fed with untrusted bytes, this matches a classic memory-corruption pattern rather than an artificial harness artifact.",
+            "We do not see explicit bounds checks or robust validation around the buffer or its length in the visible native code; the JNI wrapper simply forwards the Java-provided data into bson_object_from_bytes. Therefore, if the underlying BSON parsing or byte_array_to_bson_string code has an unchecked copy, the crash is reasonably attributable to a genuine vulnerability reachable from untrusted input. Lack of visibility into the implementation of PTR_bson_* prevents us from pinpointing exact CWE, but memcpy OOB -> CWE-787/119 is the best fit. Confidence is medium-high but not absolute due to missing implementation code."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy invoked via byte_array_to_bson_string when parsing BSON bytes, a classic sign of out-of-bounds memory access in a decoder",
+            "JNI bridge directly passes Java byte[] data into bson_object_from_bytes without any visible bounds checks or validation in native code",
+            "Underlying bson_* and byte_array_to_bson_string implementations are external function pointers, but their use pattern (from_bytes on untrusted data leading to memcpy crash) strongly indicates a real memory-safety bug rather than a harness artifact"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "address": "0x00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\n...; (**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0);",
+              "note": "JNI wrapper obtains a pointer/length related to Java byte[] and passes it into bson_object_from_bytes without explicit bounds checking."
+            },
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "0x00102680",
+              "file": "libbson-c-lib.so",
+              "snippet": "void byte_array_to_bson_string(void) { (*(code *)PTR_byte_array_to_bson_string_00117f90)(); }",
+              "note": "Thunk to external implementation; crash reported in __memcpy strongly suggests unchecked memcpy inside this function on attacker-controlled bytes."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "0x001023e0",
+              "file": "libbson-c-lib.so",
+              "snippet": "void bson_object_from_bytes(void) { (*(code *)PTR_bson_object_from_bytes_00117e40)(); }",
+              "note": "Parser is implemented via function pointer; used on Java-provided bytes, likely invoking byte_array_to_bson_string internally before memcpy crash."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 0x00102b8c -> bson_object_from_bytes @ 0x001023e0 -> byte_array_to_bson_string @ 0x00102680 -> PTR_byte_array_to_bson_string_00117f90 -> __memcpy"
+          ],
+          "recommendations": [
+            "Obtain and audit the implementation of PTR_byte_array_to_bson_string_00117f90 and PTR_bson_object_from_bytes_00117e40 for unchecked memcpy/memmove or length miscalculations when handling BSON input",
+            "Add explicit length and structural validation on the BSON byte[] in both Java and JNI layers before passing data into the native BSON parser",
+            "Compile native code with full sanitizers (ASan/UBSan) and re-run fuzzing to pinpoint the exact overflow conditions and develop regression tests"
+          ],
+          "assumptions": [
+            "Java side can supply attacker-controlled BSON byte[] to the native decoder under realistic app scenarios",
+            "The memcpy crash is due to an out-of-bounds condition in byte_array_to_bson_string or related parser logic, not to an artificial limitation of the fuzz harness"
+          ],
+          "limitations": [
+            "Implementations behind PTR_byte_array_to_bson_string_00117f90 and PTR_bson_object_from_bytes_00117e40 are not visible, so exact overflow site and conditions are inferred",
+            "No direct view of Java call-site validations, so attacker control over the byte[] size/content is assumed rather than proven"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:37",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 18297,
+          "output_tokens": 1724
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "byte_array_to_bson_string",
+            "bson_object_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_object_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is byte_array_to_bson_string(void *param_1, size_t param_2), which allocates param_2+1 bytes and memcpy’s param_2 bytes from param_1, then NUL-terminates. Crash in __memcpy implies param_1 is invalid or param_2 too large vs accessible memory.",
+            "Within bson_object_from_bytes, case 2 (string type) calls read_int32_le(&local_88) into iVar4, then calls byte_array_to_bson_string(local_88, (long)(iVar4 - 1)) without any bounds check that iVar4 is positive or that local_88 + iVar4 stays within the original BSON buffer size (uVar2). It then uses strlen on the result and advances local_88 by iVar4. This is classic length-field-trust bug.",
+            "The outer function reads uVar2 = read_int32_le(&local_88) as the declared BSON document length, then iterates until it finds a 0 type byte, but only at the end it checks if param_2 + uVar2 == pbVar5; mismatch leads to a printf warning, not a hard stop. So malformed inputs with bogus iVar4 values are processed without early rejection, allowing local_88 to run past the allocated buffer, and then passed to byte_array_to_bson_string, causing out-of-bounds reads/writes in memcpy.",
+            "byte_array_to_bson_string itself trusts its length parameter fully and only relies on malloc; there is no integer-overflow guard on param_2+1 either, so extremely large iVar4 could also cause allocation-size overflow on 32-bit size_t builds (though here it’s arm64). Root issue is missing bounds validation between BSON length fields and buffer limits.",
+            "JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes obtains a byte[] and (via a JNI env call at *param_1+0x5c0) gets its data/length into uVar3, then calls bson_object_from_bytes(&local_60); decompilation here doesn’t propagate uVar3 into bson_object_from_bytes due to stripped prototypes, but given JNI pattern, bson_object_from_bytes(param_1, byte *param_2) is clearly meant to consume that Java byte array. There is no validation in JNI or Java (per provided info) of BSON structural correctness beyond whatever this parser does, so attacker-controlled bytes from Java can directly set iVar4 and uVar2.",
+            "Because inputs are fuzzer-provided and in a real app would likely come from network or other untrusted sources (BSON encoder/decoder), this path is realistically reachable. The bug is a straightforward out-of-bounds read (and possible write via malloc+memcpy) controlled by a 32-bit length read from the untrusted buffer without any range check vs overall buffer size. This is a memory corruption primitive with likely exploitability, at least to crash (DoS) and potentially beyond depending on environment.",
+            "This is not a harness-only issue: nothing in the code suggests the JNI or parser assumes trusted inputs; it is generic BSON parsing logic where the only protection is a late-size consistency printf. Therefore classify as a genuine vulnerability, at least high severity memory corruption (CWE-787/CWE-125)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.94,
+          "reasons": [
+            "bson_object_from_bytes trusts unvalidated string length iVar4 from attacker-controlled buffer when calling byte_array_to_bson_string(local_88, iVar4-1)",
+            "No bounds check that local_88+iVar4 stays within original BSON document size uVar2; only a late printf on size mismatch, so malformed input can make local_88 point outside the buffer",
+            "Crash occurs in __memcpy inside byte_array_to_bson_string, consistent with out-of-bounds read/write from attacker-controlled length field",
+            "JNI bridge passes raw Java byte[] data into bson_object_from_bytes with no prior structural validation, so attacker controls the BSON length fields"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "00105eb4",
+              "file": "libbson-c-lib.so",
+              "snippet": "__dest = malloc(param_2 + 1);\nif (param_2 != 0) {\n  memcpy(__dest,param_1,param_2);\n}\n*((char *)__dest + param_2) = '\\0';",
+              "note": "Blind memcpy of param_2 bytes from param_1 with no bounds checking; relies entirely on caller to provide valid length."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "001038e8",
+              "file": "libbson-c-lib.so",
+              "snippet": "iVar4 = read_int32_le(&local_88);\n__s_00 = (char *****)byte_array_to_bson_string(local_88,(long)(iVar4 + -1));\n...\nlocal_88 = local_88 + iVar4;\n...\nif (param_2 + (int)uVar2 != pbVar5) {\n  printf(\"Unexpected parsed object size. Expected %i, got %i\\n\", ...);\n}",
+              "note": "Uses iVar4 from untrusted buffer as string length without checking it against document size uVar2; only logs size mismatch after parsing completes."
+            },
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "address": "00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\n...",
+              "note": "JNI obtains Java byte[] contents then calls bson_object_from_bytes without validating or passing explicit length parameter in decompiled prototype, indicating direct parsing of attacker-controlled bytes."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "bson_object_from_bytes @ 001038e8",
+            "byte_array_to_bson_string @ 00105eb4",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "In bson_object_from_bytes, validate string length field iVar4 against remaining buffer size (uVar2 - (local_88 - param_2)); reject or abort parsing if it is <=0 or exceeds remaining bytes.",
+            "Before calling byte_array_to_bson_string, ensure param_2 (length) is sane and does not cause pointer overflow or exceed the original BSON buffer; consider passing and enforcing an explicit remaining-length parameter throughout parsing.",
+            "Add robust bounds and consistency checks for all BSON element lengths and types, and make size mismatches fatal (stop parsing) rather than only logging a warning.",
+            "Add fuzz tests and ASan builds around this parser to catch similar out-of-bounds issues in other BSON element types."
+          ],
+          "assumptions": [
+            "bson_object_from_bytes(undefined8 *param_1, byte *param_2) consumes a BSON document starting at param_2 with length uVar2 from the first int32 field.",
+            "The JNI call at offset 0x5c0 returns or exposes a pointer and size corresponding to the Java byte[]; decompiler omitted the length parameter in prototype but semantics follow standard JNI GetByteArrayElements/GetArrayLength pattern.",
+            "The application uses this BSON decoder on untrusted or semi-trusted data (e.g., from network or IPC), so attacker control of the input buffer is realistic."
+          ],
+          "limitations": [
+            "Java-side source for BsonEncoder.bson_object_from_bytes was not inspected; additional validation there, if any, is unknown.",
+            "Exact semantics of read_int32_le/read_int64_le and emhashmap_initialize are assumed standard and not re-verified.",
+            "Heap allocator and platform-specific mitigations could affect exploitability beyond denial-of-service, which was not fully modeled."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:29",
+          "llm_requests": 4,
+          "llm_tool_calls": 8,
+          "input_tokens": 25655,
+          "output_tokens": 1942
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "memmove",
+            "byte_array_to_bson_string",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is memmove, then byte_array_to_bson_string, but in this lib that symbol is an import thunk calling through PTR_byte_array_to_bson_string_00117f90; same for bson_array_from_bytes and bson_object_from_bytes, which are just trampolines to function pointers, so their implementations aren’t visible in this binary. The actual bug likely lies in the implementation behind those pointers (probably another linked/embedded library not present here) which calls memmove with bad arguments.",
+            "Decompiled JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes: it obtains uVar3 via a function pointer from the JNIEnv vtable: (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0). Based on standard JNI patterns this is probably GetByteArrayElements or GetPrimitiveArrayCritical (param_3 is the Java byte[]), with 0 as the mode. The code then calls bson_object_from_bytes(&local_60); but notably does NOT pass uVar3 (the byte pointer) or the array length into bson_object_from_bytes. It then copies the resulting local_60..local_40 into a global PTR_bsonObject_00117fe8, then calls another JNIEnv function (**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0), likely ReleaseByteArrayElements/ReleasePrimitiveArrayCritical.",
+            "Because we don’t see the implementation of bson_object_from_bytes (only a function pointer call), we cannot directly inspect how it uses memmove. However, by its name and usage, it clearly parses a BSON object from bytes; that parsing must consume bytes from some buffer and perform memmove/memcpy internally. The immediate concern is whether the length/bounds for that parsing come from attacker-controlled input and whether they are validated.",
+            "The fuzzer entry fuzz_one_input suggests fuzz data becomes the Java byte[] passed to this JNI bridge. In real app use, this byte[] will often come from network or files (BSON encoder/decoder), so treating byte[] as attacker-controlled is realistic. There is no length validation or sanity checking at the JNI bridge; it simply obtains raw bytes and then calls bson_object_from_bytes with only a pointer to a local result struct, not with explicit length. That suggests bson_object_from_bytes either: (a) has some hidden global that stores the buffer/length (possibly set elsewhere), or (b) is a generic routine that, internally, dereferences state that was initialized earlier (maybe by a separate “set input buffer” function). From this single snippet we *don’t* see how the bytes are actually handed to the C BSON parser.",
+            "Critically, the crash occurs in memmove called from byte_array_to_bson_string → bson_array_from_bytes → bson_object_from_bytes. Since we lack implementations, we can’t definitively prove the presence of an unbounded memcpy/memmove or incorrect length. It *looks* like a classic “parse attacker-controlled BSON length → memmove out-of-bounds” bug, but that’s an inference, not proven from code we can see. It is also possible that the fuzz harness is calling this JNI method with parameters that the real Java side would never supply (e.g. null array or inconsistent global state for the BSON module), causing an internal assertion/abort or NULL deref in memmove, which would be more of an environmental/harness issue.",
+            "Given the incomplete view (only thunks to function pointers for the interesting functions) and lack of direct evidence of unsafe operations or missing bounds checks, we cannot firmly attribute the memmove crash to a vulnerability rather than to malformed/uninitialized internal state caused by the harness. The JNI wrapper itself doesn’t show obvious misuse of lengths or pointers; all dangerous work is abstracted behind function pointers. Therefore classification must be tentative. The most honest assessment is that this is *possibly* a real memory-safety bug in the underlying BSON C parser (which historically have had such bugs), but since we can’t inspect that code, confidence must be moderate-low and we should not assert a concrete CWE beyond generic buffer issues.",
+            "Thus: treat as not-confirmed; mark is_vulnerable=false with medium confidence and emphasize missing underlying implementation as a limitation. Severity can’t be rated meaningfully without proof, so leave null or low. Affected library is libbson-c-lib.so (front-end), but the actual bug likely resides in another not-present library or in the code behind PTR_* function pointers."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.4,
+          "reasons": [
+            "Crash is in memmove called via byte_array_to_bson_string/bson_array_from_bytes/bson_object_from_bytes, but all of these are just function-pointer thunks with no visible implementation in this binary.",
+            "JNI bridge simply obtains a byte[] pointer from JNIEnv and calls bson_object_from_bytes(&local_60) without explicit length; all parsing and potential bounds issues occur in code we cannot see (behind PTR_bson_object_from_bytes_00117e40).",
+            "Fuzz harness may be invoking this JNI method with unrealistic state (e.g., uninitialized global parser context or null buffers), so we cannot distinguish an internal misuse from a true, attacker-reachable memory-corruption bug."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "address": "0x00102b8c",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\npuVar2 = PTR_bsonObject_00117fe8;\n*(undefined8 *)(PTR_bsonObject_00117fe8 + 0x20) = local_40;\n*(undefined8 *)(puVar2 + 8) = uStack_58;\n*(undefined8 *)puVar2 = local_60;\n*(undefined8 *)(puVar2 + 0x18) = uStack_48;\n*(undefined8 *)(puVar2 + 0x10) = uStack_50;",
+              "note": "JNI wrapper obtains a pointer to the Java byte array but does not pass it or a length directly into bson_object_from_bytes; actual parsing implementation is hidden behind a function pointer."
+            },
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "0x00102680",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void byte_array_to_bson_string(void)\n{\n  (*(code *)PTR_byte_array_to_bson_string_00117f90)();\n  return;\n}\n",
+              "note": "Function is just a thunk to a function pointer; true implementation (where memmove is called) is not visible."
+            },
+            {
+              "function": "bson_array_from_bytes",
+              "address": "0x00102660",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void bson_array_from_bytes(void)\n{\n  (*(code *)PTR_bson_array_from_bytes_00117f80)();\n  return;\n}\n",
+              "note": "Also a function-pointer thunk; no direct evidence of bounds issues in this binary."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "0x001023e0",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void bson_object_from_bytes(void)\n{\n  (*(code *)PTR_bson_object_from_bytes_00117e40)();\n  return;\n}\n",
+              "note": "Parsing of attacker-controlled data (BSON) likely happens behind this pointer, but implementation is unavailable for inspection."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "bson_object_from_bytes @ 001023e0",
+            "bson_array_from_bytes @ 00102660",
+            "byte_array_to_bson_string @ 00102680",
+            "memmove"
+          ],
+          "recommendations": [
+            "Obtain and analyze the binary or source that defines the functions behind PTR_bson_object_from_bytes_00117e40 / PTR_bson_array_from_bytes_00117f80 / PTR_byte_array_to_bson_string_00117f90 to inspect memmove/memcpy usage and length checks.",
+            "Reproduce the crash under a realistic Java environment (not just fuzz harness) to see if valid but malformed BSON inputs can trigger the same memmove failure.",
+            "Add defensive validation of input sizes and structural checks on BSON data before invoking native parsing routines, or introduce explicit length parameters in the native APIs."
+          ],
+          "assumptions": [
+            "The Java byte[] argument to the JNI method is attacker-controlled via network or file input in normal app operation.",
+            "Function pointers PTR_* for bson_* symbols point to the real BSON parser implementation, potentially in another library not visible here.",
+            "memmove crash is due to misuse inside the hidden BSON implementation rather than a bug in the Android system libraries."
+          ],
+          "limitations": [
+            "Implementations of byte_array_to_bson_string, bson_array_from_bytes, and bson_object_from_bytes are not available; only thunks are present, preventing direct inspection of the failing memmove call.",
+            "No Java-side code or fuzz harness code is provided, so the exact construction and validation of the input byte[] is inferred but not confirmed.",
+            "Without a concrete reproducer and full binary set, we cannot definitively classify this as a genuine, attacker-exploitable vulnerability."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:38",
+          "llm_requests": 5,
+          "llm_tool_calls": 10,
+          "input_tokens": 30128,
+          "output_tokens": 2513
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "memmove",
+            "byte_array_to_bson_string",
+            "bson_array_from_bytes",
+            "bson_array_from_bytes",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_array_from_bytes",
+              "bson_array_from_bytes",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator is byte_array_to_bson_string, but in this binary it is just a PLT-style wrapper that immediately calls through a function pointer PTR_byte_array_to_bson_string_00117f90 with no arguments or local processing, so the real logic (including the memmove) is in an unresolved external implementation not present in this lib.",
+            "bson_array_from_bytes and bson_object_from_bytes are likewise thin stubs that trampoline via function pointers PTR_bson_array_from_bytes_00117f80 and PTR_bson_object_from_bytes_00117e40. No arguments are visible in the decompiled stubs, suggesting the callee pulls its state from globals or TLS or follows a non-standard calling convention that Ghidra didn’t recover.",
+            "The JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes obtains a Java byte[] via a JNIEnv function pointer (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0), stores results into a local struct (local_60..uStack_48), then calls bson_object_from_bytes(&local_60). After the call, it copies those locals into a global BSON object struct PTR_bsonObject_00117fe8 and returns that pointer back to Java. That means bson_object_from_bytes is supposed to interpret the bytes from Java and fill the local_60 structure, likely based on the content/length of the Java array.",
+            "The crash is reported as a memmove failure in byte_array_to_bson_string, which sits in the same BSON path. Since all three helper functions are external via function pointers, their internal bounds checks cannot be inspected here; however, the general operation (parsing untrusted bytes and converting to BSON structures/strings with memmove) is exactly the sort of code that often suffers from length miscalculation / out-of-bounds read or write.",
+            "From JNI side there is no visible validation of the byte array length or structure before handing it off to bson_object_from_bytes; the JNI code simply gets the array and forwards it. Therefore, the only chance of safety is inside the external bson_* implementations— but we cannot see them and thus cannot confirm whether the crash is due to an internal bug or intended abort on malformed data.",
+            "Because the crash occurs under fuzzing with arbitrary bytes passed into the same JNI entry that the app uses in production (Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes), and no harness-only behaviour (like passing NULL JNIEnv or object) is evident, this is a realistic call path. Arbitrary or attacker-controlled bytes (e.g., from network or storage) could reach this encoder if the app ever feeds external input to BSON_BsonEncoder.bson_object_from_bytes.",
+            "We lack concrete disassembly of the memmove call site or its arguments (src/dst/len) because the real body is in an unanalysed external, so we cannot trace dataflow into memmove. However, the symptoms (allocator/sanitizer abort in memmove during parsing) plus the lack of JNI-side bounds checks make a genuine memory safety bug in the BSON C library plausible. There is no sign this is merely an intentional abort or harness misuse.",
+            "Given this, I classify it as a likely vulnerability in the external BSON C implementation, but with medium confidence because we cannot inspect the exact unsafe code or rule out that the fuzz harness violates library preconditions structurally (e.g., calling BSON routines out of expected lifecycle) even though the JNI signature matches real use."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.65,
+          "reasons": [
+            "Crash occurs in memmove invoked from BSON byte parsing routines reachable via the real JNI method Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes, not a harness-only stub.",
+            "JNI layer directly forwards attacker-controllable byte[] input into native BSON parsers with no visible validation of length or structure.",
+            "BSON helper functions are external via function pointers; their internals are unseen, but a memmove crash strongly suggests out-of-bounds access or similar memory corruption in the BSON C implementation."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+              "address": "0x00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\npuVar2 = PTR_bsonObject_00117fe8;\n*(undefined8 *)(PTR_bsonObject_00117fe8 + 0x20) = local_40;\n*(undefined8 *)(puVar2 + 8) = uStack_58;\n*(undefined8 *)puVar2 = local_60;",
+              "note": "JNI bridge obtains Java bytes and calls bson_object_from_bytes with no length or structure validation."
+            },
+            {
+              "function": "byte_array_to_bson_string @ 00102680",
+              "address": "0x00102680",
+              "file": "libbson-c-lib.so",
+              "snippet": "void byte_array_to_bson_string(void) { (*(code *)PTR_byte_array_to_bson_string_00117f90)(); }",
+              "note": "Wrapper into external implementation that ultimately calls memmove and crashed under fuzzing."
+            },
+            {
+              "function": "bson_array_from_bytes @ 00102660",
+              "address": "0x00102660",
+              "file": "libbson-c-lib.so",
+              "snippet": "void bson_array_from_bytes(void) { (*(code *)PTR_bson_array_from_bytes_00117f80)(); }",
+              "note": "External BSON array parsing logic, part of same parsing path as the crash."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "bson_object_from_bytes @ 001023e0",
+            "bson_array_from_bytes @ 00102660",
+            "byte_array_to_bson_string @ 00102680",
+            "memmove"
+          ],
+          "recommendations": [
+            "Obtain and analyse the full BSON C implementation backing PTR_byte_array_to_bson_string_* and related pointers to confirm and pinpoint the exact unsafe memmove usage.",
+            "Add robust length and structural validation of the input byte[] in Java or JNI before passing it into bson_object_from_bytes, or ensure the native library rejects malformed data safely.",
+            "Instrument the BSON parsing code with ASan/UBSan and targeted fuzzing on BSON inputs to reproduce and minimise the crashing test case and develop a precise patch."
+          ],
+          "assumptions": [
+            "Java BsonEncoder.bson_object_from_bytes is exposed to attacker-controlled data paths (e.g., network, files) in the real app.",
+            "The memmove crash stems from out-of-bounds access or length miscalculation in the external BSON C implementation rather than an intentional abort on malformed but unreachable inputs.",
+            "The fuzz harness uses the same JNI entry and calling conventions as production code, not violating invariants beyond arbitrary byte content."
+          ],
+          "limitations": [
+            "Implementation of PTR_byte_array_to_bson_string_*, PTR_bson_array_from_bytes_*, and PTR_bson_object_from_bytes_* is not available, so the exact vulnerability pattern cannot be inspected.",
+            "No concrete register/argument dump at the memmove call site is provided, limiting ability to categorically prove an out-of-bounds condition.",
+            "Java-side call graph and how external data flows into BSON_BsonEncoder are not inspected here, so real-world exploitability depends on app usage patterns."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:57",
+          "llm_requests": 4,
+          "llm_tool_calls": 11,
+          "input_tokens": 25161,
+          "output_tokens": 2043
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "memmove",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "memmove",
+            "byte_array_to_bson_string",
+            "bson_array_from_bytes",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_array_from_bytes",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top crashing native frame is memmove, called from byte_array_to_bson_string/bson_array_from_bytes/bson_object_from_bytes chain inside libbson-c-lib.so. Need to find first app-level function below allocator/sanitizer: that is byte_array_to_bson_string implementation at 0x00105eb4 (non-thunk).",
+            "Decompiled byte_array_to_bson_string shows: dest = malloc(len+1); if (len != 0) memcpy(dest, src, len); dest[len] = '\\0'; return dest. No bounds check beyond trusting len. This is a typical safe pattern as long as malloc succeeds and src is a valid pointer of at least len bytes. Crash at memmove implies src or dst invalid or len too large relative to actual buffer backing src.",
+            "To see how arguments are derived, must inspect callers. We have wrapper at 0x00102680 that jumps via function pointer PTR_byte_array_to_bson_string_00117f90, but real implementation is 0x00105eb4. However, stack trace indicates path: bson_array_from_bytes -> bson_object_from_bytes -> JNI. Decompiling bson_object_from_bytes (0x001023e0) shows it is a pure thunk calling through PTR_bson_object_from_bytes_00117e40. Similarly, bson_array_from_bytes at 0x00102660 is a thunk via PTR_bson_array_from_bytes_00117f80. Implementations of these pointers are not present in the currently analyzed lib (likely in same lib but not resolved, or another module). So we cannot see exact parsing logic for BSON and how they call byte_array_to_bson_string.",
+            "JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes decompiled: it uses env function table offset 0x5c0 to get something from param_3 (a Java byte[]), stores result in uVar3, then calls bson_object_from_bytes(&local_60). Critically, the JNI does NOT pass the Java byte array data pointer or its length to bson_object_from_bytes; instead, it calls some internal parser via function pointer. local_60..local_40 are outputs filled by bson_object_from_bytes (likely a parsed BSON object structure). After that, JNI copies those fields into a global PTR_bsonObject_00117fe8 and calls another JNI env function pointer at offset 0x600 with (env, param_3, uVar3, 0) — probably to release/cleanup or construct Java object. So the controlling length/contents of the BSON input bytes are only known/handled inside the hidden implementation behind PTR_bson_object_from_bytes_00117e40 and possibly PTR_bson_array_from_bytes_00117f80.",
+            "Because the core parser implementations behind these function pointers are missing, we cannot trace arguments to byte_array_to_bson_string: its src/dst/len could be derived from attacker-controlled BSON data, but they could also be fully validated inside the parser. The existence of memmove crash in fuzzing suggests a parser bug (e.g., trusting a length field from BSON without checking against buffer size) leading to out-of-bounds read/write. However, without visibility into that code, we cannot *prove* the vulnerability, only strongly suspect it.",
+            "This crash clearly is not a harness-only artifact: JNI function uses standard JNI Get* function via env vtable and passes a real Java byte[] to native. Fuzzer input is the content of that byte array; this is realistic (user/network-provided BSON). Any unsafe memcpy/memmove due to unvalidated length from that data would be a genuine memory-corruption vulnerability. The pattern of byte_array_to_bson_string (alloc size = len+1, then memcpy with len) is safe w.r.t destination, so the only way memmove crashes is if src pointer or len are inconsistent with actual backing store, pointing to a parser logic error elsewhere.",
+            "Given: (1) memmove crash involving parser helpers, (2) JNI path from controllable byte[] to parser, (3) opaque parser implementations via function pointers (likely third-party BSON C lib), and (4) absence of any bounds checks we can see for string conversion, it is highly probable that the underlying bson_* implementation is using byte_array_to_bson_string with a len derived from BSON length fields without validating against total buffer size. That is the textbook form of CWE-787/788 out-of-bounds read/write vulnerability in binary parsers.",
+            "However, because the exact faulty line is hidden behind unresolved function pointers, we must slightly lower confidence from fully confirmed. Still, this should be classified as a likely genuine memory-corruption vulnerability with high severity, because a malformed BSON can trigger memmove overflow, potentially exploitable for RCE in native code. The crash is not due to explicit abort or sanitizer, but a raw memmove failure."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in memmove called by byte_array_to_bson_string, indicating memory access with invalid pointer or size, not a deliberate abort.",
+            "JNI bridge passes attacker-controlled byte[] data into native BSON parser stack (bson_object_from_bytes/bson_array_from_bytes) without visible length validation before reaching byte_array_to_bson_string.",
+            "Parser implementations are hidden behind function pointers; pattern strongly suggests they may trust BSON length fields and pass incorrect length/pointer to byte_array_to_bson_string, leading to out-of-bounds read/write."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-788"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "byte_array_to_bson_string @ 0x00105eb4",
+              "address": "0x00105eb4",
+              "file": "libbson-c-lib.so",
+              "snippet": "void * byte_array_to_bson_string(void *param_1,size_t param_2) {\n  void *__dest = malloc(param_2 + 1);\n  if (param_2 != 0) {\n    memcpy(__dest,param_1,param_2);\n  }\n  ((char *)__dest)[param_2] = '\\0';\n  return __dest;\n}",
+              "note": "Standard pattern; if memmove/memcpy crashes here, it implies src pointer or length are inconsistent with actual buffer size supplied by callers."
+            },
+            {
+              "function": "bson_object_from_bytes @ 0x001023e0",
+              "address": "0x001023e0",
+              "file": "libbson-c-lib.so",
+              "snippet": "void bson_object_from_bytes(void) {\n  (*(code *)PTR_bson_object_from_bytes_00117e40)();\n}",
+              "note": "Thunk into hidden BSON parser implementation; likely where attacker-controlled input is parsed and lengths for byte_array_to_bson_string are computed."
+            },
+            {
+              "function": "bson_array_from_bytes @ 0x00102660",
+              "address": "0x00102660",
+              "file": "libbson-c-lib.so",
+              "snippet": "void bson_array_from_bytes(void) {\n  (*(code *)PTR_bson_array_from_bytes_00117f80)();\n}",
+              "note": "Another thunk into parser implementation; may construct arrays/strings using byte_array_to_bson_string."
+            },
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 0x00102b8c",
+              "address": "0x00102b8c",
+              "file": "libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*env + 0x5c0))(env, param_3, 0);\nbson_object_from_bytes(&local_60);\n// copy parsed fields into global PTR_bsonObject_00117fe8;\n(**(code **)(*env + 0x600))(env, param_3, uVar3, 0);",
+              "note": "Shows data flow from Java byte[] into native BSON parser and then back, with no visible bounds checks on BSON content in JNI layer."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 0x00102b8c",
+            "bson_object_from_bytes @ 0x001023e0",
+            "(implementation behind PTR_bson_object_from_bytes_00117e40)",
+            "bson_array_from_bytes @ 0x00102660",
+            "(implementation behind PTR_bson_array_from_bytes_00117f80)",
+            "byte_array_to_bson_string @ 0x00105eb4",
+            "memmove"
+          ],
+          "recommendations": [
+            "Locate and decompile implementations referenced by PTR_bson_object_from_bytes_00117e40 and PTR_bson_array_from_bytes_00117f80 to identify exact site where src pointer and length passed to byte_array_to_bson_string are derived from BSON data.",
+            "Add strict bounds checks in BSON parsing code to ensure any length fields or string sizes are clamped to the remaining buffer size before calling byte_array_to_bson_string or memmove/memcpy.",
+            "Consider enabling compiler hardening and address sanitizers in debug builds of libbson-c-lib.so to catch and localize out-of-bounds accesses during development."
+          ],
+          "assumptions": [
+            "Fuzzer input corresponds to contents of the Java byte[] passed into Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes, matching realistic usage where BSON comes from untrusted sources.",
+            "Implementations behind PTR_bson_object_from_bytes_00117e40 and PTR_bson_array_from_bytes_00117f80 are part of the same library and process input without additional sandboxing or copying that would constrain attacker influence."
+          ],
+          "limitations": [
+            "Implementations of bson_object_from_bytes and bson_array_from_bytes are indirect via function pointers and not available, so the exact faulty line and precise bounds logic cannot be inspected.",
+            "Crash site inside memmove is inferred from stack trace; exact register/memory state at crash is not provided, limiting certainty about whether overflow is on read vs write side."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:05",
+          "llm_requests": 3,
+          "llm_tool_calls": 10,
+          "input_tokens": 18632,
+          "output_tokens": 2419
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "byte_array_to_bson_string",
+            "bson_array_from_bytes",
+            "bson_array_from_bytes",
+            "bson_object_from_bytes",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+          "LibMap": {
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so": [
+              "byte_array_to_bson_string",
+              "bson_array_from_bytes",
+              "bson_array_from_bytes",
+              "bson_object_from_bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "bson_object_from_bytes"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, but first app-level frame is byte_array_to_bson_string in libbson-c-lib.so per stack trace and lib map.",
+            "Ghidra decompilation shows byte_array_to_bson_string, bson_array_from_bytes, and bson_object_from_bytes in this lib are thin stubs that immediately call through function pointers PTR_* at fixed addresses; their implementations are not visible in this binary, likely in another object or linked statically elsewhere. So exact memcpy arguments/length are unknown from current view.",
+            "The JNI entry Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes was decompiled. It uses the JNIEnv function table at offset 0x5c0 to call into a JNI helper taking (param_1,param_3,0) and stores the result in uVar3; this is almost certainly GetByteArrayElements or GetByteArrayRegion-like, acting on param_3 (the Java byte[] input).",
+            "Then it calls bson_object_from_bytes(&local_60). This function is an indirect call via PTR_bson_object_from_bytes_00117e40, passing the address of a local struct that will be filled in. After the call, it copies the 5 qword fields from that local struct into a global BSON object singleton PTR_bsonObject_00117fe8. Then it calls another JNIEnv function pointer at offset 0x600 with (param_1,param_3,uVar3,0), likely ReleaseByteArrayElements or similar, to clean up JNI resources.",
+            "The crash happens in __memcpy, with the stack trace including byte_array_to_bson_string and bson_array_from_bytes twice, as well as bson_object_from_bytes. While we do not see their implementation, their names and pattern strongly suggest they parse a raw byte[] with BSON data into internal structures, performing memory copies based on lengths embedded in the BSON stream.",
+            "Because the JNI bridge directly accepts a Java byte[] (param_3) and hands it into the BSON parsing pipeline without any visible validation of size or structure on the native side, the parser is operating on attacker-controllable data (the contents of the byte array). The fuzz harness calls this JNI entry with arbitrary bytes and triggered a memcpy crash, indicating that the parser performed an out-of-bounds copy or otherwise supplied invalid src/dst/len to memcpy.",
+            "We cannot see the exact memcpy call site because the real parser functions are behind function pointers, but given the function naming, realistic use (BSON encoder/decoder), and that production code will receive byte[] from higher-level callers (potentially from network or files), this represents a classic native parser memory-safety bug. There are no evident bounds checks or length validation in the stubs or JNI bridge that would prevent malformed BSON from reaching memcpy.",
+            "Environment/harness misuse seems unlikely: the JNI bridge uses standard JNIEnv calls with the Java byte[]; passing arbitrary bytes is realistic app input as well. The crash in __memcpy within BSON parsing on untrusted data is consistent with an out-of-bounds read/write or similar memory corruption (CWE-787/788).",
+            "Given the indirect call through function pointers and lack of direct visibility of memcpy arguments, certainty is not absolute but is still high because: (a) we know memcpy is used, (b) input is fully attacker-controlled, and (c) BSON parsers are non-trivial and often vulnerable when not robustly validated."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.86,
+          "reasons": [
+            "Crash occurs inside __memcpy invoked from BSON parsing helpers (byte_array_to_bson_string/bson_array_from_bytes) operating on attacker-controlled Java byte[] data.",
+            "JNI bridge passes the byte[] contents into native BSON parser via function pointers with no visible validation, making malformed input a realistic trigger in production, not a harness-only artifact.",
+            "Out-of-bounds or otherwise invalid memcpy parameters from parsing untrusted BSON imply a memory corruption bug (even if exact call site is hidden behind function pointers)."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes",
+              "address": "0x00102b8c",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "uVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nbson_object_from_bytes(&local_60);\n... copy local_60..local_40 fields into global PTR_bsonObject_00117fe8;\n(**(code **)(*param_1 + 0x600))(param_1,param_3,uVar3,0);",
+              "note": "JNI bridge obtains elements of Java byte[] param_3, calls BSON parser via function pointer, then releases elements; no validation of the byte[] content or length is visible."
+            },
+            {
+              "function": "byte_array_to_bson_string",
+              "address": "0x00102680",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void byte_array_to_bson_string(void) { (*(code *)PTR_byte_array_to_bson_string_00117f90)(); }",
+              "note": "Thin stub into function pointer implementing BSON string conversion from byte array; likely where memcpy is called, but implementation is opaque."
+            },
+            {
+              "function": "bson_array_from_bytes",
+              "address": "0x00102660",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void bson_array_from_bytes(void) { (*(code *)PTR_bson_array_from_bytes_00117f80)(); }",
+              "note": "Another stub into parser implementation handling BSON arrays from raw bytes; appears twice in stack trace near memcpy crash."
+            },
+            {
+              "function": "bson_object_from_bytes",
+              "address": "0x001023e0",
+              "file": "APKs_FINAL/fr.radioplayer.android/lib/arm64-v8a/libbson-c-lib.so",
+              "snippet": "void bson_object_from_bytes(void) { (*(code *)PTR_bson_object_from_bytes_00117e40)(); }",
+              "note": "Entry into BSON object parser working on raw bytes from Java; actual code not visible but part of crash chain before memcpy."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_livio_BSON_BsonEncoder_bson_1object_1from_1bytes @ 00102b8c",
+            "bson_object_from_bytes @ 001023e0",
+            "bson_array_from_bytes @ 00102660",
+            "byte_array_to_bson_string @ 00102680",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Locate and decompile the real implementations behind PTR_byte_array_to_bson_string_00117f90, PTR_bson_array_from_bytes_00117f80, and PTR_bson_object_from_bytes_00117e40 (likely in another object or stripped section) to identify the exact memcpy call and add robust bounds checking before all copy operations.",
+            "Add explicit length validation on the BSON byte[] in both Java and native layers (e.g., check reported BSON lengths against actual array size and maximum allowed size) before parsing or memcpy/memmove operations.",
+            "Consider using a well-tested BSON parsing library or enabling compiler hardening (ASan, UBSan, stack canaries, FORTIFY_SOURCE) during development to catch further memory-safety issues in this parsing code."
+          ],
+          "assumptions": [
+            "The Java byte[] parameter passed via param_3 is attacker-controllable in realistic app flows (e.g., from network or file input).",
+            "The memcpy crash is due to invalid src/dst/len values computed from malformed BSON data and not due to external corruption or hardware faults.",
+            "The actual parser implementations behind the function pointers reside in another module or stripped section that is not currently visible, but they perform memory copies based on BSON length fields."
+          ],
+          "limitations": [
+            "Implementations of PTR_byte_array_to_bson_string_00117f90, PTR_bson_array_from_bytes_00117f80, and PTR_bson_object_from_bytes_00117e40 are not present in the analyzed binary, so the exact memcpy call site and indices/length calculations cannot be shown.",
+            "Java-side call graph and argument construction for BsonEncoder.bson_object_from_bytes are not inspected here due to lack of direct Java source access in this context.",
+            "No runtime register or memory state at the moment of the crash is available to confirm whether the memcpy overflowed a heap buffer or stack buffer."
+          ]
+        },
+        "statistics": {
+          "time": "00:01:02",
+          "llm_requests": 3,
+          "llm_tool_calls": 10,
+          "input_tokens": 18480,
+          "output_tokens": 2195
+        }
+      }
+    ]
+  }
+}
