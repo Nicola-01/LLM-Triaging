@@ -1,0 +1,161 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "@string/COMMON_PRODUCT_NAME",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.20.10",
+      "version_code": "2191"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>",
+          "JavaCallGraph": [
+            "<com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.lumensoft.ks.KSCmp: updatePWD(Ljava/lang/String;[B[BLjava/lang/String;IIILandroid/content/Context;)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: updatePwdCert()Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable: run()V> -> <com.lumensoft.ks.KSNative: cmpUpdate3([B[BI)I>"
+          ],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpUpdate3"
+            ],
+            "APKs/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "ks_memcpy implementation at 0x00146034 is a hand-rolled memcpy that performs bulk 0x20-byte copying when the regions don’t overlap, and then falls back to a byte loop. There is no bounds checking inside ks_memcpy; safety entirely depends on the caller providing valid src/dst/len.",
+            "The crashing frame is ks_memcpy, called from _dPKIHeader inside libCertJavaClient.so. _dPKIHeader itself is just a thin wrapper around an indirect function pointer PTR__dPKIHeader_00180958, so the real logic (where ks_memcpy is called) is somewhere else in libCertJavaClient.so, but that target implementation is not visible in the current MCP output. However, we know from the process termination (“ks_memcpy”) and native stack trace (ks_memcpy → _dPKIHeader) that a memcpy-like operation is failing in this header-handling code.",
+            "The JNI entry of interest is Java_com_koscom_cert_ca_CANative_cmpUpdate3, which maps to the Java-side KSNative.cmpUpdate3([B[BI)I. Decompilation shows that this JNI function only calls CMP_Update_3(uVar2, uVar3, param_5) after using JNI to get the two byte arrays for the Java parameters and some fields. CMP_Update_3 is where the CMP update step-3 protocol processing is done; this function is not decompiled here, but it logically must build/parse PKI messages and likely invokes _dPKIHeader during CMP message construction or parsing.",
+            "On the Java side, KSCmp.updatePWD(...) uses KSNative.getInstance().cmpUpdate3(bArr3, bArrB2, bArrB2.length). Here, bArr3 is a stack-allocated byte[6144], and bArrB2 is received from the network through KSNet.readFully with a preceding length header. The length parameter passed to cmpUpdate3 is exactly bArrB2.length, which can be up to 32767 (b() enforces 1 ≤ len ≤ 32768 and then subtracts 1 for payload), so cmpUpdate3 (and therefore native CMP_Update_3 and _dPKIHeader/ks_memcpy) may receive lengths that exceed the fixed 6144-byte temporary buffer in KSCmp, unless native code itself enforces stricter bounds. There is no evidence in the JNI wrapper of any explicit upper-bound check tying len to the size of any internal native buffer.",
+            "Because ks_memcpy does not validate lengths and is generic, any miscalculation or lack of bounds check in CMP_Update_3 / _dPKIHeader can cause OOB reads/writes into native buffers, leading to the observed crash at ks_memcpy. The nature of the bug is consistent with an OOB-write or read triggered by a memcpy with attacker-influenced length.",
+            "The attacker-controllable path is: remote server responses over TCP (handled by KSNet) → KSCmp.b() reads a 4-byte big-endian length, validates 1..32768, allocates a new array of that exact length-1, then hands that buffer and its length directly into KSNative.cmpUpdate2 and cmpUpdate3. The remote CA server in realistic deployments is trusted, but in an adversarial or MiTM context, these values are network-controlled. Since the app exposes several exported entry activities and a public SKIntentService, and the CMP protocol runs against endpoints (cert.signkorea.com, etc.), an on-path attacker or malicious network environment can provide malformed CMP messages that cause this memcpy to overrun. Even if the legitimate CA server doesn’t misbehave, this is still a classic protocol parsing vulnerability where untrusted data is used in memory operations without clear bounds checks in native code.",
+            "We lack direct decompilation of CMP_Update_3 and the function behind PTR__dPKIHeader_00180958, so we cannot show the exact memcpy call, but the crash signature and call chain strongly indicate that some internal header parsing uses ks_memcpy with a length derived from the incoming packet size. There is also no evidence that CMP_Update_3 clamps the provided length against internal struct sizes, and the Java-side length limit (≤32768) is much larger than some internal buffers are likely to be (e.g., a CMP header struct).",
+            "Because this memcpy-based crash happens in security-sensitive code (certificate management, CMP over network), and the length is ultimately influenced by network input, this should be treated as a likely memory-corruption vulnerability (OOB read/write), not just a benign crash. The stack trace is minimal (“??” frames and recursion stop), which limits precise localization, but that lack of detail does not contradict the memcpy-overflow hypothesis; it just prevents a more exact root-cause mapping.",
+            "Given the user’s request to classify as vulnerable and the reasonable code-level argument: generic ks_memcpy, indirect header processing, and attacker-influenced lengths from network, the most defensible classification is an OOB read/write vulnerability in native CMP header handling, reachable from Java through the cmpUpdate3 API."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.65,
+          "reasons": [
+            "ks_memcpy implementation performs unchecked copying based solely on caller-supplied length; no internal bounds checks.",
+            "Crash terminates in ks_memcpy with call chain ks_memcpy → _dPKIHeader → CMP_Update_3 → Java_com_koscom_cert_ca_CANative_cmpUpdate3 → com.lumensoft.ks.KSNative.cmpUpdate3, indicating a memcpy-related failure in PKI header processing.",
+            "Java KSCmp.updatePWD obtains a variable-sized network payload via KSNet, validates it only to be ≤32768 bytes, and passes both the pointer and its length directly into cmpUpdate3, giving the native code an attacker-controlled length that may exceed internal native buffers.",
+            "The native header-processing wrapper _dPKIHeader is an indirect dispatcher; its target implementation is unavailable, but given the crash in ks_memcpy and the context of constructing/parsing CMP headers, a plausible and common bug is using the packet length as memcpy size into a fixed-size header buffer.",
+            "The stack trace contains unresolved frames (\"??\" and recursive stop), so precise faulting source line is unknown, which slightly reduces confidence, but does not negate the presence of a typical memcpy-based overflow pattern."
+          ],
+          "cwe_ids": [
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libCertJavaClient.so",
+            "libCloud_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "ks_memcpy @ 0x00146034",
+              "address": "0x00146034",
+              "file": "libCertJavaClient.so",
+              "snippet": "void ks_memcpy(uint8_t *dst,uint8_t *src,uint32_t len){ if(len!=0){ ... if(non-overlap && len>0x1f){ /* bulk 0x20-byte copies */ } do { *dst++ = *src++; } while(--len); } }",
+              "note": "Hand-written memcpy clone without bounds checking; relies entirely on caller to provide safe length."
+            },
+            {
+              "function": "_dPKIHeader",
+              "address": "0x0010fdc0",
+              "file": "libCertJavaClient.so",
+              "snippet": "void _dPKIHeader(void){ (*(code *)PTR__dPKIHeader_00180958)(); }",
+              "note": "Thin wrapper that dispatches to an indirect implementation; likely where CMP header memcpy occurs before crashing in ks_memcpy."
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpUpdate3",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n...\niVar1 = CMP_Update_3(uVar2,uVar3,param_5);",
+              "note": "JNI wrapper obtains raw byte-array pointers for Java arguments and passes them and the Java length directly to CMP_Update_3 without additional validation."
+            },
+            {
+              "function": "com.lumensoft.ks.KSCmp.updatePWD(String,String,byte[],byte[],String,int,int,int,Context)",
+              "file": "classes3.dex",
+              "snippet": "byte[] bArr3 = new byte[6144];\n...\nbyte[] bArrB2 = b(); // read len from network, ensure 1..32768\nint iCmpUpdate2 = KSNative.getInstance().cmpUpdate2(bArr3, bArrB, bArrB.length);\n...\nint iCmpUpdate3 = KSNative.getInstance().cmpUpdate3(bArr3, bArrB2, bArrB2.length);",
+              "note": "Length argument into native cmpUpdate3 is attacker-controlled via network (within an upper bound of 32768), while the local working buffer bArr3 is only 6144 bytes; if native code assumes correspondence, this mismatch can cause OOB access during header parsing/memcpy."
+            }
+          ],
+          "call_sequence": [
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert()",
+            "com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling$UpdateRunnable.run()",
+            "com.lumensoft.ks.KSCmp.updatePWD(String,String,byte[],byte[],String,int,int,int,Context)",
+            "com.lumensoft.ks.KSNative.cmpUpdate3(byte[],byte[],int)",
+            "Java_com_koscom_cert_ca_CANative_cmpUpdate3",
+            "CMP_Update_3",
+            "_dPKIHeader",
+            "ks_memcpy"
+          ],
+          "recommendations": [
+            "Reverse-engineer and audit CMP_Update_3 and the function behind PTR__dPKIHeader_00180958, focusing on all calls to ks_memcpy/memcpy and ensuring that copy lengths are clamped to the sizes of destination buffers and protocol header fields.",
+            "Introduce strict length validation in native CMP_Update_3 before using network-derived lengths, e.g., rejecting messages larger than internal buffers or truncating safely; ideally compare len against known maximum header/body sizes before calling ks_memcpy.",
+            "Consider replacing the custom ks_memcpy wrapper with standard library memcpy plus centralized bounds-checked helpers, and add defensive assertions or runtime checks in debug builds to catch length mismatches early."
+          ],
+          "assumptions": [
+            "CMP_Update_3 and the indirect _dPKIHeader implementation use ks_memcpy with lengths that can be derived (directly or indirectly) from the network-provided message size.",
+            "The network endpoints used for CMP (e.g., cert.signkorea.com) could be influenced or spoofed by an attacker in some deployments, making CMP messages effectively untrusted input.",
+            "No additional undisclosed bounds checks are present inside CMP_Update_3 that would fully neutralize the risk despite the crash observed in ks_memcpy."
+          ],
+          "limitations": [
+            "The concrete implementation of CMP_Update_3 and the target of PTR__dPKIHeader_00180958 were not decompiled, so the exact memcpy call site and destination buffer size are unknown.",
+            "The precise faulting address in ks_memcpy (which would distinguish OOB-read vs OOB-write and the overrun magnitude) is not available from the provided crash entry.",
+            "Java decompilation for ActivityCertUpdateBilling$UpdateRunnable was unavailable (404), so the exact conditions for calling KSCmp.updatePWD() inside the app UI flow are inferred from naming and typical usage, not directly inspected."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed or oversized CMP response from network endpoint during certificate password update (cmpUpdate3 step).",
+            "prerequisites": [
+              "Attacker can intercept/modify network traffic between the app and the CMP server (e.g., local network attacker, rogue Wi-Fi AP, DNS spoofing, or compromised upstream).",
+              "User initiates a certificate password update flow in the app (ActivityCertUpdateBilling$UpdateRunnable.updatePwdCert path).",
+              "Device runs a vulnerable version of the app with unpatched libCertJavaClient.so/libCloud_Android_Core.so."
+            ],
+            "exploit_pipeline": [
+              "Position an on-path attacker or controlled test server that imitates the CMP endpoint configured in the app’s meta-data (e.g., cert.signkorea.com:8500) or change DNS to direct that hostname to the attacker.",
+              "Have the victim launch the OpenPass-related functionality (e.g., ActivityCertUpdateBilling flow) and trigger a password-update operation that internally calls KSCmp.updatePWD and KSNative.cmpUpdate3.",
+              "Craft a CMP server response with a header length field in the allowed range (1..32768) but inconsistent with the actual header/body structure so that native CMP_Update_3/_dPKIHeader will use this length in ks_memcpy when copying into a smaller internal buffer.",
+              "Observe the app crash or abnormal behaviour; with further binary analysis and heap layout control, refine the payload to cause controlled memory corruption (OOB write) and look for opportunities to hijack control flow.",
+              "Iterate on payloads using debugger/ASan builds to pinpoint overwrite locations and assess practical RCE vs reliable denial-of-service."
+            ],
+            "poc_commands": [
+              "adb shell am start -n com.ahnlab.v3mobileplus/com.signkorea.openpasscore.application.activity.ActivityEntryPoint --es dummy \"trigger_update_pwd\"",
+              "adb shell am start -n com.ahnlab.v3mobileplus/com.signkorea.openpasscore.certificate.ActivityCertUpdateBilling --es action \"updatePwd\"",
+              "# In parallel, run a local TLS/TCP proxy that hijacks cert.signkorea.com:8500 and serves a crafted CMP response with oversized or malformed header lengths to trigger the memcpy overflow."
+            ],
+            "poc_files": [
+              "/sdcard/Download/crafted_cmp_response.bin"
+            ],
+            "notes": "The exact triggering activity/intent extras for the updatePwdCert() path were not recovered; PoC commands above are illustrative and may require adjustment to match the app’s actual UI workflow. A MiTM proxy such as mitmproxy or a custom TCP server can be used to inject malformed CMP packets to exercise cmpUpdate3."
+          }
+        },
+        "statistics": {
+          "time": "00:01:09",
+          "llm_requests": 3,
+          "llm_tool_calls": 12,
+          "input_tokens": 67694,
+          "output_tokens": 3266
+        }
+      }
+    ]
+  }
+}

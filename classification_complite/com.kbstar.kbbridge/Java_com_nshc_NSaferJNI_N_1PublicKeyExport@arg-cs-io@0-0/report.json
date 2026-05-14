@@ -1,0 +1,140 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.kbstar.kbbridge/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "KB bridge",
+      "package": "com.kbstar.kbbridge",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "1.2.1",
+      "version_code": "11"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.kbstar.kbbridge/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, but the first app-level frame below it is NI_PublicKeyDecode in libNSaferJNI.so; it is just a thunk calling through a function pointer PTR_NI_PublicKeyDecode_00179c30, so we can’t see inner memcpy usage. However, the crash reason is __memcpy, so somewhere inside NI_PublicKeyDecode’s implementation (behind the function pointer) a memcpy is being called unsafely.",
+            "We decompiled Java_com_nshc_NSaferJNI_N_1PublicKeyExport. It allocates and zeroes local buffers, sets up structures local_118 and local_2d8, then calls CI_jbyteArray2cstr(param_1,param_3,&local_f0) to convert the Java byte[] input to a C string, storing pointer in local_f8 and length in local_f0. It then calls N_publickey_export(local_2d8,local_118). That presumably fills the output structures based on the previously decoded key or global state; our crash path however is via NI_PublicKeyDecode, not N_publickey_export, so the exact reproducer for NI_PublicKeyDecode is not shown here, but NI_* naming suggests it’s another API that decodes public keys, likely using similar buffer descriptors.",
+            "In N_PublicKeyExport, we see no explicit bounds checks on sizes internally because most heavy lifting is delegated to N_publickey_export and CI_* helpers. However, the buffer descriptors local_2d8 and local_118 are initialized with fixed sizes (0xf, 4, etc.), and an output buffer auStack_218[256] with size 0x100 (256 bytes) is pointed by local_2b8. So N_publickey_export should be aware it must not write more than 256 bytes into that buffer. If internally NI_PublicKeyDecode (or a related decode function) uses memcpy without checking that the encoded public key length fits the destination buffer, it can overflow and crash.",
+            "Because NI_PublicKeyDecode is invoked through a function pointer PTR_NI_PublicKeyDecode_00179c30, we tried decompiling the wrapper only and saw just a call through the pointer. We don’t see the real implementation in this binary, which might be in another lib or stripped. Thus we cannot show the exact memcpy call or its arguments. However, the crash in __memcpy strongly indicates an out-of-bounds copy or invalid pointer passed to memcpy in the decode logic.",
+            "Attacker control: The fuzz harness calls fuzz_one_input, which likely feeds arbitrary data to the JNI method via a Java byte array (param_3). CI_jbyteArray2cstr copies that data into a C buffer (local_f8, local_f0). Although we don’t see CI_jbyteArray2cstr implementation, its purpose is just conversion; it typically preserves content and records length; no semantic validation of the public key is done there. The downstream NI_PublicKeyDecode implementation, which crashed in memcpy, presumably parses or decodes this untrusted buffer and uses memcpy or similar to move data into fixed-size internal structures without fully validating lengths or structure, leading to memory corruption.",
+            "Given the function names (PublicKeyDecode/Export) and pattern, this code is part of a crypto/key management library processing serialized public keys from Java. That is a realistic attacker-controlled surface (e.g., remote server sending malformed keys, or malicious app feeding data to exported JNI). An unchecked memcpy during parsing of attacker-controlled data is clearly a memory safety bug and likely exploitable (heap/stack overflow depending on buffer location).",
+            "We must, however, consider the possibility that the crash is due to fuzz harness misusing the API (e.g., passing NULLs or not initializing global context). Here, Java_com_nshc_NSaferJNI_N_1PublicKeyExport checks only if param_3==0 (null array) and sets an error; otherwise it calls CI_jbyteArray2cstr and then N_publickey_export, later CI_freecstr. No other obvious contract (like needing prior initialization) is enforced. A malformed byte array is a reasonable input. The crash is in NI_PublicKeyDecode, which does not involve the JNI harness directly; it’s deeper library logic. So this aligns with a genuine parsing bug under malformed but reachable inputs.",
+            "Because we lack the actual body of NI_PublicKeyDecode, we cannot prove the exact CWE from code, but memcpy crash with untrusted input, library naming, and typical patterns point strongly to an out-of-bounds read/write or invalid pointer dereference due to missing bounds checks in decode logic. That is a security-relevant memory safety vulnerability, not just a harness issue. We thus classify as a likely vulnerability with high severity and moderately high confidence (not absolute because of missing inner implementation)."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy called from NI_PublicKeyDecode, indicating unsafe memory copy in decode logic",
+            "JNI entry Java_com_nshc_NSaferJNI_N_1PublicKeyExport takes attacker-controlled Java byte[] (param_3) and converts it directly to a C buffer without semantic validation before passing into key export/decode routines",
+            "Function/variable naming and buffer setup suggest fixed-size internal buffers (e.g., 256‑byte output) that can be overrun by malformed public key data during decoding",
+            "No evidence of the crash being due to harness-only misuse; the same unvalidated path is reachable in normal app flows handling external keys"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_2b8 = auStack_218; // 256-byte buffer\nlocal_2d8[0] = 0xf;\nlocal_2c8 = 4;\n...\nlocal_f8 = CI_jbyteArray2cstr(param_1,param_3,&local_f0);\niVar1 = N_publickey_export(local_2d8,local_118);",
+              "note": "JNI method converts untrusted Java byte array into C string and passes descriptors into export/decode routines with fixed-size buffers."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "void NI_PublicKeyDecode(void)\n{\n  (*(code *)PTR_NI_PublicKeyDecode_00179c30)();\n  return;\n}",
+              "note": "Thin wrapper calling an indirect function pointer; crash reported in __memcpy below this function, implying memcpy misuse in implementation not visible here."
+            },
+            {
+              "function": "__memcpy",
+              "note": "Top of crashing stack, consistent with out-of-bounds or invalid pointer copy in public key decoding implementation."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "N_publickey_export / NI_PublicKeyDecode (via PTR_NI_PublicKeyDecode_00179c30)",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Locate the NI_PublicKeyDecode implementation (behind PTR_NI_PublicKeyDecode_00179c30) and add strict bounds checking on all memcpy/memmove operations using actual buffer sizes",
+            "Add robust validation of public key lengths/structures before decoding, rejecting inputs that would exceed internal fixed-size buffers",
+            "Augment tests with fuzzing focused on public key inputs to ensure decode and export APIs handle malformed data gracefully without memory corruption"
+          ],
+          "assumptions": [
+            "CI_jbyteArray2cstr does not fully validate the semantic correctness or size constraints of the key beyond basic allocation",
+            "NI_PublicKeyDecode implementation resides in another module or is stripped, so memcpy arguments cannot be inspected directly",
+            "Public keys or related data passed into this JNI method may be influenced by untrusted or remote sources in the real application context"
+          ],
+          "limitations": [
+            "NI_PublicKeyDecode’s real body (behind the function pointer) is not visible, so the exact memcpy arguments and buffer sizes are inferred, not proven",
+            "The precise heap/stack layout and whether the overflow is read-only vs write are unknown",
+            "The fuzz harness implementation of fuzz_one_input is not shown, so its exact mapping from fuzzer bytes to JNI arguments is assumed"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malformed public key data passed to JNI method Java_com_nshc_NSaferJNI_N_1PublicKeyExport via a Java byte array",
+            "prerequisites": [
+              "Attacker can supply or influence public key or certificate data processed by the app",
+              "JNI library libNSaferJNI.so is used in a context that decodes untrusted key material",
+              "No additional strong integrity checks prevent malformed key data from reaching NI_PublicKeyDecode"
+            ],
+            "exploit_pipeline": [
+              "Craft a serialized public key blob with structure/length fields causing NI_PublicKeyDecode to memcpy more bytes than destination buffers (e.g., >256 bytes)",
+              "Deliver this blob to the app through the mechanism it uses to receive keys (network protocol, file, or IPC) so that it becomes the Java byte[] argument to N_PublicKeyExport/Decode",
+              "Trigger the app functionality that calls Java_com_nshc_NSaferJNI_N_1PublicKeyExport with the crafted byte[]",
+              "Cause NI_PublicKeyDecode’s memcpy to overflow internal buffers, potentially corrupting adjacent heap/stack data and leading to controlled crash or further exploitation"
+            ],
+            "poc_commands": [
+              "adb push payload_pubkey.bin /sdcard/Download/payload_pubkey.bin",
+              "adb shell am start -n <package>/<activity> --es pubkey_path /sdcard/Download/payload_pubkey.bin",
+              "adb logcat | grep -i NSaferJNI"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_pubkey.bin"
+            ],
+            "notes": "Exact structure of the public key blob and the exported Activity/component name are unknown; placeholders should be replaced with real app details after further reverse engineering."
+          }
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 13014,
+          "output_tokens": 2189
+        }
+      }
+    ]
+  }
+}

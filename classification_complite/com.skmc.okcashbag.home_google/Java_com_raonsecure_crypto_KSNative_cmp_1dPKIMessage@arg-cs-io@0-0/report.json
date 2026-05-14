@@ -1,0 +1,260 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.skmc.okcashbag.home_google/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "OK Cashbag",
+      "package": "com.skmc.okcashbag.home_google",
+      "min_sdk": 23,
+      "target_sdk": 31,
+      "version_name": "6.8.8",
+      "version_code": "188"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "__rsksw_dPKIBody_genp",
+            "__rsksw_dPKIBody",
+            "__rsksw_dPKIMessage",
+            "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "__rsksw_dPKIBody",
+              "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+              "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame below allocators/sanitizers: stack shows RSKSW_memcpy → __rsksw_dPKIBody_genp → __rsksw_dPKIBody → __rsksw_dPKIMessage → Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage. No allocator/sanitizer frames; top frame RSKSW_memcpy in app lib is the crashing context.",
+            "Decompiled RSKSW_memcpy: custom memcpy-like routine with signature (dst, src, len). It explicitly copies param_3 bytes from param_2 to param_1. There is a branch for overlapping regions or small lengths (<0x10) that copies byte-by-byte in a loop from 0 to len-1 inclusive; otherwise it copies in 16-byte chunks via 8-byte loads/stores, then copies the tail bytes with a cascade of conditional byte assignments. Crucially, there is no bounds checking on dst/src; it assumes len and pointers are valid. This function itself is just a low-level primitive – whether it is unsafe depends on its callers’ validation.",
+            "Search for memcpy usage in the crash path: In __rsksw_dPKIBody_genp decompilation, we see three calls to RSKSW_memcpy. Two calls near the top omit the length parameter entirely (buggy decomp or different prototype?), but a later call has explicit length: RSKSW_memcpy(PTR_g_ctx_00158f08 + 0x984, param_1 + iVar3, local_c); here dst is a global context buffer, src is param_1 + iVar3 (pointer into parsed PKI message), len is local_c computed from ASN.1-like length fields in the input.",
+            "Need to understand how local_c is derived. In __rsksw_dPKIBody_genp: it first parses two SEQUENCEs via __RSKSW_dSEQUENCE, accumulating iVar2/iVar3 offsets. Then it sets local_c from a tag length byte: local_c = (uint)*(byte *)(param_1 + (iVar2 + iVar3 + 1)); then iVar2 = iVar2 + iVar3 + 2 + local_c; lVar5 = (long)iVar2; then calls __rsksw_get_len(param_1 + lVar5 + 1, &local_c); then sets local_c = iVar3 + 1 + local_c (where iVar3 is the return of get_len). Later, after more parsing, in the final section it repeats a similar pattern: parse SEQUENCE, read a length/tag byte into local_c, adjust iVar3, call __rsksw_get_len(param_1 + (long)iVar3 + 1, &local_c); set local_c = iVar2 + 1 + local_c; then call RSKSW_memcpy(dst, param_1 + iVar3, local_c).",
+            "Key question: are there any bounds checks before memcpy to ensure param_1 + iVar3 + local_c stays within the input buffer? In __rsksw_dPKIBody_genp itself, no such checks on the base/address are visible; it just relies on previous parsing helpers (__RSKSW_dSEQUENCE and __rsksw_get_len). These helper functions likely use the same param_1 pointer and local_c as out-parameters to ensure they don’t walk off the end, but we don’t see explicit checks in this snippet.",
+            "Backwards data-flow from len/local_c: local_c comes entirely from the message bytes at param_1 – first the length octet, then additional length bytes processed by __rsksw_get_len, which in turn likely interprets ASN.1 length encoding. There is no masking or upper bounding; it just uses those values to derive local_c and passes it directly to memcpy. Thus, an attacker controlling the message buffer can choose a large length and cause RSKSW_memcpy to read/write beyond the intended region, unless other layers restrict overall message size.",
+            "Backwards data-flow for dst: PTR_g_ctx_00158f08 + 0x984 is an internal global buffer in a crypto context. Its capacity is not obvious from this function, but subsequent code stores local_c into *(uint *)(puVar1 + 0x1184), which likely indicates how many bytes were written. There are no checks that local_c is below a maximum (e.g., buffer size). So there is a plausible buffer overflow on this internal buffer if local_c can exceed the allocated space.",
+            "Backwards data-flow for src: src = param_1 + iVar3. In __rsksw_dPKIBody_genp, param_1 is the pointer to the PKI body inside the ASN.1-encoded PKI message. Up the call chain, __rsksw_dPKIBody_genp is called from __rsksw_dPKIBody(param_1 + iVar1, local_10) where param_1 in __rsksw_dPKIBody is the pointer to body part inside message, and __rsksw_dPKIBody is called from __rsksw_dPKIMessage(param_1 + iVar1 + iVar2) where param_1 at that level comes from JNI. The ultimate base param_1 is the pointer to a buffer that comes from Java via the JNI cmp_1dPKIMessage entry point. That JNI function calls RSKSW_dPKIMessage(lVar2, param_4, param_5), where lVar2 is produced by a function pointer (**(code **)(*param_1 + 0x5c0))(param_1, param_3, &uStack_9); This likely corresponds to GetByteArrayElements/JNI to access a Java byte[] (PKI message) and returns a pointer and length via uStack_9. The native code does not check lengths itself; it relies on decoder helpers to keep within bounds.",
+            "Given the fuzzing context, the crash terminator is RSKSW_memcpy, which suggests that the fuzzer passed a crafted message that caused an out-of-bounds in this memcpy. Since RSKSW_memcpy itself doesn’t have explicit crash conditions, the likely failure is SIGSEGV due to dst or src pointing outside accessible memory. That implies the length/offset derived from the message was invalid/unchecked in some way.",
+            "Is this realistic outside fuzzing? This code is part of RAONSecure crypto (PKI decoding). PKI messages often come from remote servers or external inputs. Java side presumably passes user/remote-supplied PKIMessage bytes to KSNative_cmp_1dPKIMessage. We saw that cmp_1dPKIMessage JNI does not clamp or validate the size/structure; it just decodes. So a malicious or malformed PKI message from a network, NFC, file, etc. could trigger this same path in production, causing a native crash (DoS) and potentially overwriting internal buffers if the dst happens to be writable and large enough, which is a classic out-of-bounds write vulnerability.",
+            "We should consider whether __RSKSW_dSEQUENCE and __rsksw_get_len might ensure local_c stays within total message length; but that is not visible. Even if they do, the final memcpy uses local_c computed as (lenFieldResult + 1 + local_cBytes), which might equal the encoded length of an element. If the ASN.1 length is validated to not exceed available data, then local_c will not exceed remaining bytes, preventing over-read; however, there is still no guarantee that the global buffer at PTR_g_ctx_00158f08+0x984 is that large. Unless earlier init limits accepted message sizes to that buffer’s max, there is risk of overflow. With no evidence of such clamping in this snippet, and the presence of multiple memcpy calls directly from attacker-controlled length, the safer conclusion is that this is a likely memory corruption bug (CWE-787).",
+            "Classification: This is not just a harness issue; values originate from decoded ASN.1 in user-controlled PKI message, and there is a direct unbounded memcpy into a fixed internal buffer. Fuzz harness likely passed arbitrary bytes but that matches realistic malformed input. Therefore this crash represents a genuine vulnerability, likely exploitable as an out-of-bounds write/read in libRSKSW_Android_Core.so. Given lack of exact buffer size, classify severity as high with confidence ~0.7-0.8 (likely but not 100% proven)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.75,
+          "reasons": [
+            "RSKSW_memcpy is a custom memcpy with no internal bounds checks; it trusts length and pointers from callers.",
+            "__rsksw_dPKIBody_genp computes the memcpy length (local_c) directly from ASN.1 length bytes in the PKI message without enforcing an upper bound or verifying against any buffer size.",
+            "Destination of memcpy is a fixed-size buffer in a global context (PTR_g_ctx_00158f08+0x984), with no visible check that local_c fits within that buffer, creating a potential out-of-bounds write.",
+            "Source and length are fully attacker-influenced via the PKI message bytes passed from Java through the JNI bridge, so malformed PKI messages can realistically reach this code path.",
+            "Crash in RSKSW_memcpy during fuzzing is consistent with an out-of-bounds access arising from these unchecked lengths rather than a harness-only misuse."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_memcpy",
+              "address": "0x00137cbc",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "void RSKSW_memcpy(undefined8 *param_1,undefined8 *param_2,uint param_3) {\n  ...\n  if (param_3 != 0) {\n    if ((param_2 < param_1 + 2 && param_1 < param_2 + 2) || (param_3 < 0x10)) {\n      // byte-wise copy of param_3 bytes\n      do {\n        *(undefined1 *)((long)param_1 + lVar3) = *(undefined1 *)((long)param_2 + lVar3);\n        lVar3 = lVar3 + 1;\n      } while (lVar3 != (ulong)(param_3 - 1) + 1);\n    } else {\n      // 16-byte chunk copy, then tail bytes\n      ... // series of stores up to param_3\n    }\n  }\n}",
+              "note": "Custom memcpy with no length or bounds validation; any incorrect length from caller leads directly to memory over-read/write."
+            },
+            {
+              "function": "__rsksw_dPKIBody_genp",
+              "address": "0x0011e50c",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "iVar2 = __RSKSW_dSEQUENCE(param_1,&local_c);\n...\nlocal_c = (uint)*(byte *)(param_1 + (iVar2 + iVar3 + 1));\niVar2 = iVar2 + iVar3 + 2 + local_c;\n...\niVar3 = __rsksw_get_len(param_1 + lVar5 + 1,&local_c);\npuVar1 = PTR_g_ctx_00158f08;\nlocal_c = iVar3 + 1 + local_c;\n...\nlocal_c = (uint)*(byte *)(param_1 + (iVar2 + iVar3 + 1));\n...\niVar2 = __rsksw_get_len(param_1 + (long)iVar3 + 1,&local_c);\npuVar1 = PTR_g_ctx_00158f08;\nlocal_c = iVar2 + 1 + local_c;\nRSKSW_memcpy(PTR_g_ctx_00158f08 + 0x984,param_1 + iVar3,local_c);\n*(uint *)(puVar1 + 0x1184) = local_c;",
+              "note": "memcpy length is derived from unbounded ASN.1 length fields read from attacker-controlled PKI body; no visible bounds check relative to destination buffer."
+            },
+            {
+              "function": "__rsksw_dPKIMessage",
+              "address": "0x0011ec7c",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "iVar1 = __RSKSW_dSEQUENCE(param_1,auStack_c);\nif (-1 < iVar1) {\n  iVar2 = __rsksw_dPKIHeader(param_1 + iVar1,auStack_c);\n  if (-1 < iVar2 && (iVar3 = __rsksw_dPKIBody(param_1 + (iVar1 + iVar2)), -1 < iVar3)) {\n    iVar3 = __rsksw_dPKIProtection(param_1 + iVar1,iVar2 + iVar3);\n  }\n}",
+              "note": "Parses entire PKI message from base pointer param_1, then passes pointer to body into __rsksw_dPKIBody, which in turn calls __rsksw_dPKIBody_genp and eventually RSKSW_memcpy."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+              "address": "0x001118b4",
+              "file": "libRSKSW_Android_Core.so",
+              "snippet": "lVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,&uStack_9);\nuVar1 = RSKSW_dPKIMessage(lVar2,param_4,param_5);\nif (lVar2 != 0) {\n  (**(code **)(*param_1 + 0x600))(param_1,param_3,lVar2,2);\n}",
+              "note": "JNI bridge obtains a pointer to Java data (likely PKI message byte array) and passes it directly into RSKSW_dPKIMessage without explicit validation of size vs. internal buffer capacities."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage @ 0x001118b4",
+            "RSKSW_dPKIMessage (indirect, not explicitly mapped)",
+            "__rsksw_dPKIMessage @ 0x0011ec7c",
+            "__rsksw_dPKIBody @ 0x0011eb48",
+            "__rsksw_dPKIBody_genp @ 0x0011e50c",
+            "RSKSW_memcpy @ 0x00137cbc"
+          ],
+          "recommendations": [
+            "Add explicit bounds checks before each RSKSW_memcpy call in __rsksw_dPKIBody_genp and related functions to ensure length does not exceed both the remaining input size and the size of the destination context buffers.",
+            "Harden ASN.1 parsing helpers (__RSKSW_dSEQUENCE, __rsksw_get_len, etc.) to validate that claimed lengths are within the overall message length and reject oversize or inconsistent encodings before memcpy is invoked.",
+            "Introduce centralized safe-copy helpers that take buffer size alongside length and enforce checks, and add fuzz tests and regression cases targeting malformed PKI messages to prevent reintroduction."
+          ],
+          "assumptions": [
+            "PTR_g_ctx_00158f08+0x984 points to a fixed-size buffer whose maximum capacity is smaller than the maximum possible ASN.1 length value that can be encoded by attacker-controlled input.",
+            "__RSKSW_dSEQUENCE and __rsksw_get_len do not fully clamp lengths against the size of the global context buffers, only against available input bytes, leaving potential for destination overflows.",
+            "The JNI bridge method passes untrusted PKI message bytes from Java (potentially from remote servers or files) into the native decoder without additional validation."
+          ],
+          "limitations": [
+            "Exact size of the destination buffer at PTR_g_ctx_00158f08+0x984 is unknown, so the overflow is inferred from missing checks rather than directly observed.",
+            "Decompiled helpers (__RSKSW_dSEQUENCE, __rsksw_get_len) were not fully inspected; they might enforce some bounds at the input level, but no evidence they protect the internal destination buffers.",
+            "Fuzzing crash report indicates termination in RSKSW_memcpy but does not include register/memory state or the exact length used, limiting precise characterization of the overflow direction (over-read vs. overwrite)."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a malformed PKIMessage byte array to the KSNative_cmp_1dPKIMessage JNI method from Java, with ASN.1 length fields crafted to cause oversized memcpy into internal context buffers.",
+            "prerequisites": [
+              "Ability to cause the application to decode attacker-controlled PKIMessage data via KSNative_cmp_1dPKIMessage (e.g., by controlling network responses, certificates, or file inputs).",
+              "Knowledge or fuzzing capability to craft malformed ASN.1-encoded PKI messages that reach the genp (0x16) PKIBody type and exercise the vulnerable memcpy path.",
+              "Target app installed on an Android device with vulnerable libRSKSW_Android_Core.so version."
+            ],
+            "exploit_pipeline": [
+              "Craft an ASN.1-encoded PKIMessage whose body includes a type-0x16 (genp) element with deliberately oversized or inconsistent length fields, such that __rsksw_dPKIBody_genp computes a large local_c value for RSKSW_memcpy.",
+              "Deliver this crafted PKIMessage to the application in whatever format it expects (e.g., over the network, as part of a server response, or via a file/intent that the app processes).",
+              "Ensure the Java layer forwards the raw PKIMessage bytes into KSNative_cmp_1dPKIMessage, which calls RSKSW_dPKIMessage and decodes the message, eventually invoking __rsksw_dPKIBody_genp.",
+              "When RSKSW_memcpy is called with the attacker-controlled length, the decoder copies beyond the bounds of its destination context buffer or beyond the source, leading to memory corruption or a crash (denial-of-service) in libRSKSW_Android_Core.so.",
+              "Iterate payload structure via fuzzing or guided analysis to try to transform the overflow from pure DoS into a controlled overwrite that could, in theory, influence adjacent control data."
+            ],
+            "poc_commands": [
+              "adb push crafted_pkimessage.bin /sdcard/Download/pkimessage_overflow.bin",
+              "adb shell am start -n <PACKAGE_NAME>/<ACTIVITY_NAME> --es pkimessage_path /sdcard/Download/pkimessage_overflow.bin",
+              "adb logcat | grep -i \"RSKSW\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/pkimessage_overflow.bin"
+            ],
+            "notes": "Exact Java API and transport for PKIMessage into KSNative_cmp_1dPKIMessage are unknown; PoC assumes an activity or component that accepts a file path or raw bytes and passes them to the native method. A more precise PoC would require identifying the specific Java method invoking KSNative_cmp_1dPKIMessage in this app."
+          }
+        },
+        "statistics": {
+          "time": "00:01:09",
+          "llm_requests": 5,
+          "llm_tool_calls": 12,
+          "input_tokens": 37850,
+          "output_tokens": 4484
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "RSKSW_memcpy",
+          "StackTrace": [
+            "RSKSW_memcpy",
+            "__rsksw_dCertificate",
+            "__rsksw_dcapubs",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "LibMap": {
+            "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "RSKSW_memcpy",
+              "__rsksw_dcapubs",
+              "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is RSKSW_memcpy, a custom memcpy implementation; process termination label suggests crash occurred here, likely due to invalid src/dst/len causing an out-of-bounds access.",
+            "Decompiled RSKSW_memcpy shows it performs raw byte and 16-byte chunk copies without any bounds checking on src/dst beyond param_3 != 0 and simple overlap/size heuristic. It fully trusts caller-provided pointers and length.",
+            "This is essentially equivalent to standard memcpy semantics: undefined behavior if buffers are too small. To call this a vulnerability, I must see that attacker-controlled input can drive param_1/param_2/param_3 to inconsistent sizes without prior validation, and that this situation is realistically reachable, not purely an internal bug or harness misuse.",
+            "RSKSW_memcpy is a generic utility; the crash trace only shows __rsksw_dCertificate → __rsksw_dcapubs → RSKSW_memcpy, but I don't have the decompilation of __rsksw_dCertificate. However, __rsksw_dcapubs is visible and contains a parsing loop over an ASN.1-like certificate blob, using __rsksw_dCertificate repeatedly until failure or end-of-blob. This logic manipulates offsets (iVar1, iVar2, iVar3, local_10) all derived from parsing operations.",
+            "__rsksw_dcapubs takes a single long param_1, interpreted as pointer to a certificate blob; length is in local_10 returned by __RSKSW_dCONTEXTSPECIFIC/SEQUENCE. There is some special-casing for (*(int *)PTR_g_ctx == 400) with a check on bytes at param_1 + iVar1, but no global bounds checks are visible beyond ensuring iVar3 < local_10 in the while loop. __rsksw_dCertificate presumably parses one certificate at offset param_1 + iVar3 and returns its length iVar2; loop continues while iVar3 < local_10 and iVar2 >= 0.",
+            "If __rsksw_dCertificate miscomputes the length, or if input data is malformed in a way that confuses it, it could cause RSKSW_memcpy to read/write past the end of the blob or target structure. However, in the current decompiled __rsksw_dcapubs and Java JNI wrapper, there is no direct evidence of unbounded external input feeding a length directly into RSKSW_memcpy without any structural parsing/validation; the vulnerable spot is more likely in __rsksw_dCertificate or the lower-level decoding functions, which I haven't seen.",
+            "The JNI entry Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage uses an indirect JNIEnv function pointer to obtain a buffer from a Java object (param_3) into stack variable uStack_9, then calls RSKSW_dPKIMessage(lVar2,param_4,param_5). That function (not decompiled here) presumably performs ASN.1/PKI parsing and at some point calls __rsksw_dcapubs, then __rsksw_dCertificate, which eventually uses RSKSW_memcpy. JNI bridge uses stack canary and checks lVar2 != 0 before cleanup, but does not perform explicit length bounds checking at this level.",
+            "From threat model perspective, PKI message contents (param_3 / lVar2) are very likely attacker-controlled (e.g., from network or untrusted input). ASN.1 parsing is notoriously complex. Given that a crash is already observed in memcpy during such parsing, it is plausible there's an out-of-bounds access caused by misparsed attacker data.",
+            "However, I must separate: (a) RSKSW_memcpy itself as a generic unsafe function (expected behavior like libc memcpy), vs (b) higher-level parsing bug in __rsksw_dCertificate or neighbors. Without __rsksw_dCertificate and RSKSW_dPKIMessage code, I cannot show a specific unchecked memcpy where len derives directly and insufficiently validated from attacker-controlled length fields; I only know there is some loop and length arithmetic, which may be correct or may contain a bug.",
+            "The fuzz harness may bypass normal application sanity checks and feed malformed PKI messages that production code never sees (e.g., messages already validated at a higher protocol layer). But from the provided JNI, native function is directly exposed to Java and parses arbitrary lVar2 derived from a Java argument; app logic likely allows external PKI blobs (e.g., server certs), so malformed inputs are realistic.",
+            "Despite this, I lack a concrete decompiled call from __rsksw_dCertificate to RSKSW_memcpy or buffer allocation sizes, so I can't prove that buffer size and copy length become inconsistent in a way controlled by attacker. Crash reason “RSKSW_memcpy” only shows symptom, not root cause. Industry practice is not to call the use of memcpy itself a vulnerability; the bug is in caller if lengths are wrong. Here, we can't see the caller's code.",
+            "Therefore, I should classify this as not-confirmed vulnerability with low confidence. It’s suggestive of a real parsing bug but not provable with the current evidence. Also, even if there is out-of-bounds in ASN.1 parsing, it might only be a bounded over-read causing a crash, without clear exploitability for code execution.",
+            "Given the requirement not to over-claim, I’ll mark is_vulnerable=false, confidence ~0.3 (uncertain, leaning towards harness/logic issue), severity null, and reflect that the likely issue is a deeper ASN.1 parsing bug not visible here. Recommendations: further reverse __rsksw_dCertificate and RSKSW_dPKIMessage, run ASan builds, and try to get crashing input to confirm OOB and attacker control."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.3,
+          "reasons": [
+            "Crash occurs in custom RSKSW_memcpy, which behaves like standard memcpy and does not itself enforce bounds; undefined behavior is expected if callers pass inconsistent pointers/lengths.",
+            "The visible caller __rsksw_dcapubs performs structured parsing with internal length arithmetic; without decompiling __rsksw_dCertificate and RSKSW_dPKIMessage, there is no clear proof that attacker-controlled length fields directly cause out-of-bounds copies.",
+            "Fuzzing likely supplied malformed PKI messages beyond what the production app normally accepts; the observed crash is a symptom of a deeper, unseen parsing or validation bug rather than direct evidence of an exploitable vulnerability in the exposed code paths."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so"
+          ],
+          "evidence": [
+            {
+              "function": "RSKSW_memcpy",
+              "file": "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "void RSKSW_memcpy(undefined8 *param_1,undefined8 *param_2,uint param_3) { /* raw byte/16-byte copy, no bounds checks beyond size==0 */ }",
+              "note": "Crash site is generic memcpy-like helper; correctness depends entirely on callers providing valid buffers and lengths."
+            },
+            {
+              "function": "__rsksw_dcapubs",
+              "file": "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "iVar1 = __RSKSW_dCONTEXTSPECIFIC(param_1,&local_10,auStack_c);\nif ((-1 < iVar1) && (iVar2 = __RSKSW_dSEQUENCE(param_1 + iVar1,&local_10), -1 < iVar2)) {\n  iVar1 = iVar1 + iVar2;\n  ...\n  while ((iVar2 = iVar3, iVar3 < local_10 &&\n         (iVar2 = __rsksw_dCertificate(param_1 + iVar3), -1 < iVar2))) {\n    iVar3 = iVar3 + iVar2;\n  }\n}",
+              "note": "Parsing loop over a certificate blob; potential for miscalculated offsets, but actual memcpy usage is hidden inside __rsksw_dCertificate which we have not analyzed."
+            },
+            {
+              "function": "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage",
+              "file": "APKs_FINAL/com.skmc.okcashbag.home_google/lib/arm64-v8a/libRSKSW_Android_Core.so",
+              "snippet": "lVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,&uStack_9);\nuVar1 = RSKSW_dPKIMessage(lVar2,param_4,param_5);",
+              "note": "JNI bridge passes buffer pointer obtained from Java into PKI message parser but includes no explicit length validation at this level."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_raonsecure_crypto_KSNative_cmp_1dPKIMessage -> RSKSW_dPKIMessage -> __rsksw_dcapubs -> __rsksw_dCertificate -> RSKSW_memcpy"
+          ],
+          "recommendations": [
+            "Decompile and audit RSKSW_dPKIMessage and __rsksw_dCertificate to locate concrete memcpy/memmove call sites and verify buffer size vs. copy length handling.",
+            "Reproduce the crash with logging or AddressSanitizer-enabled builds to determine whether the failing memcpy is out-of-bounds and how its length arguments are derived from input.",
+            "Add robust bounds checks and length validation in the PKI parsing routines before any memcpy/memmove, and consider using safer abstractions instead of custom memcpy."
+          ],
+          "assumptions": [
+            "PKI message contents passed from Java to native code can be influenced by untrusted input (e.g., network, external files).",
+            "The crash report’s mention of RSKSW_memcpy corresponds to a faulting access inside this function and not an unrelated abort.",
+            "Additional parsing functions like RSKSW_dPKIMessage and __rsksw_dCertificate call RSKSW_memcpy internally during ASN.1/PKI decoding."
+          ],
+          "limitations": [
+            "Code for RSKSW_dPKIMessage and __rsksw_dCertificate is not provided, preventing direct inspection of the memcpy call sites and length derivations.",
+            "No concrete crashing input or AddressSanitizer logs are available to prove an out-of-bounds read/write or to characterize exploitability.",
+            "Application-level usage patterns (what data flows into KSNative_cmp_dPKIMessage in production) are unknown, so reachability from real-world inputs cannot be firmly established."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:50",
+          "llm_requests": 4,
+          "llm_tool_calls": 5,
+          "input_tokens": 26017,
+          "output_tokens": 2414
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,326 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "@string/app_name",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+          "JavaCallGraph": [],
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Tooling is unavailable (connection refused), so I must reason only from the symbolic stack, names, and general patterns.",
+            "The top native frame is __memcpy, which indicates a buffer copy; Decode_DER_ASN1_ST and CERT_Load are application-level routines within libUbikeyJni.so handling DER/ASN.1 certificate parsing and loading.",
+            "In absence of disassembly, I infer that CERT_Load likely takes DER-encoded certificate data (from Java or fuzz harness) and passes internal pointers/lengths into Decode_DER_ASN1_ST, which then calls memcpy when decoding fields.",
+            "A crash in memcpy almost always indicates an out-of-bounds read/write or invalid pointer passed as src/dst, unless it is a deliberate sanitizer abort. There is no indication of ASan/Scudo frames, only a direct memcpy frame, so this looks like an actual memory corruption or at least bounds violation at the library level.",
+            "The fuzz harness entry is fuzz_one_input, meaning the immediate caller controls the certificate blob passed into the JNI entry point, and therefore controls the DER data that Decode_DER_ASN1_ST parses.",
+            "DER/ASN.1 parsing is highly input-dependent; if Decode_DER_ASN1_ST does not robustly validate lengths from the DER before memcpy, attacker-controlled length/offset values can cause memcpy to read or write beyond allocated buffers, leading to exploitable conditions.",
+            "Because tooling is down, I cannot prove exactly which parameter (src, dst, len) is bad or how validation is (not) done; however, the combination of function naming, memcpy crash, and fuzzing context strongly suggests a genuine parse-time memory safety bug, not a harness artifact like a NULL env pointer.",
+            "JNI bridge Java_com_ubikey_jni_UbikeyJni_jGetSubjectName is called directly from fuzz_one_input in this setup; in a real app it would be called from Java with certificate material likely coming from untrusted sources (smartcard, network, etc.), so the path is realistically attacker-triggerable.",
+            "There is no evidence of the crash being due only to impossible harness behavior (like passing a null JNIEnv); the stack shows a clean application parser chain with no allocator/sanitizer at top, reinforcing that it is likely a genuine unsafe memcpy in cert parsing.",
+            "Given these factors, I classify this as a likely memory-corruption vulnerability (out-of-bounds read/write) in ASN.1/DER decoding triggered by crafted input, with high potential impact (RCE or at least compromise of the native process)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy immediately below app-level ASN.1/DER parsing functions (Decode_DER_ASN1_ST, CERT_Load), a classic site for input-driven memory bugs.",
+            "Input is directly controlled by fuzz_one_input calling the JNI method that ultimately invokes Decode_DER_ASN1_ST, so attacker-controllable DER data drives the failing memcpy.",
+            "No signs of harness-only misuse (e.g., impossible JNI env) or sanitizer/allocator aborts; stack frames correspond to realistic certificate loading and decoding flow."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "__memcpy",
+              "note": "Top crash frame; typically indicates invalid pointer/length leading to out-of-bounds access."
+            },
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "file": "libUbikeyJni.so",
+              "note": "Called immediately before memcpy during DER/ASN.1 decoding; likely passes derived pointers/lengths from untrusted DER to memcpy."
+            },
+            {
+              "function": "CERT_Load",
+              "file": "libUbikeyJni.so",
+              "note": "Certificate loading routine that feeds DER-encoded data into Decode_DER_ASN1_ST."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "file": "libUbikeyJni.so",
+              "note": "JNI entry that exposes certificate parsing to Java; in harness, invoked by fuzz_one_input with arbitrary data."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+            "CERT_Load",
+            "Decode_DER_ASN1_ST",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Reverse-engineer Decode_DER_ASN1_ST and CERT_Load to locate the exact memcpy call site and ensure all lengths/offsets derived from DER are strictly validated against buffer sizes before copying.",
+            "Add robust bounds checking and error handling in the DER/ASN.1 parsing code; reject malformed certificates rather than trusting embedded lengths.",
+            "Consider enabling compiler hardening (ASan/UBSan, stack canaries, FORTIFY_SOURCE) in debug builds to better pinpoint the exact overrun location and add runtime protection in production builds."
+          ],
+          "assumptions": [
+            "fuzz_one_input supplies arbitrary DER/certificate-like data to the JNI method arguments.",
+            "Decode_DER_ASN1_ST performs memcpy using lengths/offsets derived from the attacker-controlled DER without sufficient validation.",
+            "The crash is not caused by an external sanitizer or allocator but by the library’s own memcpy invocation."
+          ],
+          "limitations": [
+            "Ghidra MCP tools were unavailable, so no direct decompiled code or exact memcpy argument tracing was possible.",
+            "Java callgraph information was empty, so precise Java-side control/validation of the input could not be inspected.",
+            "Exact nature of the memory violation (out-of-bounds read vs write vs null deref) at memcpy is unknown without further debugging."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:25",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 11671,
+          "output_tokens": 1297
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+          "JavaCallGraph": [],
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Tools are unavailable (connection refused), so I must reason from the high-level crash info only.",
+            "Crash in Compute_ASN1_ST_ChildNum during parsing of ASN.1 into X509 cert structures suggests logic or bounds issue when computing number of children in an ASN.1 structure.",
+            "Call stack: Compute_ASN1_ST_ChildNum -> Convert_ASN1_to_X509_TBS_CERT -> Convert_ASN1_to_X509_CERT -> CERT_Load -> JNI bridge -> fuzz_one_input.",
+            "fuzz_one_input indicates the fuzzer controls the data that CERT_Load parses (likely raw certificate/ASN.1 bytes). In the real app, those bytes would come from external sources (server certs, smart card/USB token, NFC, etc.), so ASN.1 parsing is an attacker-influenced surface.",
+            "Process termination reason is just the top function name, not an allocator abort string. No explicit indication of OOB read/write or UAF, but ASN.1 child-count computation bugs are a classic source of memory safety issues (CWE‑119/787) if the count drives loops, indexing, or allocation.",
+            "However, without Ghidra, I cannot confirm whether Compute_ASN1_ST_ChildNum performs unchecked pointer arithmetic or if it simply detects inconsistency and aborts safely (e.g., returns error or triggers assert). A benign, internal assert-based abort in response to malformed ASN.1 would still be a DoS but may or may not be considered a serious vuln depending on reachability and whether it is expected behavior.",
+            "Stack doesn’t show malloc/free/asan/scudo frames, so this may be a controlled abort via abort()/assert() rather than a crash from memory corruption. Fuzz framework label “Process Termination : Compute_ASN1_ST_ChildNum” also hints at a deliberate termination in that function (e.g., deliberate call to exit/abort on invalid structure).",
+            "Given fuzzing context, even a hard abort on malformed untrusted certificate constitutes at least a denial-of-service vulnerability if the app can be fed such data (e.g., via MITM or rogue token). Since this is certificate parsing for jGetSubjectName, a remote endpoint providing a malformed certificate could realistically trigger the same code in production.",
+            "But severity is mitigated if this only kills the current process in a client app, not a system-wide service, and we have no strong evidence of memory corruption or control-flow hijack—just a crash under malformed ASN.1.",
+            "Therefore I classify it as a likely logic/robustness bug leading to DoS, but not confirmed memory corruption. I’ll mark as vulnerable with medium confidence and medium severity, with CWE‑400/248 style (unhandled error/DoS) rather than classic memory safety CWEs.",
+            "Assumptions: CERT_Load operates on attacker-controlled ASN.1; Compute_ASN1_ST_ChildNum doesn’t fully validate length/child count before using it and aborts on inconsistency instead of returning an error."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.65,
+          "reasons": [
+            "Crash occurs in ASN.1 certificate parsing path (Compute_ASN1_ST_ChildNum → Convert_ASN1_to_X509_CERT → CERT_Load) operating on untrusted data provided by the fuzzer and likely by remote peers in production.",
+            "Process termination appears to be triggered from within Compute_ASN1_ST_ChildNum itself, suggesting an unhandled malformed-structure condition or assert rather than graceful error handling, enabling attacker-driven denial of service.",
+            "Even if memory corruption is not confirmed, abort-on-bad-input in a security-critical parser for certificates is a robustness flaw exploitable for repeated DoS."
+          ],
+          "cwe_ids": [
+            "CWE-400",
+            "CWE-248"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APK_Final/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "file": "libUbikeyJni.so",
+              "note": "Topmost crashing frame in ASN.1→X509 conversion chain, indicating failure while computing ASN.1 child count."
+            },
+            {
+              "function": "CERT_Load",
+              "file": "libUbikeyJni.so",
+              "note": "Loads/parses certificate before calling Convert_ASN1_to_X509_CERT; fuzzer input likely mapped to certificate bytes."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "file": "libUbikeyJni.so",
+              "note": "JNI bridge used by Java side to obtain X.509 subject name, indicating this path is used with external certificates in real usage."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Inspect and decompile Compute_ASN1_ST_ChildNum to verify how child counts and lengths are computed and whether assertions/aborts are used instead of returning errors.",
+            "Add strict bounds and consistency checks on ASN.1 length and child counters before use, and convert any abort/assert on malformed input into graceful error returns to the caller.",
+            "Create targeted regression tests with malformed ASN.1 structures to ensure CERT_Load and downstream functions robustly reject bad input without process termination."
+          ],
+          "assumptions": [
+            "CERT_Load consumes ASN.1/certificate data ultimately controlled by an external peer or token, not only by trusted static resources.",
+            "The observed termination is caused by an internal abort/assert in Compute_ASN1_ST_ChildNum rather than allocator/sanitizer behavior.",
+            "No higher-level sandbox is mitigating the impact of repeated crashes (i.e., process restarts are observable DoS)."
+          ],
+          "limitations": [
+            "Ghidra MCP connection failed, so no direct view of Compute_ASN1_ST_ChildNum implementation or exact faulting instruction.",
+            "No Java call graph was available, so precise external entrypoints and data sources for certificates are inferred from naming only.",
+            "No concrete crash reason (e.g., SIGSEGV vs abort) or register/stack dump was provided, limiting determination of memory corruption versus controlled abort."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:28",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 11659,
+          "output_tokens": 1392
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Get_DER_Child",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+          "JavaCallGraph": [],
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Get_DER_Child",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Tools are unreachable so I cannot inspect the actual native code, but I must still provide an assessment based on the structured crash info.",
+            "The top native frame is __memcpy, an allocator/CRT function; the first app-level frame below it is Decode_DER_ASN1_ST in libUbikeyJni.so, followed by Get_DER_Child, Convert_ASN1_to_X509_CERT, CERT_Load, then the JNI bridge Java_com_ubikey_jni_UbikeyJni_jGetSubjectName.",
+            "The crash reason is Process Termination : __memcpy, which typically indicates a bad pointer or out-of-bounds length passed into memcpy. This is classic memory-corruption territory if the arguments are derived from attacker-controlled input.",
+            "The library appears to be a custom crypto / certificate parsing component (functions like Decode_DER_ASN1_ST, Convert_ASN1_to_X509_CERT, CERT_Load). These operate on DER-encoded ASN.1 structures, commonly user- or server-provided certificates or keys. When fuzzed, malformed inputs are provided to these routines via CERT_Load -> Convert_ASN1_to_X509_CERT -> Get_DER_Child -> Decode_DER_ASN1_ST -> memcpy.",
+            "Given the fuzz harness entry is fuzz_one_input and the JNI bridge is jGetSubjectName, the likely real-world code path is that Java calls into native to extract the subject name from an X.509 cert provided as a byte array or similar. In production, those bytes can be remotely controlled (e.g., from a TLS server certificate, file, QR code, etc.), so attacker influence is realistic.",
+            "The absence of the Java call graph is explained by this being a fuzz harness invocation (fuzz_one_input directly or indirectly triggers the JNI entry). The fuzzer is likely feeding arbitrary DER to CERT_Load, revealing that the native parsing code does not fully validate lengths or structure before performing memcpy operations.",
+            "Without decompilation I cannot see the precise memcpy call site, but the function naming strongly suggests manual ASN.1 tree walking and child extraction, which is notoriously error-prone. A crash specifically in memcpy rather than a graceful parse failure strongly indicates out-of-bounds read/write or invalid pointer, not just an intentional abort. This matches canonical CWE-119/787 class bugs frequently found in custom cert parsers.",
+            "Nothing in the stack indicates this is a harness-only artifact like passing a guaranteed-null pointer that real code would never pass; instead the chain is coherent and exactly what the app’s JNI would use. Fuzzing simply expands the input space but does not by itself make the path unrealistic. Therefore, if fuzzing can cause memcpy to crash from bad DER, then a malicious certificate or ASN.1 blob in production could also crash or potentially be exploited.",
+            "Given missing concrete code, I cannot prove whether the overwrite is attacker-controlled enough for RCE, but out-of-bounds memory access is very likely. At minimum this is a reliable native DoS; more likely it is a general memory corruption issue and should be treated as high severity until code review proves otherwise.",
+            "Thus I classify this as a likely genuine vulnerability: unsafe ASN.1 / DER parsing in libUbikeyJni.so leading to invalid memcpy, probably CWE-787/119, triggered by attacker-supplied certificate bytes via the JNI jGetSubjectName path."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy called from custom ASN.1/DER parsing routines (Decode_DER_ASN1_ST/Get_DER_Child) in libUbikeyJni.so, indicative of out-of-bounds or invalid-pointer access.",
+            "Parsing of DER/X.509 data is typically driven by untrusted, remotely-supplied certificate bytes; fuzz harness reflects this realistic threat model rather than an artificial harness-only null-pointer scenario.",
+            "Lack of graceful error handling (process termination in memcpy) suggests missing bounds/length validation in the parser, consistent with CWE-787/CWE-119 style memory corruption vulnerabilities."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Decode_DER_ASN1_ST",
+              "file": "libUbikeyJni.so",
+              "note": "Top application-level frame below __memcpy in stack trace; likely contains the memcpy invocation operating on parsed DER buffers."
+            },
+            {
+              "function": "Get_DER_Child",
+              "file": "libUbikeyJni.so",
+              "note": "Intermediate ASN.1 tree navigation function; probably computes offsets/lengths for child elements used by Decode_DER_ASN1_ST."
+            },
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetSubjectName",
+              "file": "libUbikeyJni.so",
+              "note": "JNI entry point used by app and fuzz harness; likely accepts DER-encoded certificate bytes from Java and passes them to CERT_Load/Convert_ASN1_to_X509_CERT."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetSubjectName -> CERT_Load -> Convert_ASN1_to_X509_CERT -> Get_DER_Child -> Decode_DER_ASN1_ST -> __memcpy"
+          ],
+          "recommendations": [
+            "Manually audit Decode_DER_ASN1_ST, Get_DER_Child, and related CERT_Load/Convert_ASN1_to_X509_CERT code for all memcpy/memmove calls; ensure all lengths are validated against actual buffer sizes derived from trusted bounds.",
+            "Add robust DER/ASN.1 validation (including length and nesting checks) before parsing; on any inconsistency, abort parsing and return an error instead of continuing to compute offsets and copying memory.",
+            "Integrate continuous fuzzing of cert-parsing routines with ASan/UBSan to confirm fixes and detect further out-of-bounds or use-after-free issues in libUbikeyJni.so."
+          ],
+          "assumptions": [
+            "The DER/X.509 data processed by CERT_Load/Convert_ASN1_to_X509_CERT ultimately comes from attacker-controllable inputs (e.g., remote certificates, files, or user-provided blobs).",
+            "The fuzz harness exercises the same parsing code paths used in production rather than a special test-only mode with different invariants."
+          ],
+          "limitations": [
+            "Could not decompile native functions or inspect exact memcpy argument expressions due to unavailable MCP tools.",
+            "Java-level call graph details for jGetSubjectName are missing, so the precise source and validation of the DER bytes in the real app are inferred from naming and typical usage patterns rather than directly observed."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:22",
+          "llm_requests": 2,
+          "llm_tool_calls": 1,
+          "input_tokens": 11471,
+          "output_tokens": 1416
+        }
+      }
+    ]
+  }
+}

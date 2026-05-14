@@ -1,0 +1,216 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Get_DER_Child",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Get_DER_Child",
+            "setPublicKey",
+            "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Get_DER_Child",
+              "setPublicKey",
+              "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+              "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below JNI is Get_DER_Child / setPublicKey; Ghidra shows Get_DER_Child(param_1,param_2,param_3) walking ASN.1-encoded data using Compute_ASN1_* helpers, while Java_com_ubikey_jni_UbikeyJni_jsetPublicKey allocates and copies attacker-controlled bytes then calls setPublicKey, which likely parses into DER and calls Get_DER_Child.",
+            "The immediate crash is reported generically as 'Process Termination : Get_DER_Child' (no allocator frame given), so I focus on code safety rather than a specific instruction. Get_DER_Child uses a loop: it computes total length iVar2 = Compute_ASN1_ValueLength(param_1); then initializes local_34/38/3c/30 to 0 and loops while (local_30 = local_30 + local_38 + local_3c, local_30 != iVar2). Inside, it reads bVar1 from *(byte *)(*(long *)(param_1 + 0x10) + (long)local_30); then updates local_30++ and recomputes length and value size via Compute_ASN1_LengthSize and Compute_ASN1_ValueLength_from_LO. It exits when local_30==iVar2 or when Decode_DER_ASN1_STRING / jump-table returns.",
+            "The loop bounds depend on iVar2, derived from Compute_ASN1_ValueLength(param_1). That helper presumably interprets the ASN.1 structure and returns the encoded value length; Get_DER_Child then trusts this as a hard boundary and uses it versus local_30. Out-of-bounds risks arise if iVar2 is inconsistent with the actual underlying buffer length, or if local_38/local_3c computations are wrong. However, Compute_ASN1_LengthSize and Compute_ASN1_ValueLength_from_LO are always called before adding their return values to local_30 in the next iteration, and the code checks if local_3c == -1 then returns 0. So there is some internal error checking, but not full visible validation of param_1’s underlying buffer length.",
+            "param_1 is an ASN.1 context object: the code dereferences *(long *)(param_1 + 0x10) as a base pointer to the encoded bytes. There is no check in Get_DER_Child that this length (total ASN.1 data size) is at least iVar2. If the object is constructed from arbitrary, untrusted bytes, Compute_ASN1_ValueLength might overflow or mis-compute lengths, but that would still be internal to the ASN.1 parser. Without seeing its implementation, I cannot prove an OOB. What I can say: the loop condition local_30 != iVar2 and repeated increments up to iVar2 should keep accesses within [0, iVar2) if iVar2 itself is valid; if iVar2 is larger than the actual buffer, out-of-bounds reads become possible.",
+            "Now trace attacker control. JNI jsetPublicKey: it calls a virtual method at *param_1+0x558 to get iVar1 (length of a Java array or buffer, likely from param_3, a jbyteArray or ByteBuffer). Then it casts to size_t, allocates malloc(__size), and calls another virtual at *param_1+0x5c0 to get pointer __src to the Java buffer contents. It then memset(__s,0,__size) and memcpy(__s,__src,__size). There are no bounds checks relative to the Java array length here; it assumes iVar1 and __src correspond. For typical JNI, the length and pointer come from the JVM and are consistent. The fuzzer, however, may be giving inconsistent or malformed VM state causing a crash, but in a real app, Java arrays lengths are controlled by the Java runtime.",
+            "The attacker influence: Java_com_ubikey_jni_UbikeyJni_jsetPublicKey copies the entire Java input into native memory and passes it to setPublicKey(__s, const1, const2, const3). setPublicKey is an indirect call via PTR_setPublicKey_001816a8; we don't see its body, but given naming and Get_DER_Child’s behavior, setPublicKey likely builds an ASN.1 context around __s and then walks it with Get_DER_Child. That means malformed or adversarial key data can influence param_1 contents and therefore all lengths and tags parsed in Get_DER_Child.",
+            "Because the fuzzer is the entrypoint (fuzz_one_input → JNI → native), the input is effectively fully attacker-controlled. setPublicKey likely calls Get_DER_Child with a param_1 pointing to some structure describing the DER. If Get_DER_Child mis-parses due to attacker-controlled bytes and causes a crash (e.g., by computing invalid lengths, negative values aside from -1, or calling a wrong jump-table entry), that would indeed be a vulnerability (potential OOB read or DoS). However, from the present decompilation we see that Get_DER_Child: (a) checks param_1 != 0, (b) checks local_3c==-1 as an error and returns 0, (c) only dereferences within the base pointer plus local_30 with local_30 bounded by iVar2. No obvious unchecked write, only reads and function calls.",
+            "The jump-table call: if param_3-1 < 0x30 or param_3 == 0x31, it does an indirect call via (&DAT_00172040 + *(int *)(&DAT_00172040 + (ulong)(param_3 - 1) * 4)). That uses param_3 as an index into a function pointer table, but param_3 here is not directly attacker-controlled: it is one of the arguments passed to Get_DER_Child (param_2, param_3). setPublicKey likely supplies constant tag numbers when looking for child objects of a known type. Even if param_3 came from input, bounds checking (param_3-1 < 0x30 or ==0x31) prevents out-of-range indexing; so RCE risk via function pointer is low.",
+            "Given the limited frames, the crash reason only says 'Process Termination : Get_DER_Child' without specifying SIGSEGV or ASAN details. It might be a logic abort inside Compute_ASN1_* or Decode_DER_ASN1_STRING, not necessarily a memory safety event. The fuzz harness itself passes arbitrary bytes as key data, which in real app may never be accepted: Java may validate key format, or the upstream protocol may limit size and structure, but we don’t see the Java side for UbikeyJni.jsetPublicKey, and Jadx wasn’t queried for it here. Even without Java validation, an ASN.1 parser crash under malformed key could be a DoS, but current evidence does not show an actual out-of-bounds or use-after-free.",
+            "Therefore, classification: the presence of internal length computations and switchable behaviour indicates potential for parser bugs, but with what we can actually see, the function respects its computed bounds and has error checks. The fuzz crash might be due to harness misuse (invalid JNI environment, corrupted Java object handle, etc.) or deeper helper bugs we haven’t decompiled. Since we must base the decision on clear code-level evidence of unsafe behaviour with attacker control, and we lack a demonstrated invalid access, I classify this crash as not clearly a vulnerability, with moderate uncertainty.",
+            "Impact/severity if it were a bug would likely be at most DoS in key parsing (application crash when importing a malformed public key). There is no direct write primitive or obvious info leak. So I mark is_vulnerable=false, confidence moderate-low because the deeper helpers are opaque, and annotate assumptions/limitations accordingly."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Get_DER_Child walks ASN.1 data using computed lengths with loop bounds tied to total value length; visible code keeps index within [0,total_length) and checks for error (-1) from helpers",
+            "JNI bridge copies attacker-controlled bytes but only performs memcpy into malloced buffer; setPublicKey implementation (where real parsing happens) is hidden behind a function pointer, so we lack proof of memory corruption",
+            "Crash reason only states generic termination at Get_DER_Child, with no explicit evidence of out-of-bounds, UAF, or exploitable state beyond potential parser logic failure/DoS"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+              "address": "00115e40",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n(**(code **)(*param_1 + 0x600))(param_1,param_3,__src,2);\nuVar2 = setPublicKey(__s,DAT_00189bd0 + 0x28,DAT_00189bd0 + 0x38,DAT_00189bd0 + 0x40);",
+              "note": "JNI bridge allocates native buffer based on Java-side length and copies entire input without extra validation before calling setPublicKey"
+            },
+            {
+              "function": "Get_DER_Child",
+              "address": "00122e04",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = Compute_ASN1_ValueLength(param_1);\nlocal_34 = 0; local_38 = 0; local_3c = 0; local_30 = 0;\nwhile (local_30 = local_30 + local_38 + local_3c, local_30 != iVar2) {\n  if (param_2 == local_34) {\n    bVar1 = *(byte *)(*(long *)(param_1 + 0x10) + (long)local_30);\n    ...\n    if (param_3 - 1 < 0x30 || param_3 == 0x31) {\n      uVar3 = (*(code *)(&DAT_00172040 + *(int *)(&DAT_00172040 + (ulong)(param_3 - 1) * 4)))();\n      return uVar3;\n    }\n  }\n  local_30 = local_30 + 1;\n  local_38 = Compute_ASN1_LengthSize(*(long *)(param_1 + 0x10) + (long)local_30);\n  local_3c = Compute_ASN1_ValueLength_from_LO(*(long *)(param_1 + 0x10) + (long)local_30);\n  if (local_3c == -1) { return 0; }\n  local_34 = local_34 + 1;\n}",
+              "note": "Loop uses computed total length and per-element sizes; visible checks prevent negative length from propagating but we cannot see helper implementations"
+            },
+            {
+              "function": "setPublicKey",
+              "address": "00111740",
+              "file": "libUbikeyJni.so",
+              "snippet": "void setPublicKey(void) { (*(code *)PTR_setPublicKey_001816a8)(); }",
+              "note": "Actual public key parsing and likely calls into Get_DER_Child via function pointer; body not visible, so we cannot confirm exact failure mode"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey @ 00115e40",
+            "setPublicKey @ 00111740",
+            "Get_DER_Child @ 00122e04"
+          ],
+          "recommendations": [
+            "Decompile and audit Compute_ASN1_ValueLength, Compute_ASN1_LengthSize, and Compute_ASN1_ValueLength_from_LO to confirm they enforce strict bounds on the underlying buffer length",
+            "Instrument Get_DER_Child and setPublicKey with ASan/UBSan and re-run fuzzing to see if any out-of-bounds or undefined behaviour is reported beyond generic termination",
+            "Add explicit length and structure validation on the DER/ASN.1 buffer before iterating, and ensure function pointer jump tables are fully bounds-checked on tag values"
+          ],
+          "assumptions": [
+            "setPublicKey uses Get_DER_Child internally to parse DER/ASN.1 from the buffer provided by JNI",
+            "JNI virtual methods used to obtain length and pointer for Java buffers behave correctly under normal runtime and are only inconsistent in the fuzz harness",
+            "Crash reason does not encode ASAN/segfault details, so we infer from code rather than from exact faulting instruction"
+          ],
+          "limitations": [
+            "Implementation of setPublicKey is hidden behind a function pointer and not available, so the exact call pattern into Get_DER_Child is inferred",
+            "ASN.1 helper functions (Compute_ASN1_ValueLength, Compute_ASN1_LengthSize, Compute_ASN1_ValueLength_from_LO) are not decompiled, limiting visibility into bounds checking",
+            "Java-side UbikeyJni.jsetPublicKey method was not inspected, so potential pre-validation of input keys is unknown"
+          ]
+        },
+        "statistics": {
+          "time": "00:02:10",
+          "llm_requests": 4,
+          "llm_tool_calls": 7,
+          "input_tokens": 24777,
+          "output_tokens": 3060
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Init_SEED",
+            "setPublicKey",
+            "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Init_SEED",
+              "setPublicKey",
+              "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+              "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level frame below allocator: __memcpy is the crashing function; next frame is Init_SEED then setPublicKey then JNI. The decompiled JNI function shows the memcpy call site directly in Java_com_ubikey_jni_UbikeyJni_jsetPublicKey, so that is the relevant app-level frame.",
+            "Inspect decompiled JNI: it uses a JNIEnv function pointer at offset 0x558 to get a length iVar1 from param_3 (likely a jbyteArray or similar). That value is cast to size_t as __size. Then it calls another JNIEnv function at 0x5c0 to obtain a pointer __src to the array contents, allocates __size bytes via malloc, zeroes them via memset, and copies __size bytes from __src to __s via memcpy. No local bounds checks are present; it fully trusts the length returned from JNI.",
+            "Consider safety of this pattern: When using GetArrayLength and GetByteArrayElements or similar, the JVM ensures that the internal buffer has at least that many bytes, so memcpy with that size is normally safe as long as malloc succeeds and length is non-negative. malloc can fail, returning NULL; here, they immediately call memset(__s,0,__size) and memcpy(__s,__src,__size) without checking for NULL, so NULL dereference is possible for large sizes. That triggers a crash in memcpy, consistent with the stack. This is a bug in native code (lack of allocation failure check).",
+            "Assess attacker control: __size is derived from Java array length. In normal app flows this length can be influenced by attacker-controlled data (e.g., network or user input converted to a byte array). Fuzzer is exercising jsetPublicKey with arbitrary param_3. So an attacker that can supply a very large array could force malloc failure and thus cause a crash. That is a realistic denial-of-service in contexts where the JNI is exposed via app logic, though not clearly memory corruption beyond NULL deref. Because malloc may also succeed for big but not enormous sizes, this pattern does not by itself cause out-of-bounds writes; memcpy length equals both allocation size and source length from JVM, which should be consistent.",
+            "Check for deeper vulnerability paths: setPublicKey is an indirect function pointer thunk out of libUbikeyJni.so via PTR_setPublicKey_001816a8; we lack its body here. However, the crash occurs before calling setPublicKey (in memcpy). Even if setPublicKey had its own issues, the stack shows termination in __memcpy called from JNI. The fuzz crash is best explained by NULL dest or possibly corrupted JNI env in the harness; but given pattern, NULL dest on malloc failure is clear. No indication that memcpy length comes from unvalidated native arithmetic that could overflow, so CWE-787 does not apply directly.",
+            "Classify: This is unsafe memory handling (no NULL check after malloc) reachable from attacker-controllable input and can lead to app crash (DoS) but not clear code execution. So it is a genuine vulnerability, with impact limited to denial-of-service. Mark as vulnerable with medium severity and moderately high confidence (~0.8) because the code-level flaw is clear but the exploitability beyond crash is low and attack surface depends on how the Java side is wired (not fully inspected here)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.82,
+          "reasons": [
+            "JNI function Java_com_ubikey_jni_UbikeyJni_jsetPublicKey calls malloc(__size) with attacker-influenced size then unconditionally calls memset and memcpy on the returned pointer",
+            "If malloc fails, __s is NULL and subsequent memset/memcpy cause a crash (NULL dereference) inside __memcpy, matching the observed stack trace",
+            "__size originates from a Java array length (via JNIEnv function pointer) which is realistically controllable by an attacker through Java-level inputs, enabling a repeatable denial-of-service"
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-252"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey",
+              "address": "00115e40",
+              "file": "libUbikeyJni.so",
+              "snippet": "__size = (size_t)iVar1;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);",
+              "note": "No check that __s != NULL before memset/memcpy; length comes from JNIEnv call using param_3."
+            },
+            {
+              "function": "Init_SEED",
+              "address": "00111590",
+              "file": "libUbikeyJni.so",
+              "snippet": "void Init_SEED(void) { (*(code *)PTR_Init_SEED_001815d0)(); }",
+              "note": "Wrapper; not the memcpy caller"
+            },
+            {
+              "function": "setPublicKey",
+              "address": "00111740",
+              "file": "libUbikeyJni.so",
+              "snippet": "void setPublicKey(void) { (*(code *)PTR_setPublicKey_001816a8)(); }",
+              "note": "Indirect call; crash happens before reaching this function"
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jsetPublicKey @ 00115e40",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Add a NULL check after malloc(__size) in Java_com_ubikey_jni_UbikeyJni_jsetPublicKey and abort gracefully if allocation fails",
+            "Optionally cap the maximum acceptable key buffer size at a sane limit on both Java and native sides before allocating",
+            "Add defensive logging and error returns instead of crashing on allocation failure in all similar JNI entry points handling large attacker-controlled buffers"
+          ],
+          "assumptions": [
+            "param_3 in Java_com_ubikey_jni_UbikeyJni_jsetPublicKey is derived from a Java array whose length can be influenced by untrusted input",
+            "The fuzzer is accurately modeling possible Java-level calls and not introducing impossible JNI states"
+          ],
+          "limitations": [
+            "Java-side callgraph and input sources for jsetPublicKey were not inspected in detail",
+            "Behavior of indirect setPublicKey implementation is unknown and not analyzed here"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:04",
+          "llm_requests": 3,
+          "llm_tool_calls": 6,
+          "input_tokens": 17863,
+          "output_tokens": 1518
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is NI_PublicKeyDecode; decompilation shows it’s just an indirect call through PTR_NI_PublicKeyDecode_00175cb8 with no arguments, so any memcpy call is inside the vendor crypto implementation behind that function pointer, which we cannot see in this binary. The JNI bridge Java_com_nshc_NSaferJNI_N_1PublicKeyExport is available and decompiled. It prepares two local structures/buffers (local_118 and local_2d8) with fixed sizes and values, then if param_3 != 0 it converts a Java byte[] to a C string via CI_jbyteArray2cstr(param_1, param_3, &local_f0). The returned pointer local_f8 and its length local_f0 are then passed only indirectly: N_publickey_export(local_2d8, local_118) is called, but neither local_f8 nor local_f0 is passed as parameters, so the user-controlled key data is likely stored inside the local_118/local_2d8 objects via previous calls or global state. The crash is reported at __memcpy, but our visible JNI function does no explicit memcpy/memmove; all memory operations we see are bounded memset calls on fixed-size stack buffers (0xc0/0x100 bytes) and CI_cstr2jbyteArray, which is another wrapper we cannot inspect here. Because the immediate frame NI_PublicKeyDecode is a thin thunk calling through a function pointer, and the implementation of that pointer target is missing (probably in another, not-analyzed lib), we cannot confirm what memcpy is doing or whether attacker-controlled length pointers are involved. However, the path is clearly reachable from JNI with fuzzable input: fuzz_one_input → JNI bridge → CI_jbyteArray2cstr reading Java bytearray of attacker-controlled length. No validation on local_f0 is done in JNI before calling N_publickey_export/NI_PublicKeyDecode, and we know some memcpy inside the cryptographic decode path is crashing. This strongly suggests an out-of-bounds read/write driven by key material size/format. At the same time, there are gaps: we cannot see N_publickey_export, NI_PublicKeyDecode’s target, or CI_jbyteArray2cstr, so it is possible the crash arises from internal library assumptions not met by the harness (e.g., NULL or absurd length passed in ways production Java never would). But the JNI wrapper does not enforce any invariants beyond non-NULL param_3; it accepts arbitrary-length byte arrays from Java and pushes them into the native crypto stack. On mobile, public key export/parse functions must handle untrusted data (e.g., remote certificates). Therefore, a memcpy-based crash in this path is very likely due to an internal bounds bug rather than purely an environmental issue. Because we lack the precise failing memcpy call, I’ll classify it as a likely memory-corruption vulnerability with medium–high confidence, but not fully confirmed.",
+            "The app_native_function is NI_PublicKeyDecode (or more precisely its target function pointer), with Java_com_nshc_NSaferJNI_N_1PublicKeyExport as the JNI entry. The library involved is libNSaferJNI.so. The key evidence is: (1) JNI bridge accepts unvalidated attacker-controlled byte arrays; (2) NI_PublicKeyDecode is a thunk into crypto decode code; (3) crash happens in __memcpy, which is a classic symptom of size or pointer misuse; (4) there are no visible bounds checks on key length at the JNI layer. The main uncertainty is the exact location and conditions of memcpy inside the hidden implementation. Still, from a security-assessment standpoint, this path should be treated as vulnerable until the vendor proves internal validation, because malformed but realistic key material can be supplied via network or user input and trigger this crash."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.75,
+          "reasons": [
+            "Crash in __memcpy during NI_PublicKeyDecode suggests out-of-bounds memory access in crypto decode implementation",
+            "JNI bridge Java_com_nshc_NSaferJNI_N_1PublicKeyExport accepts attacker-controlled byte arrays with no visible length/format validation before hitting native decode/export logic",
+            "NI_PublicKeyDecode is an indirect call into opaque vendor code; missing checks at JNI boundary mean malformed keys can realistically reach vulnerable memcpy"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-120"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "address": "0014f830",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_f8 = CI_jbyteArray2cstr(param_1,param_3,&local_f0);\niVar2 = N_publickey_export(local_2d8,local_118);\nif (iVar2 == 0) {\n  uVar3 = CI_cstr2jbyteArray(param_1,local_2b8,local_2b0);\n  ...\n}\nCI_freecstr(&local_f8);\nN_clear_object(local_2d8,2);\nN_clear_object(local_118,2);",
+              "note": "JNI bridge converts arbitrary Java byte[] to C string and passes resulting structures into native export/decode logic without performing length checks."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "address": "0010b3d0",
+              "file": "libNSaferJNI.so",
+              "snippet": "void NI_PublicKeyDecode(void)\n{\n  (*(code *)PTR_NI_PublicKeyDecode_00175cb8)();\n  return;\n}\n",
+              "note": "Thin wrapper calling function pointer; implementation (where memcpy resides) is opaque but is on the crash stack as calling __memcpy."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport @ 0014f830",
+            "N_publickey_export",
+            "NI_PublicKeyDecode @ 0010b3d0",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Audit and decompile the NI_PublicKeyDecode target and N_publickey_export to locate memcpy calls and ensure lengths are validated against buffer sizes before copying",
+            "Add explicit input-length and format validation on the Java/JNI side before invoking CI_jbyteArray2cstr and native decode/export routines",
+            "Harden memcpy callers to use safer patterns (e.g., memmove with checked lengths, explicit bounds checks) and add tests with malformed and oversized public keys/certificates"
+          ],
+          "assumptions": [
+            "Java-side code can pass arbitrary-length key byte arrays from potentially untrusted sources to N_PublicKeyExport",
+            "The function pointer target of NI_PublicKeyDecode performs a memcpy that is responsible for the crash",
+            "fuzz_one_input mimics realistic JNI usage and does not introduce impossible states beyond malformed key data"
+          ],
+          "limitations": [
+            "Implementation behind PTR_NI_PublicKeyDecode_00175cb8 is not visible, so the exact memcpy misuse is inferred, not proven",
+            "No view of CI_jbyteArray2cstr, N_publickey_export, or Java call sites to confirm absence of all validations",
+            "Stack trace does not show the exact frame where memcpy is invoked, limiting the precision of CWE classification"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:47",
+          "llm_requests": 3,
+          "llm_tool_calls": 5,
+          "input_tokens": 18486,
+          "output_tokens": 1726
+        }
+      }
+    ]
+  }
+}

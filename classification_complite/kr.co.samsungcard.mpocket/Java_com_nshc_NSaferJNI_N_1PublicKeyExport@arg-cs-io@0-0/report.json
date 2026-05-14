@@ -1,0 +1,109 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.co.samsungcard.mpocket/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "kr.co.samsungcard.mpocket",
+      "min_sdk": 23,
+      "target_sdk": 35,
+      "version_name": "5.4.306",
+      "version_code": "504306"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "NI_PublicKeyDecode",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.samsungcard.mpocket/lib/arm64-v8a/libNSaferJNI.so": [
+              "NI_PublicKeyDecode",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "Java_com_nshc_NSaferJNI_N_1PublicKeyExport"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, next is NI_PublicKeyDecode which is just an indirect call through PTR_NI_PublicKeyDecode_00179c30. No body here to inspect memcpy arguments, so memcpy usage must be inside the target of that function pointer, which we cannot see from current decompile. However, NI_PublicKeyDecode has no parameters, so memcpy length and buffers are not directly controlled by JNI inputs at this level.",
+            "Next frame is Java_com_nshc_NSaferJNI_N_1PublicKeyExport, which we have fully decompiled. This is the JNI entry. It allocates and clears local buffers, then if param_3 (a jbyteArray from Java/fuzzer) is non-zero, it converts it to a C string via CI_jbyteArray2cstr(param_1, param_3, &local_f0). That produces local_f8 pointer and local_f0 length; both are later freed via CI_freecstr. Then N_publickey_export(local_2d8, local_118) is called. N_publickey_export likely fills the object/metadata structures based on internal state or previously parsed key data, not on local_f8 directly (which is never passed to it).",
+            "NI_PublicKeyDecode is not called directly in this JNI function. The crash stack shows NI_PublicKeyDecode above Java_com_nshc_NSaferJNI_N_1PublicKeyExport, suggesting that somewhere inside this JNI function or its callees, NI_PublicKeyDecode got invoked, but there is no explicit call in current decompile. This suggests either inlined or function-pointer usage we are not seeing in this short snippet, or a discrepancy between symbol names/addresses used in the stack vs decompile result. Nevertheless, the important question is whether attacker-controlled data from CI_jbyteArray2cstr / local_f8 flows into any memcpy inside NI_PublicKeyDecode or its target.",
+            "In the decompiled JNI, local_f8 and local_f0 are only passed to CI_cstr2jbyteArray (when exporting result back to Java) and CI_freecstr. They are not passed to N_publickey_export or any NI_* function. That implies that the key material exported/decoded is likely derived from some internal key store or previous state, not from the caller-provided buffer. The crash in __memcpy within NI_PublicKeyDecode thus most likely arises from malformed or inconsistent internal data/state rather than from direct user-controlled input. Under the fuzzing harness, state may be uninitialized or previous native calls that set up key context are not made, so NI_PublicKeyDecode may be operating on null/uninitialized internal pointers, causing memcpy to crash.",
+            "Because the fuzz harness entry is fuzz_one_input directly calling Java_com_nshc_NSaferJNI_N_1PublicKeyExport without the real app's initialization sequence, there is a strong possibility this is an environment/harness issue (missing initialization, invalid global structs) rather than a genuine vulnerability reachable in production. We do not see any raw, unchecked memcpy or buffer usage tied to the fuzzed input: all JNI inputs are converted via helper functions and not forwarded into decode/export primitives.",
+            "We also lack visibility into the implementation behind PTR_NI_PublicKeyDecode_00179c30. It might take its parameters from global or thread-local state set elsewhere in the library. Without evidence that user-controlled data controls memcpy length or buffer sizes there, we cannot assert a security-relevant memory corruption; it could be a null-deref or invalid internal pointer due to misused API sequence, translating to at most local DoS for this app.",
+            "Given current evidence, classify this as non-vulnerability / harness-induced or at most functional robustness bug: the JNI function does not perform wild memory operations with untrusted input, and the crashing memcpy is buried in an internal decoder that uses internal state. No proof of attacker-controlled corruption is visible. Confidence is moderate-high that this is not a security issue, but some uncertainty remains due to opaque NI_PublicKeyDecode implementation."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy inside NI_PublicKeyDecode, which is an indirect call with no arguments; its implementation and memcpy arguments are not visible",
+            "JNI function Java_com_nshc_NSaferJNI_N_1PublicKeyExport converts attacker input to a C string but never passes that buffer or its length into NI_PublicKeyDecode or N_publickey_export",
+            "NI_PublicKeyDecode likely operates on internal/global state; under fuzz harness, missing initialization may produce invalid pointers leading to memcpy crash (functional bug / harness issue)",
+            "No evidence that attacker-controlled values influence memcpy size or target buffer; impact appears limited to local app crash"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "libNSaferJNI.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+              "file": "libNSaferJNI.so",
+              "snippet": "local_f8 = CI_jbyteArray2cstr(param_1,param_3,&local_f0);\niVar1 = N_publickey_export(local_2d8,local_118);\nif (iVar1 == 0) {\n  uVar2 = CI_cstr2jbyteArray(param_1,local_2b8,local_2b0);\n  if ((local_f8 != 0) && (local_f0 != 0)) {\n    uVar5 = CI_cstr2jbyteArray(param_1);\n  }\n  ...\n}\nCI_freecstr(&local_f8);\nN_clear_object(local_2d8,2);\nN_clear_object(local_118,2);",
+              "note": "Attacker-controlled input converted to C string but not passed into public key decode/export primitives; internal helpers handle conversions and freeing."
+            },
+            {
+              "function": "NI_PublicKeyDecode",
+              "file": "libNSaferJNI.so",
+              "snippet": "void NI_PublicKeyDecode(void)\n{\n  (*(code *)PTR_NI_PublicKeyDecode_00179c30)();\n  return;\n}",
+              "note": "Wrapper around function pointer; implementation and its memcpy usage not visible, arguments come from internal state not JNI params."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_nshc_NSaferJNI_N_1PublicKeyExport",
+            "N_publickey_export",
+            "NI_PublicKeyDecode",
+            "__memcpy"
+          ],
+          "recommendations": [
+            "Instrument and inspect NI_PublicKeyDecode implementation to verify memcpy bounds and add internal sanity checks on key structures",
+            "Ensure proper initialization of any key/context structures before calling N_publickey_export / NI_PublicKeyDecode to avoid null or inconsistent internal state",
+            "Augment fuzzing harness to more accurately mirror real app initialization and key-loading sequences before invoking JNI export"
+          ],
+          "assumptions": [
+            "NI_PublicKeyDecode uses internal/global context rather than direct JNI parameters",
+            "Fuzz harness may be bypassing required initialization that the real app performs",
+            "The memcpy in NI_PublicKeyDecode may be crashing due to null or invalid internal pointers not under direct attacker control"
+          ],
+          "limitations": [
+            "Implementation behind PTR_NI_PublicKeyDecode_00179c30 not visible; exact memcpy arguments unknown",
+            "Call path from N_publickey_export to NI_PublicKeyDecode is inferred, not directly decompiled",
+            "No visibility into CI_* helper implementations or validations on C-string conversions"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:32",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 13014,
+          "output_tokens": 1708
+        }
+      }
+    ]
+  }
+}

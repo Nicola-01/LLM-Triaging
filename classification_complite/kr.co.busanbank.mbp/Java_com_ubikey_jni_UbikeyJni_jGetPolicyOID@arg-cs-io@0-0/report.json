@@ -1,0 +1,210 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "부산은행 모바일뱅킹",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "Compute_ASN1_ST_ChildNum",
+          "StackTrace": [
+            "Compute_ASN1_ST_ChildNum",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63: j()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14: e()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63$a: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14$h: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Compute_ASN1_ST_ChildNum",
+              "Convert_ASN1_to_X509_TBS_CERT",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Compute_ASN1_ST_ChildNum, which is just an indirect jump through PTR_Compute_ASN1_ST_ChildNum; the real logic is elsewhere, likely in a vendor ASN.1 parser. Crash reason string is just the function name, so exact signal/PC are unknown.",
+            "We must still do mandatory memcpy-style data-flow from the first app-level frame below allocators. That is Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID, which we decompiled. It allocates a buffer based on the Java byte[] length: it calls a JNI env method to get length (iVar2), casts to size_t (__size), then calls another env method to get a pointer to the array contents (__src). It then does malloc(__size), memset(__s,0,__size), memcpy(__s,__src,__size), and later frees __s. No length mismatch; dest is exactly the length of the source array, so memcpy itself is safe as long as JNI returns correct values. The code, however, does not check for malloc failure and uses __s even if malloc returns NULL, but only in the else-branch after an if (__s == 0) test. Unfortunately, memset(__s,0,__size) and memcpy(__s,__src,__size) are executed immediately *after* malloc and *before* the null check, so if malloc returns NULL these calls would deref NULL. That is a functional bug and potentially a null-deref crash, but not a security vulnerability under realistic Android conditions, because malloc returning NULL here would require extreme memory pressure and results only in local DoS of the app.",
+            "The interesting part is CERT_Load followed by CERT_GetCertPolicy_PolicyID and down into Convert_ASN1_to_X509_CERT / Convert_ASN1_to_X509_TBS_CERT / Compute_ASN1_ST_ChildNum. Input to these routines is the copied Java byte array (__s, length iVar2). There is no validation of that content before passing to CERT_Load, which appears to parse a certificate structure (ASN.1 DER). A crash inside Compute_ASN1_ST_ChildNum strongly suggests an internal bug in the ASN.1 handling on malformed data. Because the parser is fed completely attacker-controlled data (Java byte[] ultimately from OCR pipeline; fuzzer confirms arbitrary content), this is a classic case of untrusted ASN.1 parsing in native code.",
+            "However, we have not decompiled CERT_Load / Convert_ASN1_to_X509_* due to missing symbols, and Compute_ASN1_ST_ChildNum is an indirect call pointer with no code. We therefore cannot prove whether the crash is a benign null-deref, an assertion abort, or a genuine memory corruption (OOB, UAF, etc.). The tool also did not give us the signal or fault address. Without an ASAN report or precise crash context, we must avoid assuming memory corruption. What we *can* say is that there is a large, complex native certificate parser operating directly over fully attacker-controlled ASN.1 data without any Java/JNI side validation, which is a typical vulnerability hotspot. The crash label being just the function name suggests that the fuzzer’s monitoring flagged this as the last function, not that the process terminated by a sanitizer. This yields at least a likely logic/robustness bug in the ASN.1 walker; exploitability (RCE) remains speculative.",
+            "Given the instructions: crashes that are simple null-derefs or functional DoS are not considered vulnerabilities; but here the context is a native parser that walks nested ASN.1 structures (child numbers, tree navigation). Such code is historically prone to OOB reads/writes and other memory-safety bugs. The absence of bounds checks in the visible code is non-informative because the bug is deeper. We cannot concretely categorize as OOB-read/write without seeing it. Therefore, label classification type as 'Logic' with is_vulnerability=false, because from the available evidence we cannot demonstrate an actual memory safety or information leak vulnerability, just that malformed input causes a crash inside the parser. Impact is local app crash only (jGetPolicyOID is used to extract a policy OID string from a cert); no indication it runs in a privileged context (app-level JNI, not system_server).",
+            "Java callgraph shows that com.ubikey.jni.UbikeyJni.jGetPolicyOID is called from multiple app methods via OCR results, but nothing suggests privilege escalation. Attacker would need to feed malformed certificate bytes into this API (e.g., via QR code or some external data) to crash the app, which is a DoS but not a security vulnerability per policy. Confidence in non-vulnerability is moderate because of missing deep-native decompilation and crash signal, but policy says to default to non-vulnerability when unsure."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.4,
+          "reasons": [
+            "jGetPolicyOID JNI method copies Java byte[] into heap buffer with size equal to array length; memcpy arguments are consistent, no obvious OOB from this layer",
+            "Native CERT_* and ASN.1 parsing functions operate directly on attacker-controlled data, but we lack decompiled code or sanitizer logs to prove memory corruption vs simple crash",
+            "Crash site function Compute_ASN1_ST_ChildNum is just an indirect call stub; no evidence of bounds-checked failure vs exploitable bug",
+            "Observed issue is at least a local app crash/DoS during malformed certificate parsing; per policy, that alone is not a security vulnerability"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3);\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);\n...\nBINSTR_SetData(__s,iVar2,auStack_438);\nCERT_Load(&local_440,auStack_438);",
+              "note": "JNI copies Java byte[] into heap buffer of equal size and passes to CERT_Load; no validation of ASN.1 content here."
+            },
+            {
+              "function": "Compute_ASN1_ST_ChildNum",
+              "file": "libUbikeyJni.so",
+              "snippet": "void Compute_ASN1_ST_ChildNum(void)\n{\n  (*(code *)PTR_Compute_ASN1_ST_ChildNum_00181d50)();\n  return;\n}",
+              "note": "Top frame is an indirect call into proprietary ASN.1 logic; implementation not visible in this binary."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "CERT_Load",
+            "Convert_ASN1_to_X509_CERT",
+            "Convert_ASN1_to_X509_TBS_CERT",
+            "Compute_ASN1_ST_ChildNum"
+          ],
+          "recommendations": [
+            "Obtain and analyze the implementation backing PTR_Compute_ASN1_ST_ChildNum_00181d50 and related CERT_* functions to confirm whether memory-safety issues exist",
+            "Add robust length and structural validation of certificate/ASN.1 data before passing it into native CERT_Load",
+            "Handle malloc failures correctly in Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID (check __s before memset/memcpy) to avoid null-deref on allocation failure"
+          ],
+          "assumptions": [
+            "Crash type and fault address are unknown; assumed no ASAN/UBSAN evidence of heap corruption was available",
+            "CERT_Load and Compute_ASN1_ST_ChildNum run in the app process context, not a privileged system service"
+          ],
+          "limitations": [
+            "Underlying ASN.1 implementation behind PTR_Compute_ASN1_ST_ChildNum_00181d50 was not available for decompilation",
+            "No concrete crash log (signal, fault address, register state) to distinguish null-deref from memory corruption"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:37",
+          "llm_requests": 2,
+          "llm_tool_calls": 5,
+          "input_tokens": 16017,
+          "output_tokens": 1985
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "Get_DER_Child",
+            "Convert_ASN1_to_X509_CERT",
+            "CERT_Load",
+            "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+          "JavaCallGraph": [
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63: j()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14: e()Ljava/util/ArrayList;> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.i63$a: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>",
+            "<com.quram.mi.ocr.zo1: j([B)Ljava/lang/String;> -> <com.quram.mi.ocr.h63: a(Lcom/quram/mi/ocr/ek3;[B)V> -> <com.quram.mi.ocr.r14$h: handleMessage(Landroid/os/Message;)V> -> <com.ubikey.jni.UbikeyJni: jGetPolicyOID([B)Ljava/lang/String;>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "Get_DER_Child",
+              "Convert_ASN1_to_X509_CERT",
+              "CERT_Load",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID; memcpy crash suggests size/ptr issue. Decompile shows: it gets iVar2 = (*env->GetArrayLength)(..., param_3); __size = (size_t)iVar2; __src = (*env->GetByteArrayElements)(..., param_3, 0); __s = malloc(__size); memset(__s,0,__size); memcpy(__s,__src,__size); then releases JNI array, wraps into BINSTR, calls CERT_Load, etc. No explicit bounds checks beyond length used consistently for allocation and copy.",
+            "Potential memcpy issues: (a) __size could be 0 with malloc(0) returning NULL then memcpy(NULL, __src, 0) – undefined but on most libc safe; however our decompiled code calls memset(__s,0,__size) and memcpy(__s,__src,__size) before testing __s == 0, so if malloc(0) returns NULL but size is 0, memset/memcpy with NULL,0 are technically UB and can crash in hardened libc; (b) integer truncation or negative iVar2; but GetArrayLength returns jsize (signed 32-bit) and decomp cast to size_t, so huge lengths not possible; no overflow. Crash in __memcpy more likely due to harness passing nonsensically large length that malloc cannot satisfy? But malloc returns non-NULL or aborts; still copy within allocated region.",
+            "Key: source buffer __src is GetByteArrayElements of same Java array, so `__size` equals actual array length. There is no way here for memcpy length to exceed backing store size; copy is within bounds. Unless GetByteArrayElements returns a bad pointer (unlikely, managed by JVM), there is no app-controlled memory corruption. Thus memcpy crash probably environmental (e.g., fuzzer corrupted env, or stack/heap poisoned earlier in CERT_* functions). However the stack trace says crash at __memcpy, not deeper in CERT_*, so maybe the crash specifically due to memcpy on NULL with size 0. That is still not security-relevant: input is only local byte[] from Java; attacker (user/file) might choose empty array, but effect is app crash, at worst local DoS, no memory corruption with attacker-controlled overwrite.",
+            "Need to check downstream CERT_Load: may internally parse ASN.1 and do unsafe operations. But this crash is at the initial memcpy, before CERT_Load. Our triage focuses on described crash, not hypothetical deeper issues. Java side: UbikeyJni.jGetPolicyOID(byte[]) is public native, can be called by surrounding app code; Java callgraph shows it is called by internal OCR classes after some processing on a byte[]. That byte[] probably holds a certificate from external source (e.g., network, file, camera). However even if attacker controls content, native function only uses content later in CERT_Load; memcpy uses only overall length, not content. So the direct memcpy vulnerability is not supported.",
+            "Therefore classify this specific crash as non-vulnerability. Root cause: benign undefined behavior from calling memset/memcpy on NULL with zero length (or harness glitch), resulting at most in an application crash (local DoS). No evidence of OOB, UAF, or exploitable state change. Mark classification as Env/Harness or Other, with low confidence of vulnerability and severity null/low. Mention that robust code should guard malloc result before use or handle zero-length input specially."
+          ],
+          "is_vulnerability": false,
+          "confidence": 0.28,
+          "reasons": [
+            "memcpy length equals Java byte[] length obtained via GetArrayLength, so copy is in-bounds relative to both src and dst",
+            "source pointer comes directly from GetByteArrayElements on same array; attacker cannot make it shorter than array backing store",
+            "only realistic fault is calling memset/memcpy with NULL and size 0 (malloc(0) returning NULL) or harness/JVM inconsistency, leading to at most a benign crash",
+            "no evidence that attacker-controlled values influence a dangerous offset or size beyond allocated buffer"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+              "file": "libUbikeyJni.so",
+              "snippet": "iVar2 = (**(code **)(*param_1 + 0x558))(param_1,param_3); // GetArrayLength\n__size = (size_t)iVar2;\n__src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); // GetByteArrayElements\n__s = malloc(__size);\nmemset(__s,0,__size);\nmemcpy(__s,__src,__size);",
+              "note": "Copy size always equals Java array length; dst buffer allocated with same size, src pointer from JVM."
+            },
+            {
+              "function": "UbikeyJni.jGetPolicyOID",
+              "file": "classes.dex",
+              "snippet": "public native String jGetPolicyOID(byte[] bArr);",
+              "note": "Java simply forwards the byte array; no unsafe manipulation of length or native pointers."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID -> memcpy (__memcpy)"
+          ],
+          "recommendations": [
+            "Add a check for malloc() failure or zero-length input before calling memset/memcpy to avoid undefined behavior on NULL pointers",
+            "Consider early-return for empty certificate data instead of passing zero-length buffers into parsing stack",
+            "Instrument CERT_* parsing routines with sanitizers separately to look for deeper issues not visible in this crash"
+          ],
+          "assumptions": [
+            "Crash location reported as __memcpy corresponds to the memcpy in Java_com_ubikey_jni_UbikeyJni_jGetPolicyOID",
+            "malloc(0) may return NULL in the runtime environment, causing crash when used with size 0",
+            "No hidden modifications to __size or the allocated buffer between malloc and memcpy"
+          ],
+          "limitations": [
+            "Exact faulting address and register state at crash are not provided, so root cause of memcpy crash cannot be definitively proven",
+            "Internal implementation of CERT_Load / Decode_DER_ASN1_ST not examined in this triage, so deeper parsing bugs (if any) are out of scope for this specific crash"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:39",
+          "llm_requests": 2,
+          "llm_tool_calls": 5,
+          "input_tokens": 16076,
+          "output_tokens": 1522
+        }
+      }
+    ]
+  }
+}

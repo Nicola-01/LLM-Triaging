@@ -1,0 +1,217 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "Qustodio",
+      "package": "com.qustodio.family.parental.control.app.screentime",
+      "min_sdk": 22,
+      "target_sdk": 32,
+      "version_name": "182.16.0",
+      "version_code": "1821600"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strchr_default",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strchr_default",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+          "LibMap": {
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so": [
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Native stack shows crash in strchr_default called from decodeBytes inside libtbxml.so, reached via JNI bridge Java_za_co_twyst_tbxml_TBXML_jniParse, which corresponds to native method TBXML.jniParse(byte[]).",
+            "Java-side TBXML.parse(String) passes str.getBytes() directly to jniParse with no validation or length checks, so arbitrary attacker-controlled XML bytes (from wherever the app obtains the string in real use) can reach the native parser unchanged.",
+            "We attempted to inspect libtbxml.so with Ghidra MCP, but search_functions_by_name(\"decodeBytes\") returned a 404 error from the MCP backend, so we cannot see the exact implementation or do precise data-flow for src/dst/len around the crash.",
+            "However, function naming (decodeBytes) and the crash in strchr_default strongly indicate decodeBytes is scanning the input bytes looking for a delimiter or character without enforcing a terminating NUL or buffer bounds, likely assuming the XML buffer is NUL-terminated or well-formed.",
+            "Fuzzing caused strchr_default to fail (likely due to passing a non-NUL-terminated or invalid pointer/length to strchr), implying decodeBytes and/or upstream code is invoking C string routines on attacker-controlled data without strict bounds—this is a classic pattern for buffer over-read or memory safety bugs when parsing arbitrary byte[] from Java.",
+            "Because we cannot see the exact C code or whether it uses safe bounded variants (e.g., memchr with explicit length) vs. plain strchr, we can’t conclusively prove out-of-bounds read/write, but the combination of: (a) crash in a libc string routine, (b) unvalidated attacker-controlled byte[] from Java, and (c) a native XML parsing library makes a genuine memory-safety bug likely rather than a harness-only artifact.",
+            "The harness entry fuzz_one_input simply feeds arbitrary data to the same JNI path TBXML.jniParse, which the real app also uses, so this is not an obviously artificial harness-only code path; any malformed XML-like string coming from files/network/etc. could hit the same native routine.",
+            "Given the incomplete native-side visibility, classification should be that this is likely a vulnerability, with medium confidence and high potential severity (out-of-bounds read/write and possible code execution), but details (exact CWE and exploitability) remain somewhat speculative."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Crash occurs inside strchr_default, indicating misuse of C-string operations in native code",
+            "JNI method TBXML.jniParse(byte[]) receives unvalidated, attacker-controllable byte[] from Java (parse(String).getBytes())",
+            "Native function decodeBytes in libtbxml.so is directly in the crash chain and likely uses strchr or similar on the raw input buffer without strict bounds checking",
+            "Code path is a real app parser path (jniParse) not a testing-only API, so malformed external input could reach it in production"
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so"
+          ],
+          "call_sequence": [
+            "External input → za.co.twyst.tbxml.TBXML.parse(String)",
+            "TBXML.parse(String) → TBXML.jniParse(byte[])",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse → decodeBytes",
+            "decodeBytes → strchr_default"
+          ],
+          "recommendations": [
+            "Disassemble and decompile decodeBytes and related parsing functions in libtbxml.so to confirm exact bounds violations and add explicit length checks.",
+            "Replace unbounded C-string APIs (strchr, strlen, strcpy, etc.) in decodeBytes path with length-bounded variants using the known Java byte[] length.",
+            "Add input validation in TBXML.parse or JNI layer to enforce well-formed, NUL-terminated buffers or safe maximum sizes before invoking the native parser."
+          ],
+          "assumptions": [
+            "The XML or text passed to TBXML.parse can originate from attacker-controlled sources such as files, network, or IPC in the target app.",
+            "decodeBytes uses standard C string routines (as suggested by strchr_default frame) rather than entirely safe, length-bounded operations.",
+            "The fuzzing harness calls the same JNI parsing path that production code uses, not a special test-only entry point."
+          ],
+          "limitations": [
+            "Ghidra MCP backend failed to return decodeBytes decompilation, so native code analysis is incomplete.",
+            "Exact root-cause (out-of-bounds read vs. invalid pointer vs. other misuse) cannot be definitively determined from the available data.",
+            "No concrete information about how the target app obtains the XML strings in real usage, so attacker control is inferred rather than proven."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or malformed XML/text passed to TBXML.parse(String), reaching jniParse(byte[])",
+            "prerequisites": [
+              "Attacker can influence or supply the String content that the app passes into TBXML.parse(String).",
+              "App uses TBXML library to parse external or semi-trusted input in its normal workflows.",
+              "Target device runs a vulnerable version of the app with the affected libtbxml.so."
+            ],
+            "exploit_pipeline": [
+              "Identify a code path in the app where external input (file, network, clipboard, IPC) is passed into TBXML.parse(String).",
+              "Craft an overlong or malformed XML/text payload designed to break C-string assumptions (e.g., missing NUL, embedded binary data, very long sequences).",
+              "Deliver the payload to the app so that it calls TBXML.parse(payload).",
+              "When jniParse(byte[]) runs, decodeBytes will invoke strchr_default on the crafted buffer, potentially causing out-of-bounds memory access and crashing or corrupting memory.",
+              "Iterate payload structure and size to attempt to transition from simple crash to controlled memory corruption, if feasible."
+            ],
+            "poc_commands": [
+              "adb push payload.txt /sdcard/Download/payload.txt",
+              "adb shell am start -n <PACKAGE>/<ACTIVITY> --es input_path /sdcard/Download/payload.txt",
+              "# Then interact with the app so it reads the file and calls TBXML.parse on its contents"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.txt"
+            ],
+            "notes": "Exact payload structure needed to trigger the crash in a production environment depends on how the app wires external inputs into TBXML.parse(String); fuzzing indicates that malformed byte sequences can cause strchr_default to fail inside decodeBytes."
+          }
+        },
+        "statistics": {
+          "time": "00:01:03",
+          "llm_requests": 5,
+          "llm_tool_calls": 7,
+          "input_tokens": 36197,
+          "output_tokens": 1886
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "strpbrk",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strpbrk",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_za_co_twyst_tbxml_TBXML_jniParse",
+          "LibMap": {
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so": [
+              "strpbrk",
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame before allocator/sanitizer is strpbrk itself, which is a libc string routine. Next frame is decodeBytes in libtbxml.so, then the JNI entry Java_za_co_twyst_tbxml_TBXML_jniParse. The process termination message is simply 'strpbrk', suggesting a crash or abort inside this function (likely invalid pointer, missing NUL terminator, or access violation).",
+            "Because I couldn't decompile functions via the MCP (404 errors on search_functions_by_name / decompile_function), I must infer behavior from the symbol names and general patterns. decodeBytes likely parses or decodes a byte buffer (XML text) and calls strpbrk to search for delimiter characters (e.g., '<', '>', whitespace). strpbrk expects its first argument to be a valid NUL-terminated C-string. If decodeBytes passes arbitrary data from a Java byte[] (coming from XML input) without ensuring NUL termination or bounds, this can cause out-of-bounds reads or crash in strpbrk when it scans past the buffer.",
+            "The JNI method Java_za_co_twyst_tbxml_TBXML_jniParse plausibly takes a Java byte[] or String and forwards a pointer and length (or just pointer) to decodeBytes. Typical TBXML native parsers operate directly on in-memory XML, frequently doing manual pointer walks and libc string operations. If the fuzzer harness passes arbitrary binary data (not valid XML, not NUL-terminated), a robust native implementation should still avoid undefined behavior by tracking lengths, not assuming terminators. Crashing in strpbrk on malformed input is therefore indicative of unsafe, length-unaware string handling, not just a benign abort.",
+            "I have no direct view of the Java side or proof of input validation. The Java callgraph entry indicates normal app code reaches TBXML_jniParse from app paths, so user-/network-controlled data (e.g. configuration files, remote XML) could flow into this parser, making the issue potentially reachable in production, not just by the fuzzer.",
+            "Given limited tooling context, I cannot show exact code, but the pattern (native XML parser, direct libc str* usage, crash in strpbrk under fuzz input) strongly matches common OOB-read vulnerabilities (CWE-125) or improper input validation leading to memory safety bugs. However, we only know the termination at strpbrk, not whether it's purely an invalid pointer from the harness (e.g., NULL or truly arbitrary) or a realistic code path. JNI fuzz harness entry suggests it calls the same JNI function as the app; no indication that it violates invariants (like passing null pointer instead of array). Thus, I lean to classify this as a likely vulnerability.",
+            "Severity-wise, uncontrolled OOB read via strpbrk generally implies at least a meaningful DoS and sometimes information disclosure or further memory corruption, depending on how the address is derived. With limited data, I will mark as high severity, not critical. Confidence is moderate (~0.65) because I lack direct decompiled code but have strong circumstantial evidence of unsafe C-string usage on attacker-controlled data."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.65,
+          "reasons": [
+            "Crash occurs inside libc strpbrk called from decodeBytes in libtbxml.so, indicating unsafe use of C string APIs on data derived from input.",
+            "JNI entry Java_za_co_twyst_tbxml_TBXML_jniParse is a normal app-native function, so its arguments can realistically be influenced by external/untrusted XML or bytes, not just by the fuzz harness.",
+            "Typical TBXML-native parsing patterns use pointer arithmetic and libc string functions without robust length checks, and crashing in strpbrk under fuzzed input is consistent with out-of-bounds read or invalid pointer dereference.",
+            "No evidence of strong validation or invariant enforcement between the JNI boundary and decodeBytes; fuzzer uses the same JNI method, so the bug likely reflects a real reachable issue."
+          ],
+          "cwe_ids": [
+            "CWE-125"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.qustodio.family.parental.control.app.screentime/lib/arm64-v8a/libtbxml.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_za_co_twyst_tbxml_TBXML_jniParse -> decodeBytes -> strpbrk"
+          ],
+          "recommendations": [
+            "Review and decompile decodeBytes and surrounding TBXML parsing code to locate all uses of strpbrk/other str* APIs and ensure they operate on NUL-terminated strings within known bounds.",
+            "Modify decodeBytes (and related functions) to track buffer length explicitly and replace unbounded strpbrk/str* calls with bounded variants or manual loops that respect length.",
+            "Add robust input validation on the Java side before calling TBXML_jniParse (e.g., ensure inputs are valid UTF-8/XML and terminate buffers) and add defensive checks in JNI to reject suspicious lengths or nulls."
+          ],
+          "assumptions": [
+            "decodeBytes receives data ultimately derived from attacker-controllable Java input (e.g., XML from network/files).",
+            "There is no strong validation or canonicalization between the JNI bridge and decodeBytes that would exclude malformed or unterminated data.",
+            "The crash originates from invalid memory access within strpbrk due to unterminated or out-of-bounds scanning, not from an unrelated harness misuse (e.g. freeing memory twice)."
+          ],
+          "limitations": [
+            "Decompilation of specific functions (decodeBytes, Java_za_co_twyst_tbxml_TBXML_jniParse) failed due to tool errors, so conclusions are based on stack symbols and typical patterns.",
+            "Exact argument values, buffer sizes, and pointer provenance at the crash site are unknown, preventing precise classification between OOB-read vs null deref.",
+            "Java callgraph details and how the app supplies data to TBXML_jniParse were not inspected directly, so reachability is inferred, not proven."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a crafted XML or byte buffer to the TBXML parser via the Java TBXML_jniParse entry point",
+            "prerequisites": [
+              "Attacker can influence the XML/byte[] passed into TBXML.jniParse (e.g., via network data, imported configuration, or IPC).",
+              "The app invokes TBXML_jniParse on attacker-controlled or semi-trusted input without strong validation."
+            ],
+            "exploit_pipeline": [
+              "Identify app functionality that parses XML or structured data using TBXML (TBXML_jniParse).",
+              "Craft malformed input (non-terminated strings, extremely long elements, embedded NUL bytes) to cause decodeBytes to pass an unterminated or out-of-bounds pointer into strpbrk.",
+              "Deliver the crafted payload via the same channel (file, network, IPC) so that Java code forwards it into TBXML_jniParse.",
+              "Trigger parsing in the app and observe a crash or abnormal native behavior, iterating on payloads to maximize reliability and impact."
+            ],
+            "poc_commands": [
+              "adb push crafted_payload.xml /sdcard/Download/payload.xml",
+              "adb shell am start -n <package>/<activity> --es xml_path /sdcard/Download/payload.xml"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.xml"
+            ],
+            "notes": "Due to missing decompiled code, the exploit is currently framed as a DoS/out-of-bounds read against the native XML parser. Further reverse engineering of decodeBytes is needed to assess if the OOB read can be turned into more severe memory corruption or information disclosure."
+          }
+        },
+        "statistics": {
+          "time": "00:00:57",
+          "llm_requests": 4,
+          "llm_tool_calls": 7,
+          "input_tokens": 27393,
+          "output_tokens": 1805
+        }
+      }
+    ]
+  }
+}

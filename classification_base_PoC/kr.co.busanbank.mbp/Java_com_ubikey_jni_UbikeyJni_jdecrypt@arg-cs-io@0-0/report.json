@@ -1,0 +1,428 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.co.busanbank.mbp/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "kr.co.busanbank.mbp",
+      "min_sdk": 21,
+      "target_sdk": 33,
+      "version_name": "3.0.10",
+      "version_code": "744"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Init_SEED",
+            "SEED_CBC",
+            "EncCertExchangeMessage_to_CertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libAlcheraFaceSDK.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libIWAndroid.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libKeySharp_Android_Core.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libRSKSW_Android_Core.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Init_SEED",
+              "SEED_CBC",
+              "EncCertExchangeMessage_to_CertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libsmartaib-core.so": [
+              "SEED_CBC"
+            ],
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/liby7wrapper.so": [
+              "SEED_CBC"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Native crash occurs in __memcpy with call stack: __memcpy -> Init_SEED -> SEED_CBC -> EncCertExchangeMessage_to_CertExchangeMessage -> DecryptCertExchange -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> fuzz_one_input -> main.",
+            "Tools are unavailable (404) so I cannot inspect the actual decompiled code, arguments, or perform strict backward data-flow, but I must still reason from naming, stack, and typical SEED-CBC implementation patterns.",
+            "__memcpy at the top indicates a classic memory corruption scenario: memcpy being called with an invalid pointer or incorrect length. This is almost always due to a programming bug in the app/library, not the allocator itself.",
+            "The first app-level frames below libc are Init_SEED and SEED_CBC inside libUbikeyJni.so (per lib map). These functions are application crypto helpers, not allocator/sanitizer frames. They likely perform SEED block cipher operations in CBC mode over buffers supplied from higher-level decrypt/parse routines.",
+            "The path: Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> EncCertExchangeMessage_to_CertExchangeMessage -> SEED_CBC -> Init_SEED -> __memcpy strongly suggests: Java passes some encrypted certificate-exchange blob into native code, which then decrypts it using SEED-CBC and parses it into a CertExchangeMessage struct.",
+            "Common classes of bugs here: (1) using length fields from the message without validating, (2) assuming fixed sizes but copying variable-length fields, (3) using memcpy for block copying without ensuring buffer sizes match data length (especially with padding or malformed ciphertext).",
+            "Because this crash was found by a fuzz harness (fuzz_one_input) driving the JNI method directly, it demonstrates that malformed input from Java side can cause a memcpy-based crash. In the real app, jdecrypt will be fed with data from network/server or local storage; that data is at least partially attacker-controllable (e.g., MITM or malicious server).",
+            "However, I cannot see whether the Java layer or JNI validates buffer sizes/lengths before passing into DecryptCertExchange/SEED_CBC. Still, the presence of a crash in memcpy means that whatever checks exist are insufficient to guarantee safety for all possible inputs, since fuzzing hit a case where memcpy accessed invalid memory.",
+            "There is no indication this is purely a harness-only misuse like passing null where the app never could: the JNI bridge and deeper functions (DecryptCertExchange, EncCertExchangeMessage_to_CertExchangeMessage) are clearly real app code. The fuzz harness likely just reuses the existing Java->JNI ABI, differing only in that it explores more input space than normal.",
+            "Even if in production the remote endpoint is normally trusted (e.g., bank server), for security engineering we must assume attacker-influenced channel (network, TLS termination, compromised server) such that malformed ciphertext is possible. A memcpy OOB read/write during decrypt+parse of a message is a classic exploitable bug (CWE-787/119), particularly in crypto parsing code.",
+            "Without code, I cannot distinguish whether the memcpy is overrunning the source (OOB read) or destination (OOB write). Both are serious; destination overrun is more likely given common patterns, and both can lead to crashes and potential RCE under the right heap/stack layout.",
+            "Given stack depth and function names, the likely vulnerability locus is within EncCertExchangeMessage_to_CertExchangeMessage or SEED_CBC, where message field sizes and buffer bounds should be checked but apparently are not robust against arbitrary inputs.",
+            "Therefore, I classify this as a likely genuine memory safety vulnerability (buffer overflow/underflow) in libUbikeyJni.so reachable via Java_com_ubikey_jni_UbikeyJni_jdecrypt, with high severity and reasonably high confidence despite missing decompilation.",
+            "Exploitability is at least theoretical-to-practical: attacker crafts malformed encrypted certificate-exchange data passed into jdecrypt (via app’s normal protocol or by abusing its API), causing memcpy to write out of bounds and potentially hijack control flow. Exact exploit steps (heap grooming etc.) cannot be detailed without binary layout, but crash proves control over conditions triggering corruption.",
+            "Limitations: I cannot show exact code, argument values, or buffer sizes, so cannot prove an exact CWE pattern beyond unsafe memcpy with attacker-influenced length/source. The confidence is not absolute but is strong enough (>0.7) since harness mirrors a realistic entry point and crash is at memcpy."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash occurs in __memcpy called from app crypto routines (Init_SEED/SEED_CBC) inside libUbikeyJni.so, indicating an out-of-bounds memory access due to incorrect length/pointer handling.",
+            "The crash path is through a real JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt and higher-level decrypt/parse code (DecryptCertExchange, EncCertExchangeMessage_to_CertExchangeMessage), not a synthetic harness-only native stub.",
+            "Fuzzing proves that attacker-controllable or at least external input into jdecrypt can reach memcpy without sufficient bounds validation, causing a native crash in production code.",
+            "The vulnerable region is inside certificate-exchange decryption/parsing logic, which processes variable-length message fields and is a common site for buffer overflow bugs when using memcpy without strict size checks."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> EncCertExchangeMessage_to_CertExchangeMessage -> SEED_CBC -> Init_SEED -> __memcpy"
+          ],
+          "recommendations": [
+            "Review and decompile EncCertExchangeMessage_to_CertExchangeMessage, SEED_CBC, and Init_SEED to locate all memcpy/memmove calls and ensure source/destination lengths are derived from trusted buffer sizes, not unvalidated message fields.",
+            "Add explicit bounds checks on all computed lengths and indices when parsing certificate-exchange messages, rejecting messages that would exceed destination buffer sizes before calling memcpy.",
+            "Instrument the JNI method Java_com_ubikey_jni_UbikeyJni_jdecrypt with defensive checks on input buffer sizes and lengths, and consider using safer APIs (e.g., memmove with validated sizes) plus ASan/UBSan in QA builds."
+          ],
+          "assumptions": [
+            "Fuzz harness calls Java_com_ubikey_jni_UbikeyJni_jdecrypt with arbitrary data in the same manner as the production Java layer.",
+            "The decrypted certificate-exchange data is at least partially attacker-controlled via network or external channel.",
+            "No strong input validation or length checks are done in Java before calling the JNI decrypt method, or they are insufficient to prevent this crash."
+          ],
+          "limitations": [
+            "Could not decompile libUbikeyJni.so due to tool access error, so memcpy argument sources and exact buffer sizes are inferred from symbols and stack only.",
+            "Exact nature of the overflow (source vs destination, heap vs stack) is unknown, so exploitability details are approximate.",
+            "Java call graph and precise origin of the ciphertext (network, file, IPC) are not available, so the threat model assumes typical banking app communication patterns."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious or malformed certificate-exchange payload processed by Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "prerequisites": [
+              "Ability to influence or inject the encrypted certificate-exchange message consumed by the app (e.g., compromised/rogue server, MITM, or local IPC/file input).",
+              "Target device can run the vulnerable version of the banking application with libUbikeyJni.so.",
+              "Attacker can repeatedly trigger the decryption routine to explore heap layouts and crash patterns."
+            ],
+            "exploit_pipeline": [
+              "Craft a malformed certificate-exchange payload whose encrypted/body lengths or internal fields cause EncCertExchangeMessage_to_CertExchangeMessage to compute incorrect copy sizes.",
+              "Deliver this payload via the app’s normal communication channel (e.g., initiate a fake handshake or session that triggers jdecrypt with attacker-controlled data).",
+              "Cause the app to invoke Java_com_ubikey_jni_UbikeyJni_jdecrypt, which calls DecryptCertExchange and then SEED_CBC/Init_SEED, eventually reaching memcpy with attacker-influenced length or pointers.",
+              "Iteratively refine the payload to achieve controlled memory corruption (e.g., heap overflow) instead of simple crash, potentially allowing code execution under favorable conditions."
+            ],
+            "poc_commands": [
+              "adb push payload.bin /sdcard/Download/payload_cert_exchange.bin",
+              "adb shell am start -n <package>/<MainActivity> --es cert_payload /sdcard/Download/payload_cert_exchange.bin",
+              "# Then interact with the app to trigger the certificate-exchange/decrypt path that calls jdecrypt."
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_cert_exchange.bin"
+            ],
+            "notes": "Exact payload format and activity name are unknown; the PoC assumes there is a reachable workflow in the app that accepts a certificate-exchange message and passes it into Java_com_ubikey_jni_UbikeyJni_jdecrypt. Further reverse-engineering of the app’s protocol and Java code is required to construct a fully working exploit."
+          }
+        },
+        "statistics": {
+          "time": "00:01:03",
+          "llm_requests": 2,
+          "llm_tool_calls": 4,
+          "input_tokens": 13830,
+          "output_tokens": 2398
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Get_DER_Child",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Get_DER_Child",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Get_DER_Child",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Stack trace shows crash in Get_DER_Child, called by Convert_ASN1_to_EncCertExchangeMessage -> DecryptCertExchange -> JNI jdecrypt -> fuzz_one_input. This is crypto / certificate parsing code, likely operating on attacker-controlled DER/ASN.1 data provided via the JNI decrypt API.",
+            "Tools could not decompile functions due to server 404 errors, so exact implementation is unknown. However, the function name Get_DER_Child strongly suggests traversal of ASN.1 DER structures (e.g., walking TLV nodes). Such code is classically prone to bounds issues when parsing untrusted lengths or nested elements.",
+            "The crash reason is just 'Process Termination : Get_DER_Child' without allocator/sanitizer detail. We don’t know if it’s an assertion/abort on malformed structure (safe fail) or an actual memory error. No evidence of malloc/abort frames is given, only application frames; that suggests the function itself triggered termination (e.g., calling abort or returning error that leads to exit) rather than an automatic detection of heap corruption.",
+            "Fuzz harness entry is fuzz_one_input directly calling the JNI decrypt call, so in the fuzzing setup, arbitrary input bytes are fed into the DecryptCertExchange/ASN.1 parser. In the real app, this decrypt call will almost certainly be used on network or smartcard data, which are attacker-influenced but protocol constrained. Still, if the code simply returns an error on invalid structure, this is just robust parsing, not a vuln.",
+            "Since we cannot inspect the code, we cannot confirm any out-of-bounds reads/writes, unchecked memcpy, or pointer misuse. All we know is a function that parses DER crashed/terminated under fuzzing. This could be: (a) a defensive abort on invalid structure (common for cryptographic libs), (b) an unhandled exception-like abort, or (c) a real memory bug. Without evidence of unsafe operations or sanitizer involvement, we must avoid assuming memory corruption.",
+            "The fuzz result only says 'Process Termination', not 'segmentation fault', 'abort in memcpy', or sanitizer messages. That leans towards application-level termination (logic bug or assertion) when faced with impossible or inconsistent DER layout. Under the definition, a pure DoS via crash could be a vulnerability if reachable with realistic data; but here we don’t know if app in production ever feeds arbitrary structures, likely it uses well-formed certs from controlled channel.",
+            "Given the limited info and lack of code, the safest classification is that this is not confirmed as a genuine memory-safety vulnerability. It might be a robustness issue or potential DoS if invalid DER from an attacker can reach this path, but that’s speculative. Confidence for a real vulnerability must therefore be low.",
+            "I will classify is_vulnerable=false, note uncertainty, no CWE, severity null (or low if considered), and emphasize need for manual review of Get_DER_Child/ASN.1 parsing to check bounds and error handling."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.25,
+          "reasons": [
+            "Crash occurs in DER/ASN.1 parsing routine Get_DER_Child but there is no evidence of out-of-bounds access or memory corruption.",
+            "Termination is described generically as 'Process Termination' without sanitizer, SIGSEGV, or allocator diagnostics, suggesting a possible intentional abort or unhandled error rather than a low-level memory bug.",
+            "Fuzz harness feeds arbitrary data directly into a crypto/ASN.1 parser; such fuzzer-only inputs may be far outside what the app ever processes in production, so reachability with real attacker-controlled data is unclear.",
+            "Code for Get_DER_Child, Convert_ASN1_to_EncCertExchangeMessage, and DecryptCertExchange could not be inspected due to tooling errors, so any assertion of concrete vulnerability would be speculative."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage -> Get_DER_Child"
+          ],
+          "recommendations": [
+            "Manually review Get_DER_Child and related ASN.1/DER parsing code for strict bounds checking on lengths, indices, and recursion depth.",
+            "Instrument the binary with ASan/UBSan and rerun fuzzing to determine whether this termination corresponds to undefined behavior or is just an intentional abort on invalid input.",
+            "If the function intentionally aborts on malformed data, replace process termination with graceful error returns to avoid potential DoS from malformed certificates."
+          ],
+          "assumptions": [
+            "The jdecrypt JNI method ultimately receives or derives its input from potentially untrusted sources (e.g., remote server, smartcard, or user-supplied certificate).",
+            "Process termination description does not distinguish between SIGABRT, SIGSEGV, or explicit exit, so interpretation is based purely on the limited stack trace.",
+            "The fuzz harness does not enforce the same structural constraints on inputs that the real app uses, so some fuzzing crashes may be unreachable in production."
+          ],
+          "limitations": [
+            "Unable to decompile or inspect native functions in libUbikeyJni.so due to analysis server 404 errors, so no direct view of pointer arithmetic or memory operations.",
+            "Lack of signal type, registers, and memory state at crash prevents differentiating between assertion failure and memory corruption.",
+            "No Java call graph or surrounding Java code was available beyond the JNI bridge name, limiting assessment of how attacker-controlled inputs reach the native layer."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:32",
+          "llm_requests": 5,
+          "llm_tool_calls": 6,
+          "input_tokens": 34374,
+          "output_tokens": 1367
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first native frame below runtime/abort: from stack, abort -> __stack_chk_fail -> Convert_ASN1_to_EncCertExchangeMessage. So application-level function is Convert_ASN1_to_EncCertExchangeMessage in libUbikeyJni.so.",
+            "__stack_chk_fail indicates stack canary corruption detected by compiler, meaning some form of stack buffer overflow or related memory corruption occurred in or below Convert_ASN1_to_EncCertExchangeMessage.",
+            "The crash occurs before any allocator/sanitizer frames; this is direct stack protector abort, a strong sign of real memory safety bug (e.g., writing past local buffer) rather than harness artifact.",
+            "We lack detailed decompilation, but the function name Convert_ASN1_to_EncCertExchangeMessage suggests parsing ASN.1-encoded data into an internal certificate exchange message, a classic kind of parser susceptible to length/field mis-handling leading to buffer overruns.",
+            "The JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt is in the same library and is the entry. The conversion function is likely called as part of decrypt/verify routine on attacker-supplied certificate or message data (e.g., smart card, network, or file input). Even though the fuzzer is JNI-based, this JNI method is realistically reachable in the app, not a synthetic stub, and decryption routines routinely operate on external data.",
+            "The presence of stack canary failure means that some write overran a stack-allocated object. Given typical ASN.1 conversion code, this is likely due to using lengths from the encoded data without adequate bounds checking when copying into fixed-size local buffers or when recursing/looping through ASN.1 structures.",
+            "Environment/harness artifacts (e.g., passing NULL) would more likely lead to null deref or explicit abort, not stack canary trip. Also, the frame repetition note ('previous frame identical') just reflects unwound stack confusion, not cause of crash.",
+            "Because the stack corruption directly precedes __stack_chk_fail in the application parser, and this parser is processing complex ASN.1 input that is plausibly attacker-controlled via jdecrypt, classify as a genuine memory-corruption vulnerability with high but not absolute confidence (we do not see the exact memcpy/loop).",
+            "Impact: a stack buffer overflow in crypto/ASN.1 parsing is potentially exploitable for code execution, although stack protections (canaries, NX, ASLR) raise the bar. At minimum, it is a robust denial of service and possibly more, so severity should be at least high.",
+            "Exploit details cannot be fully specified without Java callgraph and decompiled code, but a plausible path is: crafted ASN.1 certificate/exchange structure fed through the app (e.g., via Ubikey/USB token, NFC, or network), passed into UbikeyJni.jdecrypt, which invokes Convert_ASN1_to_EncCertExchangeMessage and triggers the overflow."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.86,
+          "reasons": [
+            "Crash is due to __stack_chk_fail in Convert_ASN1_to_EncCertExchangeMessage, indicating stack canary corruption (stack buffer overflow) in app code.",
+            "Convert_ASN1_to_EncCertExchangeMessage is an ASN.1 parsing/conversion routine, a high-risk area for length/field mis-handling when decoding untrusted data.",
+            "The crashing function resides in libUbikeyJni.so and is called from a real JNI bridge Java_com_ubikey_jni_UbikeyJni_jdecrypt, which is reasonably reachable from Java and can process attacker-influenced inputs.",
+            "Abort originates from compiler-inserted stack protector, not from harness logic or deliberate checks, making a harness-only explanation unlikely."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt -> Convert_ASN1_to_EncCertExchangeMessage -> __stack_chk_fail -> abort"
+          ],
+          "recommendations": [
+            "Audit Convert_ASN1_to_EncCertExchangeMessage for all stack-allocated buffers and ensure strict bounds checking on copies and ASN.1 length fields before writing.",
+            "Add robust ASN.1 parsing validation, rejecting any structure whose claimed lengths exceed actual buffer or message sizes, and avoid unbounded recursion or loops.",
+            "Rebuild libUbikeyJni.so with full stack protections (canaries, NX, PIE) and add targeted fuzzing with ASan/UBSan to identify and confirm the exact overflow site."
+          ],
+          "assumptions": [
+            "UbikeyJni.jdecrypt processes data ultimately influenced by external/attacker-controlled sources such as certificates or encrypted messages.",
+            "Convert_ASN1_to_EncCertExchangeMessage directly operates on ASN.1 data derived from the JNI inputs without complete prior normalization or size enforcement.",
+            "The production environment uses similar compiler options (with stack canaries) so the same bug is reachable in real-world runs."
+          ],
+          "limitations": [
+            "No decompiled C/assembly for Convert_ASN1_to_EncCertExchangeMessage was available, so the exact unsafe operation (e.g., memcpy, loop) cannot be pinpointed.",
+            "The precise Java callgraph into UbikeyJni.jdecrypt and how its parameters are sourced from UI/network/token is not shown.",
+            "Exploitability beyond denial-of-service (e.g., RCE) depends on runtime mitigations (ASLR, NX, fortify) and calling context not visible from the crash excerpt."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Crafted ASN.1-encoded certificate/exchange message passed through UbikeyJni.jdecrypt",
+            "prerequisites": [
+              "Ability to supply or influence ASN.1 certificate/exchange data consumed by the app (e.g., via network protocol, smart card, or external token).",
+              "Target device running a build that loads libUbikeyJni.so and exposes the UbikeyJni.jdecrypt path in normal operation.",
+              "Knowledge of message format enough to craft oversized or malformed ASN.1 length fields targeting the vulnerable parsing path."
+            ],
+            "exploit_pipeline": [
+              "Reverse-engineer Java_com_ubikey_jni_UbikeyJni_jdecrypt and surrounding Java code to determine how ASN.1 data is accepted (e.g., byte array, file, network payload).",
+              "Fuzz or analyze Convert_ASN1_to_EncCertExchangeMessage to identify specific fields/lengths which lead to stack canary corruption when oversized.",
+              "Craft an ASN.1 certificate/exchange payload with malicious length values that cause writes past a stack buffer inside Convert_ASN1_to_EncCertExchangeMessage.",
+              "Deliver the crafted payload through the app’s legitimate input mechanism so that UbikeyJni.jdecrypt is invoked and Convert_ASN1_to_EncCertExchangeMessage processes the malicious data.",
+              "Iterate on payload structure to move from reproducible crash (__stack_chk_fail) toward controlled memory corruption and potential code execution, subject to platform mitigations."
+            ],
+            "poc_commands": [
+              "# Placeholder PoC sequence; actual activity/class and argument wiring must be discovered via static analysis",
+              "adb push crafted_asn1.bin /sdcard/Download/payload_asn1.bin",
+              "adb shell am start -n kr.co.busanbank.mbp/.MainActivity --es ubikey_payload /sdcard/Download/payload_asn1.bin"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_asn1.bin"
+            ],
+            "notes": "The exact Java entrypoint and intent extras are unknown; they must be adjusted based on the app’s manifest and Ubikey integration classes. The key requirement is that the crafted ASN.1 blob reaches UbikeyJni.jdecrypt and then Convert_ASN1_to_EncCertExchangeMessage."
+          }
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 1,
+          "llm_tool_calls": 0,
+          "input_tokens": 6140,
+          "output_tokens": 1594
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+          "LibMap": {
+            "APKs_FINAL/kr.co.busanbank.mbp/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame before abort is __stack_chk_fail, which indicates stack canary corruption; the first app-level frame below that is Convert_ASN1_to_EncCertExchangeMessage in libUbikeyJni.so.",
+            "A stack canary failure nearly always means a stack-based buffer overflow or similar memory corruption in the preceding function, here Convert_ASN1_to_EncCertExchangeMessage, not a harness-only artifact.",
+            "From the symbol name, Convert_ASN1_to_EncCertExchangeMessage likely parses ASN.1-encoded certificate exchange data into some internal message structure; parsing routines are classic sites for length/field mis-handling.",
+            "The call chain is Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage, which is a straightforward JNI entry → crypto/decrypt wrapper → ASN.1 parser chain.",
+            "JNI bridge jdecrypt is almost certainly exposed to Java code that processes untrusted remote inputs (TLS-like cert exchange messages, Ubikey token data, etc.); the fuzzer simulates hostile inputs, so it is realistic that an attacker could provide malformed ASN.1 blobs in the real app via network or files.",
+            "The failure mode (__stack_chk_fail) directly ties to a memory safety issue (stack canary overwrite) and therefore to CWE-121/CWE-787, which is exploitable in principle for control-flow hijacking on native code, even if modern mitigations may complicate it.",
+            "No evidence suggests that this is just the fuzzer violating guarantees like passing impossible JNI arguments or NULL-only paths; the stack shows a normal logical flow without harness frames inside the native library.",
+            "While we cannot see the exact memcpy/loop causing the overflow, the function name and crash type provide strong code-level evidence that attacker-controlled ASN.1 input length/structure can drive writes beyond a stack buffer within Convert_ASN1_to_EncCertExchangeMessage.",
+            "Therefore this should be classified as a likely genuine stack-based buffer overflow vulnerability of high severity, with practical but somewhat generic exploitability for RCE or at least reliable DoS.",
+            "Exploit details (exact payload structure, offsets) cannot be enumerated without disassembly, but an attacker-controlled cert-exchange blob passed through the UbikeyJni.jdecrypt API is a plausible trigger path in production."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash caused by __stack_chk_fail in Convert_ASN1_to_EncCertExchangeMessage, indicating stack canary corruption (stack-based overflow).",
+            "Convert_ASN1_to_EncCertExchangeMessage is a parsing/conversion routine for ASN.1 input, which is typically derived from untrusted external data.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt is a natural boundary for attacker-supplied blobs (network/file/IPC) and there is no indication of fuzzer-only behavior in the call chain.",
+            "Stack-based overflows in native code are classically exploitable for control-flow hijacking or at least reliable Denial of Service."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage -> __stack_chk_fail -> abort"
+          ],
+          "recommendations": [
+            "Review and audit Convert_ASN1_to_EncCertExchangeMessage implementation for all stack buffer uses, loops, and memcpy/memmove calls; add strict bounds checks based on actual buffer sizes.",
+            "Harden ASN.1 parsing by validating all length fields and sequence sizes before copying into fixed-size buffers; reject malformed or oversized inputs early in DecryptCertExchange or the JNI layer.",
+            "Rebuild libUbikeyJni.so with full modern mitigations (stack protector, PIE, RELRO, NX) and add robust input validation in Java before calling UbikeyJni.jdecrypt."
+          ],
+          "assumptions": [
+            "UbikeyJni.jdecrypt processes attacker-influenced data such as remote certificate exchange or token blobs.",
+            "The fuzzer exercises code paths that are reachable with realistic app inputs and not gated behind debug-only or unreachable conditions.",
+            "__stack_chk_fail is raised due to an overflow in Convert_ASN1_to_EncCertExchangeMessage and not due to external memory corruption elsewhere."
+          ],
+          "limitations": [
+            "Exact vulnerable instruction and buffer sizes in Convert_ASN1_to_EncCertExchangeMessage are unknown without binary decompilation.",
+            "Java-level call graph and how user/network data flows into UbikeyJni.jdecrypt are not fully visible from the provided crash entry.",
+            "Exploitability details (ASLR layout, additional mitigations, and required payload precision) cannot be concretely confirmed from this crash alone."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Malicious ASN.1 certificate-exchange blob passed to UbikeyJni.jdecrypt via app’s normal decryption/handshake path",
+            "prerequisites": [
+              "Attacker can supply or influence the ASN.1 certificate exchange message processed by the app (e.g., via network handshake, QR/file import, or IPC).",
+              "Target device runs a version of the app with vulnerable libUbikeyJni.so and without additional runtime hardening blocking exploitation.",
+              "Attacker can repeatedly trigger jdecrypt to iterate on payloads (for reliable DoS or potential RCE)."
+            ],
+            "exploit_pipeline": [
+              "Craft an ASN.1-encoded certificate exchange message with manipulated length fields or nested structures to cause an overlong write into a stack buffer in Convert_ASN1_to_EncCertExchangeMessage.",
+              "Deliver the crafted message through the app’s normal channel that ultimately calls UbikeyJni.jdecrypt (e.g., remote server handshake, file-based cert import, or similar feature).",
+              "Trigger the relevant feature in the app so that the crafted blob is passed through DecryptCertExchange into Convert_ASN1_to_EncCertExchangeMessage.",
+              "Observe application crash (__stack_chk_fail/abort) or, with further refinement and knowledge of memory layout, attempt to shape overwrite for control-flow hijacking."
+            ],
+            "poc_commands": [
+              "adb push crafted_cert_exchange.bin /sdcard/Download/payload.bin",
+              "adb shell am start -n <PACKAGE>/<MainActivity> --es cert_path /sdcard/Download/payload.bin",
+              "adb logcat | grep -i UbikeyJni"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.bin"
+            ],
+            "notes": "Exact field structure of the ASN.1 message is not known; the PoC assumes there is a code path that imports or processes external certificate-exchange blobs via UbikeyJni.jdecrypt. Replace <PACKAGE>/<MainActivity> with the real identifiers once known."
+          }
+        },
+        "statistics": {
+          "time": "00:00:39",
+          "llm_requests": 2,
+          "llm_tool_calls": 1,
+          "input_tokens": 12606,
+          "output_tokens": 1441
+        }
+      }
+    ]
+  }
+}

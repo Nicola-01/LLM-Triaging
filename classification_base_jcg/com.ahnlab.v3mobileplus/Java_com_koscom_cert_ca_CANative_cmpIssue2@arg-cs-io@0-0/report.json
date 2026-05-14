@@ -1,0 +1,126 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_Missing/com.ahnlab.v3mobileplus/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.ahnlab.v3mobileplus",
+      "min_sdk": 16,
+      "target_sdk": 31,
+      "version_name": "2.5.23.3",
+      "version_code": "2236"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "ks_memcpy",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "ks_memcpy",
+            "_dPKIHeader",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.koscom.cert.ca.CANative: cmpIssue2([B[BII)I>",
+          "JavaCallGraph": [
+            "<com.koscom.cert.ca.KSCmp: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;IIII)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;III)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CACert: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <o.eh1: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <com.signkorea.openpasscore.TapInterface: issue(Ljava/lang/String;Ljava/lang/String;[BIZ)Ljava/util/Hashtable;> -> <com.koscom.cert.ca.CANative: cmpIssue2([B[BII)I>"
+          ],
+          "LibMap": {
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCertJavaClient.so": [
+              "ks_memcpy",
+              "_dPKIHeader",
+              "Java_com_koscom_cert_ca_CANative_cmpIssue2"
+            ],
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libCloud_Android_Core.so": [
+              "ks_memcpy"
+            ],
+            "APKs_Missing/com.ahnlab.v3mobileplus/lib/arm64-v8a/libzkeylib.so": [
+              "ks_memcpy"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame ks_memcpy suggests a memcpy-related crash, likely due to buffer overrun or invalid pointer. Need to find first app-level frame below allocators: _dPKIHeader is the clear candidate, and we have its decompilation. JNI entry Java_com_koscom_cert_ca_CANative_cmpIssue2 is also decompiled and calls CMP_Certificate_2 via function pointer.",
+            "In _dPKIHeader(param_1) we see ASN.1/DER-style parsing: __dSEQUENCE, __dINTEGER, __dCONTEXTSPECIFIC, __dOCTETSTRING, __get_len, etc. The local buffer acStack_468 is a fixed-size 1032-byte array on the stack. There are several ks_memcpy usages involving acStack_468, including copying from param_1+offset to acStack_468 and also from acStack_468 to a context buffer puVar4+0xf4. The crash is in ks_memcpy; likely called from here or transitively via CMP_Certificate_2. Need to check if length arguments used in ks_memcpy are validated against acStack_468 size.",
+            "In _dPKIHeader, first relevant memcpy: case 1 in switch(local_470): after __dSEQUENCE, they compute local_46c as a length, then `ks_memcpy(acStack_468, param_1 + uVar15, local_46c);` where acStack_468 is 1032 bytes. There is no bounds check to ensure local_46c <= 1032, so a malformed or attacker-controlled ASN.1 field length can cause stack-based buffer overflow. This is classic CWE-121/787. Later ks_memcpy calls copy from acStack_468 (source) to puVar4+0xf4 (dest) with length local_46c, but that direction is safer for stack overflow (still risk on heap if dest too small; unknown). The obvious unbounded copy into stack buffer is enough to call it a vulnerability.",
+            "Need to tie param_1 to attacker-controlled input. _dPKIHeader takes a pointer param_1 to buffer with PKI header bytes. Where is _dPKIHeader called? Direct caller not in stack trace except unknown function between ks_memcpy and _dPKIHeader and CMP_Certificate_2 via function pointer; but given naming and DER parsing this is decoding incoming CMP/PKI messages, presumably from network/remote server or Java-provided data. JNI bridge cmpIssue2 takes two byte arrays ([B[BII), converted to native pointers via GetByteArrayElements. Those arrays originate from TapInterface.issue(..., byte[] ,...), which is Java-level API probably fed by app / network. The fuzzer drives these arrays, but in production they will be attacker-influenced if messages come from outside. At minimum they are untrusted app input. No JNI-side length checks are present; cmpIssue2 just passes pointers and ints to CMP_Certificate_2, which eventually calls _dPKIHeader with param_1 pointing into that buffer.",
+            "Thus: there is a realistic path from Java to native where untrusted byte array bytes (and embedded length fields) drive the DER parsing and set local_46c. __dSEQUENCE and __dCONTEXTSPECIFIC apparently parse ASN.1 but do not enforce a maximum on content length relative to acStack_468. The code only ensures lengths are within the overall SEQUENCE (using uVar5 + iVar12 etc.) but that's about bounds within param_1, not within acStack_468. Therefore local_46c can be up to the total size of the SEQUENCE (potentially large, e.g., thousands of bytes), so the memcpy into fixed 1032-byte stack buffer is unsafe.",
+            "Because this is stack-based overflow in security-sensitive cert/CMP parsing code, potential impacts include code execution or at least crash/DoS. The function uses a stack canary (__stack_chk_fail) but that only detects overflow and aborts; it does not prevent exploitation in builds without full mitigations. Even with canary, this is still a serious memory safety flaw. The presence of TAP SDK path and certification client implies this is production cryptographic code, not fuzz harness logic.",
+            "No evidence that the crash results from impossible harness-only behavior; the fuzzer simply passed an oversized or malicious ASN.1 structure. The same could occur via a malicious server/client or corrupted data in the real app. So this is a genuine vulnerability, high severity. Confidence high because we saw explicit `ks_memcpy(acStack_468, ..., local_46c);` with acStack_468 sized 1032 and no length clamp, and local_46c comes directly from ASN.1 length without max-bound check.",
+            "CWE classification: primary CWE-121 (stack-based buffer overflow) or more general CWE-787 (out-of-bounds write). Given it's a local stack array overflow, CWE-121 fits best; we can also mention CWE-119/787; but per instruction just include the key one(s)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "_dPKIHeader copies attacker-controlled data into a fixed 1032-byte stack buffer using ks_memcpy without bounds checking (`ks_memcpy(acStack_468, ..., local_46c)`)",
+            "local_46c length is derived from parsed ASN.1/DER fields in untrusted input and is only constrained by the outer sequence size, not by acStack_468 size",
+            "JNI bridge cmpIssue2 passes Java byte[] data directly into native CMP/PKI parsing without validation, so malicious Java-level or remote input can trigger the overflow",
+            "Crash in ks_memcpy is consistent with stack-based buffer overflow from oversized copy length"
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libCertJavaClient.so"
+          ],
+          "evidence": [
+            {
+              "function": "_dPKIHeader",
+              "address": "00125790",
+              "file": "libCertJavaClient.so",
+              "snippet": "char acStack_468 [1032];\n...\ncase 1:\n  uVar7 = __dSEQUENCE(param_1 + iVar13,&local_46c);\n  ...\n  ks_memcpy(acStack_468,param_1 + uVar15,local_46c);",
+              "note": "No check ensures local_46c <= sizeof(acStack_468); local_46c comes from ASN.1 parsing of attacker-controlled data."
+            },
+            {
+              "function": "Java_com_koscom_cert_ca_CANative_cmpIssue2",
+              "address": "00115358",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar2 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\nuVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_4,0);\n...\niVar1 = CMP_Certificate_2(uVar2,uVar3,param_5,param_6);",
+              "note": "JNI obtains raw pointers to Java byte[] arguments and passes them to CMP_Certificate_2 without any size validation, enabling untrusted input to reach _dPKIHeader."
+            },
+            {
+              "function": "_dPKIHeader",
+              "address": "00125790",
+              "file": "libCertJavaClient.so",
+              "snippet": "uVar7 = __dCONTEXTSPECIFIC(param_1 + iVar13,&local_46c,&local_470);\n...\nif (7 < local_470) { __set_err__(...,0x57a,0xfffff058); break; }\n...\n// later uses local_46c in ks_memcpy and __dOCTETSTRING\n",
+              "note": "local_46c is repeatedly set from parsed context-specific/ASN.1 lengths derived from the input, not capped against the fixed buffer size."
+            }
+          ],
+          "call_sequence": [
+            "Java_com_koscom_cert_ca_CANative_cmpIssue2 @ 00115358",
+            "CMP_Certificate_2 (via function pointer PTR_CMP_Certificate_2_00180028)",
+            "_dPKIHeader @ 00125790",
+            "ks_memcpy"
+          ],
+          "recommendations": [
+            "Add explicit bounds checking before ks_memcpy into acStack_468 to ensure local_46c does not exceed sizeof(acStack_468) and handle oversize fields as parse errors.",
+            "Propagate and enforce maximum allowed message/field sizes in ASN.1 parsing helpers (__dSEQUENCE, __dCONTEXTSPECIFIC, __dOCTETSTRING) relative to destination buffer capacities.",
+            "Add comprehensive tests/fuzzing around CMP/PKI header parsing to catch overlong length fields and verify that oversized inputs are rejected gracefully without memory corruption."
+          ],
+          "assumptions": [
+            "CMP_Certificate_2 ultimately invokes _dPKIHeader with param_1 pointing into caller-provided byte buffers obtained from Java.",
+            "Java TapInterface.issue and related methods can be influenced by untrusted or remote input in realistic app usage."
+          ],
+          "limitations": [
+            "Exact intermediate native call stack between CMP_Certificate_2 and _dPKIHeader was not visible, but function naming and behavior strongly suggest a direct parse path.",
+            "Size constraints (if any) on the incoming Java byte[] arguments in higher-level Java code were not inspected; assessment assumes they are not strictly bounded to <1032 bytes."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:49",
+          "llm_requests": 4,
+          "llm_tool_calls": 6,
+          "input_tokens": 29041,
+          "output_tokens": 2150
+        }
+      }
+    ]
+  }
+}

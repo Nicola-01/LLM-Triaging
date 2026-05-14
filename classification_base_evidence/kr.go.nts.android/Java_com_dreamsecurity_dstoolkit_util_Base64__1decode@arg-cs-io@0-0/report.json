@@ -1,0 +1,118 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.go.nts.android/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "국세청 손택스",
+      "package": "kr.go.nts.android",
+      "min_sdk": 21,
+      "target_sdk": 34,
+      "version_name": "12.8",
+      "version_code": "175"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strlen_default",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strlen_default",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+          "LibMap": {
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libAppIron-jni_v2.12.4.so": [
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libDSToolkitV30Jni.so": [
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libjnidukpt_cli.so": [
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libslkms.so": [
+              "_decode"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top frame is strlen_default, which indicates a crash inside strlen, typically due to a bad/unterminated pointer. Need first app-level native frame beneath allocators/sanitizers: here stack has strlen_default -> Java_com_dreamsecurity_dstoolkit_util_Base64__1decode -> fuzz_one_input. So relevant function is the JNI entry Java_com_dreamsecurity_dstoolkit_util_Base64__1decode residing in libDSToolkitV30Jni.so.",
+            "However, Ghidra search_functions_by_name could not locate that symbol; maybe stripped or different naming. Java side shows Base64._decode(String) native, which is likely bound to that JNI. Java validates only null/empty but not content; any malformed base64 string can reach native. That is attacker-controlled in realistic app context (Base64.decode is a utility).",
+            "We lack direct decompilation of the JNI to see how it calls strlen, but crash in strlen is often from passing a non-null, non-mapped pointer or missing terminator. Could this be fuzz harness passing bad UTF-8 / no null terminator? Actually JVM passes UTF-16 jstring; JNI code converts via GetStringUTFChars or similar, which ensures internal '\u0000' terminator. However, harness fuzzes Java API, not JNI directly, so pointer should be valid from JVM's perspective.",
+            "But the fuzz harness may feed arbitrary byte sequences into Java string construction, yet Java strings are length-tracked and safe; native conversion still yields valid buffer and terminator. So strlen crash would come from code using some internal pointer not initialized or going past buffer due to logic, not harness fault. To determine if this is vulnerability, need to see if strlen is called on data derived from attacker-controlled base64 input beyond simple conversion. Without decompiling JNI, can't see exact bug, but the presence of custom Base64decode / Base64encode C functions in same lib suggests they implement their own Base64 and likely use strlen on C strings derived from Java input.",
+            "Potential patterns: using `strlen` on decoded binary (which can contain NUL) is logic bug but not necessarily memory safety; using `strlen` on pointer computed from decoded data (e.g., pointer arithmetic gone wrong) can be memory safety. Absent evidence of memcpy etc., current crash is in strlen itself, so it's an OOB read at worst. That can still be info leak or crash, but severity is lower unless used later.",
+            "However, the fuzzing framework got a direct crash in strlen_default, which means invalid pointer or unmapped memory: that is memory safety. Attacker control: base64 string is attacker-controlled; JNI likely decodes into internal buffer, perhaps updates this.byteBuff and strBuff. The code doesn't show any constraints on size; native must handle arbitrary lengths. Therefore, an unchecked strlen over attacker-influenced buffer is plausible vulnerable path.",
+            "Yet I cannot prove the exact mis-handling because native symbol not decompiled. Also scudo/asan not in stack; just plain strlen. This looks like an actual bug in the native Base64 implementation triggered by malformed or very long input. In real app, users or network might feed malicious base64 to library, so reachable.",
+            "Given incomplete native evidence, I classify as likely vulnerability (memory safety via invalid pointer/unterminated string from base64 decode path), but with moderate confidence, medium severity (DoS and possibly OOB read).",
+            "No specific CWE beyond generic out-of-bounds read / buffer overrun, due to unsafe string handling."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.65,
+          "reasons": [
+            "Crash occurs inside strlen_default called from app JNI Base64 decode, indicating use of C string length on attacker-influenced data",
+            "Java Base64.decode exposes native _decode(String) to arbitrary input without validating content or length, so malformed strings can reach native",
+            "Failure mode (strlen crash) is consistent with memory safety bug such as missing terminator or bad pointer in custom Base64 implementation, not merely harness-only misuse"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-787"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libDSToolkitV30Jni.so"
+          ],
+          "evidence": [
+            {
+              "function": "com.dreamsecurity.dstoolkit.util.Base64.decode",
+              "file": "classes.dex",
+              "snippet": "public byte[] decode(String str) {\n    if (str == null || str.length() == 0) {\n        throw new DSToolkitException(\"The data is empty. You must input a value for it.\");\n    }\n    if (_decode(str) <= 0) {\n        return this.byteBuff;\n    }\n    throw new DSToolkitException(errBuff2String());\n}",
+              "note": "Java passes arbitrary non-empty string directly into native _decode without further checks."
+            },
+            {
+              "function": "strlen_default",
+              "file": "libDSToolkitV30Jni.so",
+              "note": "Top native frame in crash; indicates invalid/untrusted pointer or non-terminated buffer given to strlen from Base64 decode JNI."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "com.dreamsecurity.dstoolkit.util.Base64.decode",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "strlen_default"
+          ],
+          "recommendations": [
+            "Decompile and audit Java_com_dreamsecurity_dstoolkit_util_Base64__1decode and related Base64decode routines to locate strlen usage and ensure all inputs are properly bounded and null-terminated",
+            "Replace unsafe strlen-based processing on attacker-influenced buffers with length-aware APIs (track explicit lengths from Java, avoid trusting embedded terminators)",
+            "Add fuzz tests for Base64.decode through the public Java API using realistic malformed and oversized inputs to confirm fix"
+          ],
+          "assumptions": [
+            "Native function Java_com_dreamsecurity_dstoolkit_util_Base64__1decode is implemented in libDSToolkitV30Jni.so and performs custom Base64 decoding using C strings",
+            "Crash in strlen_default reflects invalid pointer or missing terminator rather than an injected harness bug",
+            "Application can expose Base64.decode to untrusted data sources such as network or user input"
+          ],
+          "limitations": [
+            "Could not decompile the JNI symbol Java_com_dreamsecurity_dstoolkit_util_Base64__1decode to see exact misuse of strlen",
+            "No concrete register/memory dump from crash site to prove pointer origin or exact overwrite mechanism",
+            "Stack trace is minimal and does not show intermediate helper functions that might validate or sanitize the input"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:31",
+          "llm_requests": 5,
+          "llm_tool_calls": 8,
+          "input_tokens": 106469,
+          "output_tokens": 1621
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/kr.go.nts.android/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "국세청 손택스",
+      "package": "kr.go.nts.android",
+      "min_sdk": 21,
+      "target_sdk": 34,
+      "version_name": "12.8",
+      "version_code": "175"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strlen_default",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strlen_default",
+            "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+          "LibMap": {
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libAppIron-jni_v2.12.4.so": [
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libDSToolkitV30Jni.so": [
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "Java_com_dreamsecurity_dstoolkit_util_Base64__1decode",
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libjnidukpt_cli.so": [
+              "_decode"
+            ],
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libslkms.so": [
+              "_decode"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is the JNI function Java_com_dreamsecurity_dstoolkit_util_Base64__1decode; crash reason is in strlen_default, which indicates a standard strlen implementation was called with an invalid pointer or non-terminated string.",
+            "No detailed C stack is given apart from strlen_default -> JNI decode; we do not see allocator or sanitizer frames, and there is no evidence of memcpy/memmove-based overflows. The immediate failing operation is strlen on a pointer/value derived from JNI input.",
+            "For Base64 decoding JNI bridges, the common pattern is: get a jbyteArray or jstring from Java, obtain its raw bytes via GetByteArrayElements/GetStringUTFChars, then call a native decode routine which may call strlen on the input or intermediate buffers.",
+            "In realistic application code, Java-level Base64 helpers only pass well-formed byte[]/String inputs built from app or network data. However, the fuzz harness fuzz_one_input explicitly targets the JNI entry with arbitrary bytes, including embedded NULs or missing terminators, which can make strlen walk off into unmapped memory or into regions not meant for string operations.",
+            "The critical assessment point is whether the JNI function or its callees *assume* NUL-terminated input while actually accepting arbitrary byte arrays from Java. If Java passes a byte[] without forcing a trailing NUL, and the native side calls strlen on that buffer, then even under normal app usage a malicious caller controlling the Java layer (e.g., via reflection, compromised app code, or attacker-supplied plugin) could trigger out-of-bounds reads or crashes.",
+            "We lack the decompiled native code, but the minimal stack shows strlen_default directly above the JNI bridge, suggesting the JNI implementation itself (or a very thin inlined helper) is invoking strlen on an argument related to the Base64 data, likely a pointer that is not validated or guaranteed to be terminated as a string.",
+            "This is a classic category: using string APIs (strlen) on binary or attacker-controlled buffers without enforcing NUL termination or bounds constitutes an out-of-bounds read vulnerability (CWE-125) and potentially CWE-170 (improper null termination). Even if the specific fuzz crash is an access violation rather than RCE, it is still a memory-safety bug and a meaningful DoS vector when called with crafted input.",
+            "The presence of multiple libs exposing _decode and one JNI method suggests the Base64 implementation may be reused and performance-oriented, but nothing in the trace points to the crash being due purely to the harness (e.g., NULL jenv, bogus jclass). The harness entry fuzz_one_input likely only varies the Java arguments, which are a realistic attack surface for any component that can call the Base64 helper.",
+            "Given typical Android threat models, arbitrary external apps cannot directly invoke this JNI, but in the security/vulnerability context of this assessment, we assume attacker control at the Java API layer is in scope. Under that assumption, calling strlen on attacker-controlled buffers without length checks is unsafe and should be treated as a vulnerability, at least as a denial-of-service and potential OOB read. Without code we cannot assert full exploitability, but it clearly meets the definition of a bug influenced by attacker-controllable data leading to unsafe behavior.",
+            "Therefore, classify this crash as a likely vulnerability arising from improper use of strlen on untrusted Base64 input in the JNI bridge, with medium severity (DoS and possible info leak), and moderate confidence due to missing exact source snippet."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.7,
+          "reasons": [
+            "Crash occurs in strlen_default invoked directly from JNI Base64 decode function, implying use of C string APIs on data derived from Java input.",
+            "Fuzz harness varies JNI arguments only; no evidence of artificial NULL JNIEnv or impossible conditions, so failure likely reflects real unsafe handling of arbitrary byte/string data.",
+            "Using strlen on attacker-controlled or non-terminated buffers can cause out-of-bounds reads and guaranteed process crash (DoS), satisfying vulnerability criteria even if RCE is not shown."
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-170"
+          ],
+          "severity": "medium",
+          "affected_libraries": [
+            "APKs_FINAL/kr.go.nts.android/lib/arm64-v8a/libDSToolkitV30Jni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_dreamsecurity_dstoolkit_util_Base64__1decode -> strlen_default"
+          ],
+          "recommendations": [
+            "Review and modify Java_com_dreamsecurity_dstoolkit_util_Base64__1decode implementation to avoid strlen on attacker-controlled buffers; use explicit length arguments from Java instead.",
+            "Ensure that all inputs to string APIs (strlen, strcpy, strcat, etc.) are guaranteed NUL-terminated and within known bounds, or replace with bounded functions operating on explicit lengths.",
+            "Add input validation and robust error handling for Base64 decode JNI parameters, and extend tests to cover malformed/non-terminated and binary inputs."
+          ],
+          "assumptions": [
+            "Java-side callers or potentially malicious components can supply arbitrary data to the Base64 JNI decode method.",
+            "The crash is due to strlen reading past the end of a non-terminated buffer derived from Java input, not due to a corrupted JNIEnv or harness-only misuse."
+          ],
+          "limitations": [
+            "No decompiled native code for Java_com_dreamsecurity_dstoolkit_util_Base64__1decode or surrounding helpers was available to confirm exact data flow.",
+            "The exact JNI signature and Java wrapper for Base64__decode were not inspected, so argument types and validation logic are inferred from naming and typical patterns."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:35",
+          "llm_requests": 2,
+          "llm_tool_calls": 4,
+          "input_tokens": 13220,
+          "output_tokens": 1259
+        }
+      }
+    ]
+  }
+}

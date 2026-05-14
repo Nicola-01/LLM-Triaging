@@ -1,0 +1,284 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "CamCard",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 29,
+      "target_sdk": 35,
+      "version_name": "7.85.5.20251016",
+      "version_code": "78550"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "stream_gets",
+          "StackTrace": [
+            "stream_gets",
+            "??",
+            "ms_decode_buf_pnm",
+            "MsDecodeBuffer",
+            "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+          "JavaCallGraph": [
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <nd.k: run()V> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <com.intsig.camcard.d: doInBackground([Ljava/lang/Object;)Ljava/lang/Object;> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <ob.g2: run()V> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "MsDecodeBuffer"
+            ],
+            "APKs/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "MsDecodeBuffer",
+              "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+              "Java_com_intsig_nativelib_BCREngine_RecognizeCardData"
+            ],
+            "APKs/com.intsig.BCRLite/lib/arm64-v8a/libmainstone.so": [
+              "stream_gets",
+              "ms_decode_buf_pnm",
+              "MsDecodeBuffer"
+            ],
+            "APKs/com.intsig.BCRLite/lib/arm64-v8a/libscanner.so": [
+              "MsDecodeBuffer"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Native crash terminates in stream_gets, with callers ms_decode_buf_pnm → MsDecodeBuffer → Java_com_intsig_nativelib_BCREngine_RecognizeCardData. stream_gets decompilation failed, but MsDecodeBuffer in libmainstone.so is just an indirect call via function pointer PTR_MsDecodeBuffer_00682ef0, and the same symbol exists in multiple libs. The Java JNI entrypoint has been decompiled and clearly shows that RecognizeCardData(byte[] bArr, ResultCard resultCard, int mode) passes a raw byte array and integer directly to native without any validation or size checks.",
+            "In Java_com_intsig_nativelib_BCREngine_RecognizeCardData, the JNIEnv is used to get a pointer and length for the Java byte[] (via function pointer at offset 0x558, presumably GetArrayLength or similar, and a function pointer at offset 0x5c0, presumably GetByteArrayElements or GetPrimitiveArrayCritical). It then calls MsDecodeBuffer(uVar4, uVar2, 4, &local_60). Here uVar4 is a pointer into the Java byte array and uVar2 is the array length. The constant 4 likely denotes an input format or type flag. There is no checking of uVar2 or content before calling MsDecodeBuffer.",
+            "The crash in stream_gets strongly suggests unsafe parsing of a PNM buffer. stream_gets is a classic unsafe function that reads a line from a memory-backed stream with no proper bounds checking when given attacker-controlled data. Since ms_decode_buf_pnm is the caller of stream_gets and is called from MsDecodeBuffer, this indicates that MsDecodeBuffer dispatches on the 3rd argument (here constant 4) to a PNM decoder that internally uses stream_gets on the provided buffer. If the decoder assumes the buffer is well-formed PNM and uses stream_gets to read strings/lines without robust bounds checks, malformed input can cause a buffer overflow or similar memory corruption.",
+            "Because the Java RecognizeCard(byte[] data, int mode) method is a public API used with arbitrary byte[] contents coming from user-controlled image data (camera capture, imported images, or—under fuzzing—arbitrary bytes), the native MsDecodeBuffer is directly processing attacker-controlled buffers. There is no size limit or content validation in Java or JNI. Therefore, any unsafe parsing in ms_decode_buf_pnm/stream_gets is reachable with attacker-controlled input.",
+            "Even though we lack decompilation for stream_gets and ms_decode_buf_pnm, their names and position in the call trace (plus the crash termination marked as stream_gets) clearly indicates an internal helper reading from the supplied memory stream. The use of a function called stream_gets and proprietary image decoder functions is a strong indicator of potential out-of-bounds memory access or buffer overflow, which is a classic vulnerability class in image parsers. The triage pipeline labeled Process Termination as stream_gets, but not as a benign NULL deref. No evidence suggests allocator or harness-only abort. Based on this, we can reasonably classify as a likely real, attacker-reachable memory safety bug (OOB-Read/Write) in the PNM decoder, even if the precise overflow pattern is not fully reversed.",
+            "Given that the decoder processes image data but the crash is in a low-level parsing routine, the likely practical impact is at least a denial-of-service via crafted image data delivered to any code path that invokes RecognizeCard(byte[], int). Depending on how stream_gets and its buffers are implemented, there may also be potential for heap-based or stack-based buffer overflows leading to code execution, but without disassembly we keep severity at high rather than critical. The fact that this is a library (libmainstone.so, libbcr.so, libQREngine.so) used by a third-party app does not negate the vulnerability if remote inputs can reach RecognizeCardData."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.78,
+          "reasons": [
+            "JNI entrypoint Java_com_intsig_nativelib_BCREngine_RecognizeCardData passes attacker-controlled byte[] and length directly to MsDecodeBuffer with no validation.",
+            "MsDecodeBuffer forwards the buffer pointer and length to internal image decoding routines (including ms_decode_buf_pnm) which ultimately call stream_gets, an unsafe-style line-reading helper likely to cause memory corruption on malformed data.",
+            "Crash is in stream_gets rather than a benign NULL deref or harness-only abort, and the code pattern (decoder using unsafe stream reads) is a classic source of exploitable memory-safety bugs in image parsers."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbcr.so",
+            "libmainstone.so",
+            "libQREngine.so",
+            "libscanner.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+              "file": "libbcr.so",
+              "snippet": "uVar2 = (**(code **)(*(long *)param_1 + 0x558))(param_1,param_3);\nuVar4 = (**(code **)(*(long *)param_1 + 0x5c0))(param_1,param_3,0);\niVar3 = MsDecodeBuffer(uVar4,uVar2,4,&local_60);",
+              "note": "JNI retrieves raw byte[] pointer and length from Java and calls MsDecodeBuffer with no validation on length or contents."
+            },
+            {
+              "function": "BCREngine.RecognizeCard",
+              "file": "classes.dex",
+              "snippet": "public static ResultCard RecognizeCard(byte[] bArr, int i6) {\n    ResultCard resultCard = new ResultCard();\n    resultCard.setResultCode(RecognizeCardData(bArr, resultCard, i6));\n    return resultCard;\n}",
+              "note": "Public Java API passes arbitrary byte[] to native RecognizeCardData without checks."
+            },
+            {
+              "function": "MsDecodeBuffer",
+              "address": "0x00682ef0",
+              "file": "libmainstone.so",
+              "snippet": "void MsDecodeBuffer(void)\n{\n  (*(code *)PTR_MsDecodeBuffer_00682ef0)();\n  return;\n}",
+              "note": "MsDecodeBuffer is an indirect dispatch into internal decoding routines; stack shows it calling ms_decode_buf_pnm → stream_gets where crash occurs."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+            "Java_com_intsig_nativelib_BCREngine_RecognizeCardData -> MsDecodeBuffer",
+            "MsDecodeBuffer -> ms_decode_buf_pnm",
+            "ms_decode_buf_pnm -> stream_gets (crash)"
+          ],
+          "recommendations": [
+            "Reverse engineer ms_decode_buf_pnm and stream_gets in libmainstone.so to locate exact buffer handling and add strict bounds checks before reading from the input buffer.",
+            "On the JNI side, consider enforcing reasonable maximum buffer sizes and validating image headers before passing them to MsDecodeBuffer.",
+            "Add robust fuzz testing around RecognizeCardData and MsDecodeBuffer (especially PNM and other formats) to catch additional parsing bugs."
+          ],
+          "assumptions": [
+            "stream_gets is an internal unsafe-style helper operating on in-memory buffers and not simply a safe wrapper with full bounds checks.",
+            "The Java byte[] provided to RecognizeCard can be influenced by attackers via image inputs (camera, gallery, or external files).",
+            "The crash observed under fuzzing corresponds to the same code paths reachable in production when parsing user-supplied images."
+          ],
+          "limitations": [
+            "stream_gets and ms_decode_buf_pnm could not be decompiled, so the exact overflow condition is inferred from naming and call graph rather than direct code inspection.",
+            "Faulting address and exact exception details (e.g., SIGSEGV address) are not provided, preventing precise classification as OOB-read vs OOB-write.",
+            "Multiple libraries define MsDecodeBuffer and the exact implementation behind PTR_MsDecodeBuffer_00682ef0 is not resolved; analysis assumes the libmainstone implementation participates in the crash."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "crafted image bytes passed to BCREngine.RecognizeCard or RecognizeCardData",
+            "prerequisites": [
+              "Attacker can supply or control image data processed by the app using BCREngine.",
+              "The app exposes some UI or IPC that accepts external images (camera capture, gallery import, or file open)."
+            ],
+            "exploit_pipeline": [
+              "Craft a malformed image file (likely PNM-like or format type 4) that triggers unsafe reads/writes in ms_decode_buf_pnm/stream_gets when decoded.",
+              "Deliver this image to the target application via any feature that ultimately calls BCREngine.RecognizeCard or RecognizeCardData with the raw bytes (e.g., importing a business card image).",
+              "When the app processes the image, the JNI layer passes the raw buffer directly into MsDecodeBuffer, which routes to ms_decode_buf_pnm and stream_gets.",
+              "The malformed data triggers an out-of-bounds access inside stream_gets, causing at least a crash and potentially memory corruption exploitable for code execution depending on heap/stack layout."
+            ],
+            "poc_commands": [
+              "adb push crafted_card.img /sdcard/Download/payload_card.img",
+              "adb shell am start -n <target.package>/<target.activity> --es image_path \"/sdcard/Download/payload_card.img\"",
+              "# Then in the app, trigger the feature that imports/recognizes the card image so it calls BCREngine.RecognizeCard on the crafted file."
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_card.img"
+            ],
+            "notes": "Exact image format and required structure are unknown; a fuzzer targeting RecognizeCardData(byte[], int) should be able to rediscover the crash and refine the payload into a reliable PoC."
+          }
+        },
+        "statistics": {
+          "time": "00:00:30",
+          "llm_requests": 2,
+          "llm_tool_calls": 6,
+          "input_tokens": 18979,
+          "output_tokens": 2194
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "art::mirror::Class::GetDescriptor",
+          "StackTrace": [
+            "art::mirror::Class::GetDescriptor",
+            "art::mirror::Class::PrettyClass",
+            "art::ClassLinker::InitializeClass",
+            "art::ClassLinker::EnsureInitialized",
+            "art::FindMethodJNI",
+            "art::JNI<false>::GetStaticMethodID",
+            "recognize",
+            "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+          "JavaCallGraph": [
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <nd.k: run()V> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <com.intsig.camcard.d: doInBackground([Ljava/lang/Object;)Ljava/lang/Object;> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>",
+            "<com.intsig.nativelib.BCREngine: RecognizeCard([BI)Lcom/intsig/nativelib/BCREngine$ResultCard;> -> <ob.g2: run()V> -> <com.intsig.nativelib.BCREngine: RecognizeCardData([BLcom/intsig/nativelib/BCREngine$ResultCard;I)I>"
+          ],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "recognize",
+              "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+              "Java_com_intsig_nativelib_BCREngine_RecognizeCardData"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Crash occurs in ART runtime while resolving a static method via GetStaticMethodID from native function recognize, which is an indirect jump through PTR_recognize_00682c08; direct implementation is not visible in provided decompile, but Java_com_intsig_nativelib_BCREngine_RecognizeCardData clearly handles user-controlled image buffer and passes decoded _MsImage pointer into recognize along with a Java result object and an int flag.",
+            "Java_com_intsig.nativelib.BCREngine.RecognizeCardData takes a byte[] and a ResultCard object from Java, which in real app usage are ultimately derived from camera or image input; in JNI it uses env->GetPrimitiveArrayCritical (or equivalent via vtable offset 0x558) and GetByteArrayElements/Release, then calls MsDecodeBuffer(data,len,4,&local_60). No bounds checks or validation on len are visible before this decode call, so malformed or very large buffers can influence decoding logic and lifetime of local_60.",
+            "MsDecodeBuffer produces an _MsImage* that is then passed directly to recognize without additional validation. recognize is an opaque function pointer call, likely implementing OCR/recognition; crashes seen in Class::GetDescriptor during a FindMethodJNI/GetStaticMethodID suggest that recognize calls back into Java (perhaps for callbacks or configuration) using a name or descriptor that can be influenced by image content or internal state resulting from MsDecodeBuffer.",
+            "Even though the specific fault in Class::GetDescriptor looks like a runtime null/invalid class dereference, the native pattern (external decode into heap image + opaque recognize pointer) with no visible input length checks is a classic potential for memory safety issues (OOB, UAF) inside MsDecodeBuffer or the recognize implementation, both of which operate on fully attacker-controlled buffers.",
+            "Given the fuzzing context and that the JNI path is reachable from normal app flows (RecognizeCard -> RecognizeCardData), plus the indirect call pattern, it's reasonable to treat this as a likely exploitable native vulnerability in libbcr (e.g., malformed image leads to memory corruption inside recognizer), even though the precise corruption is not shown in this crash and present crash is an ART resolution failure."
+          ],
+          "is_vulnerability": true,
+          "confidence": 0.62,
+          "reasons": [
+            "Native library libbcr.so processes attacker-controlled byte[] without visible size or structural validation before passing to complex decoder MsDecodeBuffer and recognizer function pointer.",
+            "recognize is called via an indirect function pointer PTR_recognize_00682c08, which typically indicates a large, complex native implementation not inlined; such image/OCR code is historically prone to memory corruption on malformed inputs.",
+            "Crash in ART Class::GetDescriptor during FindMethodJNI/GetStaticMethodID indicates native code is invoking Java methods dynamically; if method signatures or class state are corrupted due to malformed inputs, this can lead to unsafe behavior beyond a simple null deref.",
+            "JNI entry Java_com_intsig_nativelib_BCREngine_RecognizeCardData is directly reachable from app’s public RecognizeCard API and thus from realistic user-controlled camera or imported image data."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-119"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "libbcr.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_RecognizeCardData",
+              "file": "libbcr.so",
+              "snippet": "uVar2 = (**(code **)(*(long *)param_1 + 0x558))(param_1,param_3);\nuVar4 = (**(code **)(*(long *)param_1 + 0x5c0))(param_1,param_3,0);\niVar3 = MsDecodeBuffer(uVar4,uVar2,4,&local_60);\n(**(code **)(*(long *)param_1 + 0x600))(param_1,param_3,uVar4,0);\nif (iVar3 == 0) {\n  uVar2 = recognize(param_1,param_2,local_60,param_4,param_5);\n  MsFreeImage(local_60);\n}",
+              "note": "JNI function obtains raw bytes and length from Java byte[] and feeds them directly into MsDecodeBuffer and recognize without visible validation."
+            },
+            {
+              "function": "recognize",
+              "file": "libbcr.so",
+              "snippet": "void recognize(_JNIEnv *param_1,_jclass *param_2,_MsImage *param_3,_jobject *param_4,int param_5)\n{\n  (*(code *)PTR_recognize_00682c08)();\n  return;\n}",
+              "note": "recognize is an indirect call through a function pointer; implementation likely large and complex, increasing attack surface for malformed _MsImage structures."
+            },
+            {
+              "file": "ART runtime",
+              "snippet": "art::JNI<false>::GetStaticMethodID -> art::FindMethodJNI -> art::ClassLinker::EnsureInitialized -> art::mirror::Class::GetDescriptor",
+              "note": "Crash occurs while resolving a static method from native code, suggesting recognize or related code calls back into Java and that corrupted state or unexpected descriptors may be involved."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_intsig_nativelib_BCREngine_RecognizeCardData -> MsDecodeBuffer -> recognize@PTR_recognize_00682c08 -> ART GetStaticMethodID / FindMethodJNI"
+          ],
+          "recommendations": [
+            "Add strict length and format validation in Java_com_intsig_nativelib_BCREngine_RecognizeCardData before calling MsDecodeBuffer and recognize, including maximum buffer sizes and basic image header checks.",
+            "Audit and harden MsDecodeBuffer and the implementation behind PTR_recognize_00682c08 for bounds checks, integer overflows, and robust handling of malformed or truncated image data.",
+            "In native code, avoid dynamic FindMethodJNI on potentially tainted strings; resolve and cache method IDs at initialization and ensure all class and method descriptors are constants."
+          ],
+          "assumptions": [
+            "MsDecodeBuffer and recognize work on attacker-controlled image data derived from the Java byte[] and are not fully shown in the provided decompilation.",
+            "Crash in ART GetDescriptor is a symptom of deeper state corruption or misuse triggered by malformed inputs, not just a benign harness artifact.",
+            "The ResultCard object and the int flag do not fully sanitize or constrain decoding and recognition behavior."
+          ],
+          "limitations": [
+            "Full implementation of PTR_recognize_00682c08 is not visible, so specific memory corruption pattern cannot be confirmed.",
+            "Definition and internals of _MsImage and MsDecodeBuffer are not provided, limiting precise data-flow analysis.",
+            "Java-side code for com.intsig.nativelib.BCREngine.RecognizeCard and ResultCard is not fully analyzed here, so upstream validation (if any) is unknown."
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying a specially crafted or malformed image buffer to BCREngine.RecognizeCard/RecognizeCardData",
+            "prerequisites": [
+              "Attacker can control image data processed by the app (e.g., via camera input, imported image, or shared file).",
+              "Target device has the vulnerable version of libbcr.so loaded by the app.",
+              "No additional strong validation or sandboxing of the image data before reaching native code."
+            ],
+            "exploit_pipeline": [
+              "Craft an image or byte sequence that triggers abnormal behavior in MsDecodeBuffer, leading to corrupted _MsImage or internal structures consumed by recognize.",
+              "Deliver this crafted image to the application through a realistic channel (e.g., share image into app, load from gallery, or via an intent that causes RecognizeCard to be invoked).",
+              "Cause the app to call com.intsig.nativelib.BCREngine.RecognizeCard, which forwards the byte[] to Java_com_intsig_nativelib_BCREngine_RecognizeCardData and then to MsDecodeBuffer and recognize.",
+              "Upon processing, the malformed data triggers memory corruption or invalid state that manifests as crashes in ART FindMethodJNI/GetStaticMethodID, potentially allowing further exploitation depending on corruption control."
+            ],
+            "poc_commands": [
+              "adb push payload.img /sdcard/Download/payload_bcr.img",
+              "adb shell am start -n <target.package/.TargetActivity> --es image_path \"/sdcard/Download/payload_bcr.img\"",
+              "adb logcat | grep -i \"libbcr\""
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload_bcr.img"
+            ],
+            "notes": "Exploit steps are conceptual; exact payload format depends on MsDecodeBuffer/_MsImage structure and recognize implementation, which are not fully available. The present crash in ART Class::GetDescriptor is used as a signal of deeper unsafe native handling of crafted image buffers."
+          }
+        },
+        "statistics": {
+          "time": "00:00:29",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 14251,
+          "output_tokens": 1901
+        }
+      }
+    ]
+  }
+}

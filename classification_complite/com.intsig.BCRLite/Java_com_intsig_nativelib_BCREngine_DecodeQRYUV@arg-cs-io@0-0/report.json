@@ -1,0 +1,146 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.intsig.BCRLite/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "0x7f1100df",
+      "package": "com.intsig.BCRLite",
+      "min_sdk": 28,
+      "target_sdk": 31,
+      "version_name": "7.63.5.20230731",
+      "version_code": "76350"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "FastDecodeQR_YUV",
+          "StackTrace": [
+            "FastDecodeQR_YUV",
+            "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so": [
+              "FastDecodeQR_YUV"
+            ],
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so": [
+              "FastDecodeQR_YUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Identify first app-level native frame: FastDecodeQR_YUV is top; decompiled and is an import thunk calling PTR_FastDecodeQR_YUV_0068ba68. Next frame is Java_com_intsig_nativelib_BCREngine_DecodeQRYUV, decompiled with full body.",
+            "Check for memcpy/memmove/etc inside JNI function: none present. Crash reason string is just function name, not explicit SIGSEGV/ASAN, but fuzz harness reports termination at FastDecodeQR_YUV, implying fault likely in underlying implementation in libQREngine.so via function pointer PTR_FastDecodeQR_YUV_0068ba68.",
+            "Data/control flow in JNI bridge: It calls JNI env function table entries at offsets 0x558, 0x5c0, 0x600, 0x518. At 0x5c0 it obtains a jobject/byte array (uVar4) from param_3 (a Java object), then calls FastDecodeQR_YUV(uVar4,param_4,param_5,param_4,auStack_1078). local_106c and local_68 are stack locals subsequently logged and used as size argument into env->NewByteArray-like native call (*env+0x518)(param_1,auStack_1068,local_106c). These locals are not initialized in the decompiled code; they are presumably written by FastDecodeQR_YUV via the auStack_1078 output buffer (e.g., structure containing width/height).",
+            "The vulnerability locus is likely inside the real FastDecodeQR_YUV implementation in libQREngine.so (via function pointer PTR_FastDecodeQR_YUV_0068ba68), which we have not opened yet. However, from this lib we can see call interface: FastDecodeQR_YUV takes (uVar4,param_4,param_5,param_4,auStack_1078). param_4 and param_5 are directly from Java, unvalidated in this JNI stub. They are likely width/height or buffer sizes for YUV data. No range checks performed here before passing to decoder, so malformed or extreme integer values from Java can trigger out-of-bounds or invalid memory access inside decoder, making it a plausible memory corruption vulnerability.",
+            "Check whether these args are attacker-controlled in real app: JNI signature not shown, but common pattern: (JNIEnv* env, jclass/obj, jobject yuv, jint width, jint height). Fuzzer clearly controls them and crashes. In production, an attacker could likely influence them via camera/image input only indirectly; but if API is exposed to arbitrary Java code within app or to 3P components (e.g., via exported activity or service that forwards parameters), a malicious app extension or compromised scripting layer could call it with arbitrary dimensions. For threat model of native lib itself, unvalidated dimensions still represent a vulnerability (missing bounds checking in API wrapper).",
+            "We must apply mandatory data-flow backward tracing: For FastDecodeQR_YUV args: src/dst/len unknown inside libQREngine.so, but we can trace parameters in wrapper. uVar4 comes from JNI env->GetSomething(param_1,param_3,0); param_4, param_5 are direct JNI args; auStack_1078 is stack buffer of size 0x106c-? (~4200 bytes). local_106c and local_68 are likely written through auStack_1078 by FastDecodeQR_YUV; there is risk of stack-based overflow if FastDecodeQR_YUV writes more than auStack_1078 size, but that would be internal to libQREngine. We don't see memcpy there from this lib. The crash is at FastDecodeQR_YUV thunk, not in JNI wrapper, so overflow probably happens in underlying implementation.",
+            "No evidence of harness-only misuse such as passing null where production never would; JNI wrapper does no null checks, so null from Java is also possible in real use if API misused. But standard camera pipeline would pass valid objects, so some extreme fuzzing cases might not be reachable from UI. However, since this is a general-purpose decoder entry, any bug that occurs for some YUV data/size combination reachable from the camera (e.g., odd dimensions, overlarge buffer) is realistic. Without the other lib, we cannot confirm exact corruption type, but decode crashes under fuzzing indicates internal robustness issue. Combined with missing validation at JNI boundary, I judge this as likely vulnerability, but with medium confidence because we lack direct view of the decoding function.",
+            "Severity assessment: If FastDecodeQR_YUV performs typical image decoding with array indexing based on width/height, invalid or attacker-controlled dimensions commonly lead to heap/stack OOB, integer overflow, etc., which can be exploitable (CWE-787). So potential impact high. But without explicit ASAN report, we can't confirm; set severity high with some conservatism.",
+            "Call sequence via MCP: main -> fuzz_one_input -> Java_com_intsig_nativelib_BCREngine_DecodeQRYUV -> FastDecodeQR_YUV (thunk) -> PTR_FastDecodeQR_YUV_0068ba68 (real impl in libQREngine.so). Affected libraries: libbcr.so for JNI and thunk, libQREngine.so for actual decoding.",
+            "Given incomplete visibility of libQREngine, mark is_vulnerable true, confidence ~0.65. Recommend: inspect and decompile PTR_FastDecodeQR_YUV_0068ba68 target in libQREngine.so; add defensive bounds checking on width/height and buffer size in JNI stub; add structured error handling when decoder returns negative or unexpected sizes before allocating/using buffers."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.65,
+          "reasons": [
+            "JNI bridge Java_com_intsig_nativelib_BCREngine_DecodeQRYUV forwards attacker-controlled integer parameters (likely width/height) directly into FastDecodeQR_YUV without any validation",
+            "Crash occurs inside FastDecodeQR_YUV implementation (via function pointer) in external libQREngine.so, typical location for memory-safety bugs in image decoders",
+            "JNI stub uses stack buffers and accepts decoder outputs (local_106c, local_68) for subsequent allocation, implying that malformed data or sizes can lead to memory corruption or at least uncontrolled native crash"
+          ],
+          "cwe_ids": [
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+            "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libQREngine.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+              "snippet": "iVar3 = FastDecodeQR_YUV(uVar4,param_4,param_5,param_4,auStack_1078);",
+              "note": "JNI bridge passes unvalidated integer parameters directly into decoder along with stack buffer for output."
+            },
+            {
+              "function": "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+              "snippet": "undefined1 auStack_1078 [12];\nundefined4 local_106c;\nundefined1 auStack_1068 [4096];\n...\nif (0 < *(int *)puVar2) {\n  __android_log_print(6,\"libbcr\",\"FastDecodeQR %d %d\",local_106c,local_68);\n}\nuVar4 = (**(code **)(*param_1 + 0x518))(param_1,auStack_1068,local_106c);",
+              "note": "Decoder likely writes into auStack_1078 and/or auStack_1068 to set sizes; misuse can corrupt stack or produce unsafe size local_106c."
+            },
+            {
+              "function": "FastDecodeQR_YUV",
+              "file": "APKs_FINAL/com.intsig.BCRLite/lib/arm64-v8a/libbcr.so",
+              "snippet": "void FastDecodeQR_YUV(void)\n{\n  (*(code *)PTR_FastDecodeQR_YUV_0068ba68)();\n  return;\n}",
+              "note": "This lib’s FastDecodeQR_YUV is a thin thunk to an implementation in libQREngine.so, where the actual crash and potential memory corruption occur."
+            }
+          ],
+          "call_sequence": [
+            "main",
+            "fuzz_one_input",
+            "Java_com_intsig_nativelib_BCREngine_DecodeQRYUV",
+            "FastDecodeQR_YUV",
+            "PTR_FastDecodeQR_YUV_0068ba68 (in libQREngine.so)"
+          ],
+          "recommendations": [
+            "Decompile and audit the real FastDecodeQR_YUV implementation in libQREngine.so, focusing on uses of width/height and buffer pointers to identify concrete out-of-bounds or overflow conditions",
+            "Add robust validation in Java_com_intsig_nativelib_BCREngine_DecodeQRYUV for dimensions and buffer sizes (e.g., positive, reasonable maxima, product checks) before calling FastDecodeQR_YUV",
+            "Harden the decoder to check all array indices and lengths derived from input, and add fuzz/ASAN coverage on libQREngine.so directly"
+          ],
+          "assumptions": [
+            "FastDecodeQR_YUV parameters param_4 and param_5 are dimensions or sizes influenced by untrusted or semi-untrusted image data",
+            "The crash reported by the fuzz harness corresponds to a memory-safety issue inside the decoder implementation rather than a benign early-exit condition",
+            "The function pointer PTR_FastDecodeQR_YUV_0068ba68 in libbcr.so resolves to the real decoder in libQREngine.so"
+          ],
+          "limitations": [
+            "libQREngine.so implementation of FastDecodeQR_YUV was not decompiled here, so exact memory corruption pattern is inferred, not directly observed",
+            "Crash reason lacks explicit SIGSEGV/ASAN details, so the precise failure mode and exploitability are uncertain",
+            "Reachability from normal app UI or external attacker paths depends on higher-level Java code and exported components not inspected"
+          ],
+          "exploit": {
+            "exploitability": "theoretical",
+            "trigger_method": "Supplying crafted or malformed YUV frame data and dimensions that are passed to FastDecodeQR_YUV via the app’s camera or image import path",
+            "prerequisites": [
+              "Ability to influence or control the YUV buffer and its associated width/height passed to BCREngine.DecodeQRYUV in the host app",
+              "Device running vulnerable version of com.intsig.BCRLite with libbcr.so and libQREngine.so",
+              "No platform mitigations blocking process crashes (standard Android environment)"
+            ],
+            "exploit_pipeline": [
+              "Identify or reverse engineer the Java API that calls BCREngine.DecodeQRYUV and determine how width/height and the YUV buffer are derived from external inputs (e.g., camera, imported images, IPC)",
+              "Craft YUV data and associated dimensions that cause FastDecodeQR_YUV’s internal calculations to read/write out of bounds or otherwise corrupt memory (e.g., extreme or inconsistent dimensions)",
+              "Deliver the crafted data through the discovered app path so that it reaches the native JNI bridge and is passed unchanged into FastDecodeQR_YUV",
+              "Observe crashes or abnormal behavior; refine payloads to attempt controlling overwritten data structures or return addresses if practical"
+            ],
+            "poc_commands": [
+              "adb install com.intsig.BCRLite.apk",
+              "adb push crafted_yuv.bin /sdcard/Download/payload.yuv",
+              "adb shell am start -n com.intsig.BCRLite/.MainActivity --es input_path /sdcard/Download/payload.yuv"
+            ],
+            "poc_files": [
+              "/sdcard/Download/payload.yuv"
+            ],
+            "notes": "Exact Java entrypoint and parameterization are unknown; commands use placeholder activity and intent extras. A real PoC would need mapping from external file or camera frames to the native DecodeQRYUV call and fine-tuned YUV data causing the observed native crash."
+          }
+        },
+        "statistics": {
+          "time": "00:00:49",
+          "llm_requests": 4,
+          "llm_tool_calls": 4,
+          "input_tokens": 24777,
+          "output_tokens": 2652
+        }
+      }
+    ]
+  }
+}

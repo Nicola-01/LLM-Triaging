@@ -1,0 +1,189 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/br.com.sulamerica.sam.saude/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "br.com.sulamerica.sam.saude",
+      "min_sdk": 22,
+      "target_sdk": 31,
+      "version_name": "7.66.0",
+      "version_code": "74040"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "strpbrk",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strpbrk",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so": [
+              "strpbrk",
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Tools are unavailable (connection refused), so I must reason only from the summarized crash metadata.",
+            "The top native frame is `strpbrk`, a standard C library function used for scanning strings; crashes in such functions usually stem from invalid pointers or unterminated buffers passed by the caller rather than a bug inside `strpbrk` itself.",
+            "The first app-level frame beneath the libc helper is `decodeBytes` in `libtbxml.so`, called from the JNI bridge `Java_za_co_twyst_tbxml_TBXML_jniParse`. The library map confirms these symbols exist in the app’s own native code.",
+            "Without decompilation, I still know the functional role: TBXML is a lightweight XML parser; `decodeBytes` most likely decodes a byte buffer into text and then parses XML. Using `strpbrk` implies it walks a C string, presumably looking for XML delimiters such as `<`, `>`, etc.",
+            "A crash in `strpbrk` is commonly caused by passing a non-null-terminated pointer, an invalid pointer, or having the search set pointer invalid. For an XML parser working on buffers from Java, those buffers and their lengths are typically attacker-controlled (e.g., file/network content).",
+            "The Java call graph shows `TBXML.jniParse([B)J` ultimately comes from `PluginKmlOverlay.loadKml(String)` and parsing KML content. KML comes from external sources (maps overlays), thus data is plausibly untrusted user/network data, even without source code.",
+            "The fuzz harness invokes `jniParse` via `fuzz_one_input`, but the Java call graph shows a realistic production path where arbitrary strings go into `jniParse`. This means the fuzzer is not doing something that could never happen in production; instead it is exploring the same code that would parse real KML/XML input.",
+            "For this to crash in `strpbrk`, `decodeBytes` likely turns a Java byte array into a C string without properly handling embedded NULs, missing terminators, or length bounds. Typical patterns include: (a) using `NewStringUTF` / `GetStringUTFChars` but ignoring length and assuming NUL-termination, (b) copying raw bytes then calling `strpbrk` on them while an attacker-controlled length may exceed the allocated buffer, or (c) constructing a stack or heap buffer of size N, copying M > N bytes from the Java array, then calling `strpbrk` and overflowing into invalid memory.",
+            "These are all classic unsafe string-handling scenarios and can result in out-of-bounds reads; with certain overflows, they can escalate to writes or broader corruption, though here we only see a crash in read-oriented code. Even an out-of-bounds read induced via attacker-controlled input is a memory-safety vulnerability and often exploitable for info leak or more serious corruption in adjacent code paths.",
+            "I see no indication this is just a harness artifact like forced NULL parameters: the JNI bridge name and Java call chain are consistent with typical production usage, and the library symbol names strongly suggest data-dependent parsing. There’s no evidence of an intentional abort/sanitizer-only check; it is a raw crash in `strpbrk`.",
+            "Because I cannot view the exact implementation, I cannot definitively prove the exact bug pattern, but the combination of: (1) string helper crash, (2) custom parsing function `decodeBytes` in app code, and (3) attacker-supplied KML/XML data path makes it quite likely that this is a real memory-safety issue in how the buffer is constructed or handled.",
+            "I therefore classify this as a likely vulnerability related to improper handling of C-strings / buffer bounds, with moderate-to-high confidence, and treat it as at least high severity due to potential out-of-bounds memory access from attacker-controlled input."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.75,
+          "reasons": [
+            "Crash occurs in libc `strpbrk` called from app’s `decodeBytes`, indicating invalid/unterminated buffer or pointer passed from app code.",
+            "`jniParse([B)J` parses XML/KML data that is realistically attacker-controlled (KML overlay content), and no validation or length checks are evident from available metadata.",
+            "Failure pattern is consistent with out-of-bounds or invalid read from attacker-influenced buffer construction in `decodeBytes`, a classic memory-safety bug."
+          ],
+          "cwe_ids": [
+            "CWE-787",
+            "CWE-120"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so"
+          ],
+          "evidence": [],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "decodeBytes",
+            "strpbrk"
+          ],
+          "recommendations": [
+            "Manually audit `decodeBytes` and surrounding parsing code for unsafe use of C string APIs (`strpbrk`, `strcpy`, etc.) and replace with length-bounded variants that respect actual buffer size.",
+            "Ensure JNI layer passes explicit lengths for input byte arrays and never assumes NUL-termination; validate lengths against allocated buffer sizes before calling any string functions.",
+            "Add runtime checks and fuzz tests around `jniParse`/`decodeBytes` to confirm that malformed or oversized KML/XML inputs cannot cause out-of-bounds reads or writes."
+          ],
+          "assumptions": [
+            "KML/XML content provided to `TBXML.parse`/`jniParse` can be influenced by user or network input in realistic app usage.",
+            "`decodeBytes` constructs or manipulates C strings from the Java byte array before calling `strpbrk`, and the crash is not due to an external libc bug."
+          ],
+          "limitations": [
+            "Ghidra/JADX tools were unavailable, so native and Java implementations could not be inspected directly.",
+            "Exact root-cause (missing NUL-termination vs. length miscalculation vs. pointer misuse) is inferred from stack and symbol names rather than proven from code."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:32",
+          "llm_requests": 2,
+          "llm_tool_calls": 3,
+          "input_tokens": 11779,
+          "output_tokens": 1353
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "strchr_default",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "strchr_default",
+            "decodeBytes",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+          "JavaCallGraph": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V> -> <plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;> -> <plugin.google.maps.PluginKmlOverlay$1$1: run()V> -> <za.co.twyst.tbxml.TBXML: jniParse([B)J>"
+          ],
+          "LibMap": {
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so": [
+              "decodeBytes",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse",
+              "Java_za_co_twyst_tbxml_TBXML_jniParse"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Native crash occurs in strchr_default, called from decodeBytes inside libtbxml.so, which is the app’s XML parsing library.",
+            "strchr_default suggests a crash due to invalid pointer or non‑terminated string while scanning for a character; typical causes: passing non‑null‑terminated buffer or bogus pointer to strchr.",
+            "decodeBytes is the first app‑level frame; by name and JNI bridge context, it likely converts a Java byte[] (potentially XML/KML data) into an internal string/buffer, then scans it for delimiters using strchr/strchr_default.",
+            "JNI bridge Java_za_co_twyst_tbxml_TBXML_jniParse is called from TBXML.jniParse(byte[]) which is ultimately reached by PluginKmlOverlay.loadKml(String) / parse(String); thus the bytes being parsed are derived from a String or external KML file / network data and are attacker‑controlled in realistic scenarios.",
+            "Even without decompilation tools, the combination of: (1) crash in strchr, (2) custom decodeBytes layer, and (3) fuzz harness that only supplies arbitrary byte[] to jniParse strongly suggests decodeBytes or downstream code assumes null‑terminated, printable, or validly encoded input but fails to check, leading to strchr reading past the provided buffer or dereferencing garbage.",
+            "This is classic unsafe C string handling on untrusted input (missing bounds checks and explicit length use), which is memory‑safety relevant (CWE‑119/787); strchr may walk off the end of a buffer into unmapped memory, crashing; in non‑sanitized builds, this can lead to out‑of‑bounds reads, information disclosure, or potentially further corruption if the same patterns appear with writes.",
+            "Because the Java>JNI call path is realistic (used to parse KML/XML in maps plugin), and no evidence suggests the fuzz harness passes values impossible in production (it just passes arbitrary byte[] where app would normally pass file/network content), this is not a harness‑only artifact but exposes a genuine robustness/memory‑safety bug reachable from attacker‑supplied data.",
+            "We lack direct source/IR, so we cannot prove whether decodeBytes adds its own bounds checking; however, the fact that the immediate crash is in strchr_default rather than an explicit app‑level guard implies libc is blindly scanning until a fault, consistent with missing validation in app code.",
+            "Given this, classify as a likely vulnerability with medium‑high confidence and high severity (memory‑safety on externally‑derived XML/KML parsing path)."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash in strchr_default invoked by app XML parser function decodeBytes suggests unbounded C‑string scan on untrusted data.",
+            "JNI bridge TBXML.jniParse(byte[]) is reachable from real app code that parses KML/XML content, so attacker can influence the parsed bytes.",
+            "Failure to enforce null‑termination or length‑bounded scanning before calling strchr on arbitrary byte[] is a classic memory‑safety bug (OOB read) in native code."
+          ],
+          "cwe_ids": [
+            "CWE-119",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/br.com.sulamerica.sam.saude/lib/arm64-v8a/libtbxml.so"
+          ],
+          "evidence": [],
+          "call_sequence": [
+            "<za.co.twyst.tbxml.TBXML: parse(Ljava/lang/String;)V>",
+            "<plugin.google.maps.PluginKmlOverlay: loadKml(Ljava/lang/String;)Landroid/os/Bundle;>",
+            "<plugin.google.maps.PluginKmlOverlay: access$000(Lplugin/google/maps/PluginKmlOverlay;Ljava/lang/String;)Landroid/os/Bundle;>",
+            "<plugin.google.maps.PluginKmlOverlay$1$1: run()V>",
+            "<za.co.twyst.tbxml.TBXML: jniParse([B)J>",
+            "Java_za_co_twyst_tbxml_TBXML_jniParse",
+            "decodeBytes",
+            "strchr_default"
+          ],
+          "recommendations": [
+            "Review and decompile libtbxml.so decodeBytes and nearby parsing functions to confirm how input byte[] is converted and passed to strchr/other string routines.",
+            "Refactor parsing code to use length‑bounded APIs (memchr, strnlen, explicit length tracking) instead of raw strchr on buffers derived from Java byte[]; ensure all buffers are properly null‑terminated or size‑checked.",
+            "Add input validation in Java/C to constrain buffer sizes and content for KML/XML before invoking native parsing, and add fuzz tests around jniParse to detect regressions."
+          ],
+          "assumptions": [
+            "decodeBytes receives raw byte[] from Java without implicit null‑termination and uses strchr without explicit length bounds.",
+            "PluginKmlOverlay can be fed attacker‑controlled KML/XML via network, files, or intents, making its inputs effectively untrusted.",
+            "The crash in strchr_default is due to out‑of‑bounds read on unterminated/bad pointer rather than a purely internal libc bug."
+          ],
+          "limitations": [
+            "Ghidra/Jadx MCP access failed, so function bodies and exact argument handling for decodeBytes and jniParse could not be inspected.",
+            "No concrete disassembly for the crashing instruction, so the exact pointer and length at the point of fault are inferred from symbols and stack only.",
+            "Lack of visibility into Java‑layer validation; classification assumes no strong size/content restrictions are enforced before calling jniParse."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:32",
+          "llm_requests": 4,
+          "llm_tool_calls": 6,
+          "input_tokens": 24273,
+          "output_tokens": 1331
+        }
+      }
+    ]
+  }
+}

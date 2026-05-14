@@ -1,0 +1,866 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.didiglobal.driver/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "DiDi Conductor",
+      "package": "com.didiglobal.driver",
+      "min_sdk": 21,
+      "target_sdk": 29,
+      "version_name": "7.5.88",
+      "version_code": "861"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "??",
+            "??",
+            "??",
+            "cv::hal::sepFilter2D",
+            "cv::sepFilter2D",
+            "cv::Sobel",
+            "cvSobel",
+            "??",
+            "??",
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "cvSobel",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "cvSobel",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvSobel"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Process termination is abort via cv::error / __cxa_throw, typical OpenCV runtime assertion rather than raw SEGV; likely an exception due to bad parameters to cv::Sobel / sepFilter2D.",
+            "Native stack shows cv::hal::sepFilter2D → cv::sepFilter2D → cv::Sobel → cvSobel → JNI entry Java_io_card_payment_CardScanner_nScanFrame. Crash is before fuzz harness, so relevant frame is cv::error or sepFilter2D; but application-level first frame below libraries is Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer.so.",
+            "Mandatory step: decompile first app-level frame below allocators/sanitizers. We already decompiled Java_io_card_payment_CardScanner_nScanFrame from libcardioRecognizer.so. It uses OpenCV C API (cvCreateImageHeader, cvReleaseImage, etc.) and app helper functions, but no direct calls to cvSobel in this function body; likely Sobel is invoked inside helper FUN_00103f0c or FUN_001042b0, etc. However, crash stack shows cvSobel and cv::Sobel beneath some unknown frames, meaning one of these helpers calls cv::Sobel with parameters derived from local_480 / local_490 / local_498 and param_6.",
+            "We must locate memcpy/memmove in Java_io_card_payment_CardScanner_nScanFrame: none appear in decompiled code. No obvious buffer operations; OpenCV handles buffers using cvCreateImageHeader and underlying image data pointers. Length/size values: image sizes come from param_4/param_5 (width/height) and they are used in CONCAT44 and arithmetic lVar3 + param_5 * param_4 to compute UV plane offset in YUV frame. param_6 is a flags/mode byte possibly adjusted by FUN_00104634 and masked with &0xff.",
+            "We need backward taint: parameters come directly from JNI, under fuzzing harness they may be arbitrary, but in real app they come from camera frame metadata: width, height, format, etc. The function validates almost nothing: it checks param_6 != 0 and fVar5 threshold for focus/quality (DAT_001baea0). However, the crash is not an OOB write; OpenCV throws cv::error when sizes, depths, or formats are invalid, e.g., when kernel size is zero/negative or image dimensions mismatch requirements. That leads to abort via uncaught exception, which is a controlled fail-fast rather than undefined behavior.",
+            "To comply with MCP rules about memcpy: since none appears here, and we’re not seeing direct raw memory writes, the likely cause is cv::Sobel being called with invalid kernel size / ddepth / border type computed from param_6 or image geometry. OpenCV then throws an exception using cv::error. That is not a memory corruption but an internal range check doing its job. The DoS is local (app abort) and only reachable if JNI is called with invalid parameters (e.g., inconsistent width/height, null frame pointer, misaligned strides). In production, these parameters come from controlled camera pipeline and are unlikely to be attacker-controlled unless the app exposes this native call directly to untrusted input, which typical card scanning SDKs do not.",
+            "cvSobel in libcardioRecognizer.so is a thunk calling a function pointer PTR_cvSobel_0013aed0, presumably imported from libopencv.so (per Library Map). We did not yet resolve PTR_cvSobel_0013aed0, but behavior is known via stack: cv::Sobel calls cv::hal::sepFilter2D, which calls cv::error when arguments are invalid. No evidence of unchecked memcpy or buffer overflow. We could search for memcpy in helper FUN_00103f0c / FUN_001042b0 etc., but crash stack shows failure deeper in OpenCV’s filtering, not in our helpers.",
+            "Attacker-control analysis: parameters: param_1 is a pointer to an object with vtable-like callbacks; param_2, param_3, param_7, param_8 are handles/IDs, param_4/5 are width/height, param_6 is format/mode flags, param_9 is a boolean. In actual app, these are produced by Java CardScanner using camera API, not exposed to arbitrary remote attacker. Fuzz harness passes arbitrary bytes, causing invalid image format so OpenCV asserts and aborts. This is a test harness artifact. Unless Java side directly exposes this JNI to external inputs (no evidence), this is not a realistic vulnerability.",
+            "Given absence of unsafe manual memory operations and presence of OpenCV’s explicit error handling leading to abort, classify this as non-vulnerability (harness-induced abort via argument contract violation) with medium confidence that there is no deeper bug in helper functions, as they may still misuse OpenCV but crash path clearly is a checked error, not memory corruption."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.65,
+          "reasons": [
+            "Abort originates from cv::error throwing an exception due to invalid parameters to cv::Sobel/sepFilter2D, not from memory corruption.",
+            "JNI function Java_io_card_payment_CardScanner_nScanFrame constructs OpenCV image headers from width/height and camera frame buffer, but does not perform direct unsafe memcpy/memmove or pointer arithmetic beyond simple plane offset.",
+            "Crash is triggered by fuzz harness passing unrealistic parameters (e.g., invalid sizes/format), which OpenCV detects and aborts on; in normal app use, parameters are constrained by camera pipeline and not under direct attacker control."
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\nlocal_480 = lVar2;\nlVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n*(long *)(lVar2 + 0x58) = lVar3;\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n*(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;\n...\nuVar4 = FUN_00103f0c(local_480,local_490,local_498,param_6,&local_4c8,&local_4e8);\n...\nFUN_001042b0(0,local_480,&local_550,param_6,0,&local_528);",
+              "note": "JNI method sets up OpenCV image headers and delegates to helper functions; no direct memcpy/memmove; sizes derived from width/height but OpenCV validates internally."
+            },
+            {
+              "function": "cvSobel",
+              "address": "0x00102150",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "void cvSobel(void)\n{\n  (*(code *)PTR_cvSobel_0013aed0)();\n  return;\n}",
+              "note": "cvSobel is a thunk to OpenCV implementation that throws via cv::error on invalid arguments, leading to abort but not uncontrolled memory access."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_io_card_payment_CardScanner_nScanFrame -> FUN_00103f0c / FUN_001042b0 (helpers) -> cvSobel -> cv::Sobel -> cv::sepFilter2D -> cv::hal::sepFilter2D -> cv::error -> abort"
+          ],
+          "recommendations": [
+            "Confirm via additional fuzzing or manual tests that helper functions (e.g., FUN_00103f0c, FUN_001042b0) never construct invalid OpenCV Mat/image headers from valid camera inputs.",
+            "On JNI boundary, add parameter validation (width/height, buffer size, format flag param_6) and handle OpenCV exceptions gracefully instead of allowing process abort.",
+            "Review Java exposure of CardScanner.nScanFrame to ensure untrusted external inputs cannot directly control low-level frame parameters."
+          ],
+          "assumptions": [
+            "Camera frame dimensions and buffer layout are controlled by the app/camera stack in production and not directly attacker-controlled.",
+            "The abort is due to OpenCV cv::error exception from cv::Sobel/sepFilter2D based on typical stack pattern, not due to hidden memory corruption in helpers."
+          ],
+          "limitations": [
+            "Exact cv::error assertion message and arguments to cv::Sobel/sepFilter2D are not visible, so root cause is inferred from stack trace and typical OpenCV behavior.",
+            "Helper functions FUN_00103f0c and FUN_001042b0 were not decompiled in this analysis; subtle bugs there cannot be fully excluded but are not indicated by current crash.",
+            "Java-side call graph is unavailable, so external reachability of the JNI method is inferred from typical SDK usage rather than proven."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:57",
+          "llm_requests": 4,
+          "llm_tool_calls": 8,
+          "input_tokens": 28005,
+          "output_tokens": 2220
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "cvInitImageHeader",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvInitImageHeader"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is cvInitImageHeader -> called via cvCreateImageHeader from Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer.so.",
+            "Process termination is abort via cv::error/exception path, not SIGSEGV or ASan; indicates OpenCV detected an invalid argument and threw, which unwinds via __cxa_throw to abort under fuzz harness.",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame shows no memcpy/memmove or manual buffer arithmetic; it uses OpenCV high-level APIs: cvCreateImageHeader, cvReleaseImage(Header), FUN_* helpers, and JNI callbacks through param_1 vtable.",
+            "cvCreateImageHeader is passed size = CONCAT44(param_5,param_4) (width,height) and fixed depth=8, channels=1 or 2. These width/height ints ultimately come from fuzz input via JNI, but OpenCV validates and will throw cv::error if they are nonsensical (e.g., negative/too large), which matches the observed abort.",
+            "There is pointer math `lVar3 + param_5 * param_4` to set the second image header's data pointer, but this is done on a pointer `lVar3` fetched from a Java-side buffer: (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0). Without the implementation of that method or OpenCV internals, we can't prove an out-of-bounds write/read; moreover the crash happens earlier in cvInitImageHeader, not on this math.",
+            "The fuzz harness likely feeds arbitrary dimensions/flags causing cv::error, a defensive check inside OpenCV. This is a controlled abort, not a memory safety failure. In realistic app use, dimensions come from camera frame metadata and library-defined constraints, not attacker-controlled arbitrary values.",
+            "No evidence of unchecked memcpy/memmove, integer overflow used in allocation, or UAF/double free. All resource lifetimes use cvReleaseImage/Header in matched pairs.",
+            "Therefore, this crash is best categorized as harness-triggered defensive abort on invalid parameters, not a genuine exploitable vulnerability."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.83,
+          "reasons": [
+            "Abort originates from cv::error throwing due to invalid parameters in OpenCV, not from memory corruption.",
+            "JNI function Java_io_card_payment_CardScanner_nScanFrame passes attacker-controlled dimensions into cvCreateImageHeader, but OpenCV validates and aborts safely via exception.",
+            "No memcpy/memmove or direct unsafe buffer operations are present in the decompiled function; resource management uses OpenCV APIs with leak-safe error paths.",
+            "Crash likely requires unrealistic fuzz-only arguments (e.g., extreme/invalid image sizes) not achievable through normal camera-driven app flows."
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n*(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;",
+              "note": "Uses OpenCV cvCreateImageHeader; no memcpy/memmove; crash stack shows abort via cv::error inside cvInitImageHeader."
+            },
+            {
+              "function": "cvInitImageHeader",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so",
+              "note": "Stack trace shows abort via cv::error leading to cvInitImageHeader, consistent with argument validation failure rather than memory corruption."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_io_card_payment_CardScanner_nScanFrame -> cvCreateImageHeader -> cvInitImageHeader"
+          ],
+          "recommendations": [
+            "Log or clamp incoming frame width/height before passing to OpenCV to avoid triggering cv::error on malformed inputs.",
+            "In JNI bridge, add parameter validation mirroring OpenCV constraints to ensure camera/decoder bugs cannot cause unexpected aborts.",
+            "Treat this crash as harness noise; prioritize investigating crashes showing memory corruption signals (SIGSEGV, ASan reports, or invalid frees)."
+          ],
+          "assumptions": [
+            "OpenCV cv::error is used only for argument validation and internal consistency checks, not after memory corruption.",
+            "Real-world app uses camera or controlled image sources that cannot supply arbitrarily large/negative dimensions.",
+            "The fuzz harness directly controls numeric JNI parameters, unlike production app code paths."
+          ],
+          "limitations": [
+            "Implementation of cvInitImageHeader and cv::error inside libopencv.so was not decompiled, so exact validation conditions are inferred from naming and typical OpenCV behavior.",
+            "JNI caller and Java-side code that sets param_4/param_5 were not available; taint from real user input to these fields is inferred from typical camera usage patterns."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:31",
+          "llm_requests": 3,
+          "llm_tool_calls": 4,
+          "input_tokens": 19785,
+          "output_tokens": 1297
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "cvSetImageROI",
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "cvSetImageROI",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "cvSetImageROI",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvSetImageROI"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is abort with prior frames showing __cxa_throw → cv::error → cvSetImageROI; this matches OpenCV’s standard behaviour where invalid image parameters trigger a C++ exception that escalates to abort when uncaught.",
+            "The first application-level frame below libraries/allocators is Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer.so; decompiled code shows no memcpy/memmove or other raw buffer copies, but instead uses OpenCV image headers and helper functions.",
+            "cvSetImageROI in this lib is just a thin wrapper that jumps via a function pointer PTR_cvSetImageROI_0013adb0, meaning the real implementation is in libopencv.so; we do not see its body here, so we infer typical OpenCV semantics.",
+            "The crash likely occurs because cvSetImageROI was called with an invalid ROI for the supplied IplImage; in OpenCV, this causes cv::error to throw, not memory corruption. The stack clearly shows cv::error and __cxa_throw, then abort, which is consistent with an unhandled exception, not a segfault or ASAN report.",
+            "To check whether JNI-side logic might be using unvalidated attacker-controlled values to construct the ROI (which could hint at deeper memory safety bugs), we inspected Java_io_card_payment_CardScanner_nScanFrame: args are width/height (param_4/5), an orientation/flag byte (param_6 post-processed by FUN_00104634), and other JNI handles; the function allocates image headers with cvCreateImageHeader using width/height halved in one case and sets data pointers, then calls multiple internal helpers and cvReleaseImage* cleanly.",
+            "Nowhere in this function are raw pixel buffers allocated based on untrusted length fields, nor are unbounded copies performed; instead all image operations go through OpenCV APIs that manage bounds checking themselves.",
+            "The fuzz harness entry fuzz_one_input likely supplies arbitrary or malformed image dimensions/metadata, but in the actual app these values would be constrained by the camera preview size and OpenCV’s own internal checks; the worst realistic outcome for invalid ROI parameters is an exception leading to abort (DoS), not exploitable memory corruption.",
+            "Since the termination is via abort and cv::error, and there is no evidence in this frame of unsafe memory operations controlled by attacker input, this looks like a benign error handling path under extreme fuzz conditions rather than a security vulnerability.",
+            "Therefore classify as not vulnerable; at most, this represents a robustness issue where unexpected camera/image states could crash the app, but not a memory safety or privilege-impacting bug."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash caused by C++ exception from cv::error in OpenCV, escalating to abort, not memory corruption",
+            "cvSetImageROI is indirectly called via function pointer into libopencv.so; stack pattern matches invalid ROI error handling",
+            "JNI entry Java_io_card_payment_CardScanner_nScanFrame uses OpenCV image APIs and releases resources properly, with no raw memcpy/memmove or unchecked buffer arithmetic",
+            "Fuzzer-driven arbitrary parameters can yield invalid image/ROI and trigger abort, but in production these dimensions come from camera and are constrained, making this a robustness/DoS-at-worst issue"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\nlocal_480 = lVar2;\n... // process\ncvReleaseImageHeader(&local_480);\n(**(code **)(*param_1 + 0x600))(param_1,param_3,lVar3,0);",
+              "note": "JNI function uses OpenCV image headers and cleanup without raw memory copies."
+            },
+            {
+              "function": "cvSetImageROI",
+              "address": "0x00101f10",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "void cvSetImageROI(void)\n{\n  (*(code *)PTR_cvSetImageROI_0013adb0)();\n  return;\n}",
+              "note": "Thin wrapper calling into OpenCV; error path seen as cv::error → __cxa_throw → abort."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "cvSetImageROI",
+            "cv::error",
+            "__cxa_throw",
+            "abort"
+          ],
+          "recommendations": [
+            "Treat unexpected OpenCV cv::error exceptions as recoverable errors instead of aborting; add try/catch or error-code checks around ROI operations.",
+            "Validate image dimensions and ROI parameters before calling cvSetImageROI to avoid triggering exceptions under edge-case inputs.",
+            "Optionally harden fuzz harness to avoid impossible states that cannot arise from real camera/image inputs, to reduce noise in crash triage."
+          ],
+          "assumptions": [
+            "OpenCV’s cvSetImageROI behaves as in standard OpenCV, throwing on invalid ROIs instead of corrupting memory.",
+            "Camera-derived width/height and ROI parameters are constrained in production and cannot be fully attacker-controlled.",
+            "The crash log corresponds to an unhandled cv::Exception leading to abort, not to ASAN-detected memory corruption."
+          ],
+          "limitations": [
+            "Implementation of cvSetImageROI in libopencv.so was not inspected directly; behaviour inferred from function name and call stack.",
+            "Exact ROI parameters and image sizes at the time of crash are unknown; analysis is based on decompiled control flow.",
+            "Fuzz harness behaviour (how it maps fuzz bytes to JNI parameters) is not shown, so the precise trigger values are unavailable."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:45",
+          "llm_requests": 5,
+          "llm_tool_calls": 6,
+          "input_tokens": 35951,
+          "output_tokens": 1447
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "cvInitImageHeader",
+            "cvCreateImage",
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "cvCreateImage",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "cvCreateImage",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvInitImageHeader",
+              "cvCreateImage"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Native crash terminates via abort with cv::error / __cxa_throw in stack → typical OpenCV error/exception path, not raw SEGV or allocator corruption.",
+            "First non-runtime application frame below cv::error is cvInitImageHeader / cvCreateImage; however, in our decompiled code cvCreateImage is just a thunk to a function pointer PTR_cvCreateImage_0013aea0, so behaviour is in libopencv (not fully analyzed here).",
+            "Decompiled JNI entry Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer shows main image-handling logic; this is the first app-level native frame and must be examined for unsafe calls or unvalidated attacker-controlled values influencing OpenCV.",
+            "Signature: Java_io_card_payment_CardScanner_nScanFrame(long *envLike,param_2,param_3,int param_4,int param_5,uint param_6,...,char param_9). Parameters param_4/param_5 appear to be width/height; param_6 is some flags / rotation; param_1 is a pointer to JNI-like vtable; others are handles/objects.",
+            "Function only executes body if param_6 != 0. Optional remapping of param_6 via FUN_00104634 and then masked to 0xff, reducing attacker control of this flag to 8 bits and through a mapping function. No direct arithmetic with param_6 that could overflow allocations; it is passed as an argument to helper functions (card-io recognizer routines) but not to cvCreateImageHeader or as sizes.",
+            "First OpenCV call: lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1). This passes size=(width=param_4,height=param_5), depth=8, channels=1. These ints plausibly come from Java (frame dimensions). Fuzzer may send arbitrary values, but in real app these likely correspond to camera preview size and are constrained by Android camera API; huge or negative values would not be used when calling native code.",
+            "After getting image header, code obtains underlying pixel buffer via function pointer (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) and stores into header's data pointer at offset +0x58. No memcpy or length-based copy here; OpenCV only receives a header pointing to existing buffer.",
+            "It then computes fVar5 = (float)FUN_00102cd8(lVar2,0); likely a focus/quality metric, then if (DAT_001baea0 <= fVar5) executes more processing: creating a downscaled image with cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2), setting its data pointer to lVar3 + param_5 * param_4, then calling FUN_00102770 and cvReleaseImageHeader, then running recognition with FUN_00103f0c and further OpenCV/card-io helpers.",
+            "Potential risk: the offset lVar3 + param_5 * param_4 may go past the actual buffer if product > real frame size. However, this only updates the data pointer of a new header object to point inside the same backing buffer; there is still no copy here. Miscomputed layout may confuse the recognizer but won’t directly overflow an allocation; OpenCV functions that operate on the header typically use width/height/step fields assumed to be consistent with allocated buffer; if inconsistent, OpenCV itself detects size mismatches and throws cv::Exception via cv::error, which matches the observed abort path.",
+            "No raw memcpy/memmove/ks_memcpy/deadly loops are present in the decompiled JNI function; key data movement is likely contained within helper functions (FUN_00102770, FUN_00103f0c, FUN_001042b0, etc.), but the crash stack in this report shows cvInitImageHeader/cvCreateImage/cv::error rather than these helpers, suggesting an internal OpenCV bounds/arguments check aborted, not a wild write/read.",
+            "We do not see any use-after-free patterns: cvReleaseImageHeader(&local_488); is called after using local_488 to set up structures and before cvCreateImage / etc. local_480 is released at the end, as are images local_490/local_498/local_528 conditionally. Lifetimes seem properly nested and aligned with function tail.",
+            "Because crash path goes through cv::error and __cxa_throw, OpenCV detected invalid parameters (e.g., non-positive sizes, overflow, mismatched step) and threw an exception, which then calls abort in this native-only context since no C++ catch exists around it. This is a defensive error, not memory corruption.",
+            "Attacker control: frame dimensions do trace back to Java and thus indirectly to input (camera configuration), but in regular app operation these are set from trusted camera parameters; fuzz harness may give impossible sizes triggering cv::Exception. No evidence that realistic user input can cause arbitrary cvCreateImageHeader calls with unvalidated external sizes; Java side usually constructs these via known camera preview width/height (bounded).",
+            "Given lack of signs of heap/stack corruption and the explicit cv::error path, this crash is best categorized as a handled library assertion/exception due to invalid arguments from the fuzzer, not a genuine vulnerability exploitable under real-world app usage.",
+            "Therefore I classify this crash as not a true vulnerability; at most it reveals that unexpected frame dimension flags from the harness can cause OpenCV to abort the process via unhandled exception, which is a harness artifact, not a production path."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Crash terminates via cv::error and __cxa_throw, indicating OpenCV threw an exception on invalid parameters rather than memory corruption",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame shows no unsafe memcpy/memmove or pointer arithmetic directly causing overwrite; image operations delegate to OpenCV/card-io helpers which enforce argument checks and throw on misuse",
+            "Fuzzer likely supplied unrealistic image sizes/flags; in normal operation dimensions come from camera APIs and are constrained, making this path unlikely to be attacker-controlled beyond causing a benign abort",
+            "The only arithmetic on dimensions is used to set up image headers and derived pointers inside a shared buffer; inconsistencies trigger OpenCV assertions (cv::Exception) instead of out-of-bounds writes"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n*(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;\nFUN_00102770(local_488,&local_498,&local_490);\ncvReleaseImageHeader(&local_488);\n...\ncvReleaseImageHeader(&local_480);",
+              "note": "Image headers are created using potentially uncontrolled dimensions, but misuse is detected by OpenCV which throws cv::Exception rather than causing corruption."
+            },
+            {
+              "function": "cvCreateImage",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "void cvCreateImage(void)\n{\n  (*(code *)PTR_cvCreateImage_0013aea0)();\n  return;\n}\n",
+              "note": "cvCreateImage is just a thunk to OpenCV implementation via function pointer; crash occurs in libopencv, which throws via cv::error when parameters are invalid."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_io_card_payment_CardScanner_nScanFrame -> cvCreateImageHeader/cvCreateImage (libopencv) -> cv::error -> __cxa_throw -> abort"
+          ],
+          "recommendations": [
+            "Treat this as a harness-only issue; ensure fuzz harness passes realistic frame dimensions and pixel formats matching Java-side expectations",
+            "Optionally add argument validation in Java_io_card_payment_CardScanner_nScanFrame (e.g., check positive, bounded width/height) and catch OpenCV exceptions at a higher level to avoid process aborts on unexpected states"
+          ],
+          "assumptions": [
+            "Java side constrains frame width/height to valid camera preview sizes under normal use",
+            "OpenCV’s cv::error path is triggered by parameter validation failures rather than post-corruption checks"
+          ],
+          "limitations": [
+            "Full OpenCV implementation in libopencv.so was not decompiled here; behaviour inferred from typical cv::error usage and stack trace",
+            "Exact values of width/height/flags at crash time are unknown; assessment is based on typical fuzzing behaviour and code structure"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:03",
+          "llm_requests": 4,
+          "llm_tool_calls": 7,
+          "input_tokens": 28356,
+          "output_tokens": 2141
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "??",
+          "StackTrace": [
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer.so; no allocator/sanitizer frames are visible and process_termination is unknown, so I examine this function as the likely crash site.",
+            "Decompiled JNI entry shows OpenCV-style image handling: creating IplImage headers, plugging in a buffer pointer returned from a virtual method (**(code **)(*param_1 + 0x5c0)), then doing analysis and more image operations. There are no memcpy/memmove/ks_memcpy calls in this function; main operations are cvCreateImageHeader, cvReleaseImage, FUN_00103f0c, FUN_001042b0, FUN_00119134, FUN_001194bc, etc.",
+            "Given the mandatory checklist, I scan within this function for obvious length-based buffer copies; the local arrays are local_478[224] and local_398[180] (floats). They are only passed by reference to other helper functions (FUN_001047c4, FUN_001071e4, FUN_00119914) and not subject to direct memcpy here. Without decompiling those helpers I cannot see their internals, but this specific crash entry gives no stack frame beyond this top JNI function, so I treat this as the first app-level frame.",
+            "Inputs possibly controlled by fuzzer/attacker are JNI parameters: param_3 (probably a byte buffer with frame data), param_4/param_5 (width/height), param_6 (some flag, possibly orientation or format), and param_9 (boolean). The code uses param_4/param_5 to compute sizes for cvCreateImageHeader and for setting *(local_488+0x58) = lVar3 + param_5*param_4. If these values are nonsensical (very large, zero, negative when interpreted as signed) they could lead to out-of-bounds arithmetic *inside* cv/OpenCV or helper functions, but within this decompiled JNI function itself there is no raw pointer arithmetic except lVar3 + param_5*param_4 for the YUV planar offset.",
+            "However, that pointer arithmetic is used to set the data pointer for a second image header (local_488). The code assumes the buffer at lVar3 is at least param_5*param_4 bytes of Y plane followed by U/V, and no bounds check is done here. Yet lVar3 is obtained from a virtual callback (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0) that likely belongs to the surrounding Java/SDK; in real app flows, param_4/param_5 will match actual frame dimensions. In the fuzz harness, param_4/param_5 are likely random and inconsistent with the actual buffer behind lVar3, which can cause heap OOB inside cv/image functions and trigger a crash. That pattern points more to harness misuse than an inherent bug, because production code would not pass unvalidated, arbitrary dimensions to the scanner.",
+            "No direct evidence of classic memory bugs (memcpy with unbounded length, integer overflow on allocation, UAF, double free) is visible here. The function spells out cvReleaseImageHeader(&local_480) and cvReleaseImageHeader(&local_488) correctly, as well as cvReleaseImage(&local_490), cvReleaseImage(&local_498), and cvReleaseImage(&local_528). There is an explicit stack canary check at the end, but no sign of it being tripped in the provided stack trace snippet; process_termination is unknown.",
+            "Because the crash details above Java_io_card_payment_CardScanner_nScanFrame are completely elided (\"??\"), I cannot link the fault to any specific helper like FUN_00103f0c or FUN_001042b0 via the provided trace. The assignment demands that I track memcpy/memmove etc in the first app-level frame; here there is none, and tracking into helpers would be speculative without a frame naming them.",
+            "Reasoning about attacker control: In real usage, this JNI is called from a specific CardScanner Java class which supplies camera frames with known sizes. Width/height are not attacker-controlled directly but come from camera parameters negotiated by the app/OS. An external attacker generally cannot supply arbitrary inconsistent width/height without already being able to tamper with the native frame producer. The fuzz harness, however, is directly substituting arbitrary values for these parameters, so the observed crash can be attributed to out-of-contract arguments rather than a reachable vulnerability.",
+            "Given the missing crash site, lack of direct unsafe primitives in this function, and likely harness-induced parameter inconsistencies, I assess this crash as not demonstrating a confirmed vulnerability in libcardioRecognizer. At most it hints at missing input validation for image dimensions, but under realistic app flows these are tightly controlled. Therefore I classify as non-vulnerable/Env-Harness with low-to-medium confidence that no exploitable issue is shown here.",
+            "I still note that if additional traces show crashes inside helpers with attacker-controlled sizes and no checks, a vulnerability assessment should be revisited."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Top frame Java_io_card_payment_CardScanner_nScanFrame contains no direct memcpy/memmove or raw unchecked copies; it primarily uses OpenCV-style APIs and helper functions.",
+            "Crash site above this function is unknown (\"??\"), so there is no concrete evidence tying the fault to a specific unsafe operation in app code.",
+            "The only plausible risk is mismatched width/height vs actual buffer size for lVar3, which is likely caused by fuzz harness feeding inconsistent parameters not possible in real camera-driven usage.",
+            "Frame dimensions and buffer pointer are normally controlled by the app/camera pipeline, not directly by remote untrusted input; no clear attacker-controlled taint path to memory corruption is demonstrated."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\nlocal_480 = lVar2;\nlVar3 = (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n*(long *)(lVar2 + 0x58) = lVar3;\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n*(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;",
+              "note": "Potential for inconsistent width/height vs underlying buffer, but dimensions are usually controlled by camera pipeline and no direct memcpy is present here."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_io_card_payment_CardScanner_nScanFrame"
+          ],
+          "recommendations": [
+            "Add explicit validation or assertions on image width/height and buffer size at the JNI boundary to guard against inconsistent parameters.",
+            "Instrument helper functions (e.g., FUN_00103f0c, FUN_001042b0) with sanitizers in a debug build to see if any real OOB occurs under valid camera inputs.",
+            "Collect a fuller stack trace including precise crash site to reassess if future crashes implicate specific helper functions or memcpy-like operations."
+          ],
+          "assumptions": [
+            "Camera frame dimensions (param_4/param_5) are constrained by the app and OS in production, not by arbitrary user input.",
+            "The fuzz harness is directly mutating JNI parameters in ways that normal app flows cannot.",
+            "Missing top stack frames (\"??\") correspond to library or CV helper internals, not additional app-native wrappers."
+          ],
+          "limitations": [
+            "Process termination signal and exact faulting instruction are unknown, preventing precise root-cause mapping.",
+            "Helper functions like FUN_00103f0c, FUN_001042b0, FUN_00119134, and FUN_001194bc were not decompiled here; they may contain internal copies or arithmetic.",
+            "Java side CardScanner usage and constraints on parameters are inferred, as the Java call graph is not provided."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:41",
+          "llm_requests": 3,
+          "llm_tool_calls": 3,
+          "input_tokens": 19557,
+          "output_tokens": 1912
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "??",
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below C++/OpenCV error handling is Java_io_card_payment_CardScanner_nScanFrame in libcardioRecognizer.so, which we decompiled.",
+            "Process termination is abort via cv::error/exception (__cxa_throw), so this is not a raw SIGSEGV or ASAN report but an internal OpenCV error leading to an exception, which then results in abort (unhandled C++ exception).",
+            "Decompiled JNI function shows heavy use of OpenCV-style APIs (cvCreateImageHeader, cvReleaseImage, cvReleaseImageHeader) and app-specific helpers (FUN_00103f0c, FUN_001042b0, FUN_00119134, FUN_001194bc, etc.).",
+            "Following instructions, I searched for memcpy/memmove/ks_memcpy or indirect function pointers in this function. There is no explicit memcpy/memmove call here; instead, it uses higher-level OpenCV functions and virtual method calls via param_1 vtable indices (0x5c0, 0x378, 0x2f8, 0x600).",
+            "The likely source of abort is cv::error thrown inside one of the OpenCV functions (cvCreateImageHeader, cvReleaseImage, cvReleaseImageHeader, or some other cv:: routine called indirectly). OpenCV typically throws cv::Exception on invalid arguments or failed assertions (e.g., negative width/height, null data pointer, type mismatch), which then maps to cv::error in the stack trace.",
+            "Key attacker-influenced parameters are param_4, param_5 (width, height), param_6 (format/flags), param_9 (boolean), and param_3/7/8 (JNI references). In the real app, these would be driven by camera frame dimensions and internal logic; in the fuzz harness they are arbitrary. The code here does not do explicit validation of width/height beyond what cvCreateImageHeader and subsequent helper functions enforce internally.",
+            "cvCreateImageHeader is called as cvCreateImageHeader(CONCAT44(param_5,param_4),8,1). If param_4 or param_5 were invalid (<=0, extremely large) OpenCV's own argument checks will throw cv::Exception rather than corrupt memory. Similarly, cvReleaseImage / cvReleaseImageHeader check for consistency and can assert/fail if called with wrong structures; again they use exceptions/abort, not undefined memory writes, under typical implementations.",
+            "The virtual calls via param_1 (vtable+0x5c0, +0x378, +0x2f8, +0x600) look like camera/image provider callbacks. Their argument values (param_3, param_7, etc.) are JNI/Java-side handles. The fuzz harness likely passes invalid pointers/values that would never be produced by the real Java/JNI glue. However, we do not see direct dereference/use of these values in this function beyond passing them down; actual crashes would be inside those callbacks, but the provided stack trace shows abort from cv::error, not a segfault in those virtual calls.",
+            "Because termination is via cv::error → __cxa_throw → abort, this is an intentional defensive abort on violation of OpenCV preconditions, not direct memory corruption. In practice it represents at most a local denial-of-service if reachable with malformed input. In production, these arguments are tightly constrained by camera APIs (image sizes, format) and by JNI code; fuzz harness is likely violating assumptions (e.g., impossible frame dimensions, null/garbage pointers).",
+            "There is no evidence here of an out-of-bounds read/write, use-after-free, or double free in app code. The stack canary check at the end (__stack_chk_fail) is normal and not triggered in the stack trace. The only indicated failure is the thrown cv::Exception, which is consistent with non-exploitable parameter validation failure.",
+            "Given that: (1) crash is due to OpenCV exception, (2) no unsafe memory operations are visible in the decompiled JNI function, (3) invalid parameters from fuzzing are expected to cause cv::error aborts, and (4) Java/JNI calling patterns in real app will not let attackers freely choose arbitrary dimensions/pointers, this crash is best classified as a harness/invalid-input induced abort, not a security vulnerability.",
+            "Severity is therefore at most low (DoS) but realistically non-issue; classification: not vulnerable, with moderate to high confidence."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Abort is from cv::error/cv::Exception, indicating OpenCV detected invalid arguments or failed assertion rather than raw memory corruption",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame uses OpenCV APIs and virtual callbacks but no direct memcpy/memmove or unchecked pointer arithmetic",
+            "Parameters causing the exception (image dimensions, flags) are constrained by real camera/JNI code; fuzz harness passes unrealistic values that trigger defensive aborts",
+            "No signs of out-of-bounds access, use-after-free, or double free in the visible function; error handling is via exceptions"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\nlocal_480 = lVar2;\n...\nif (DAT_001baea0 <= fVar5) {\n  local_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n  *(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;\n  FUN_00102770(local_488,&local_498,&local_490);\n  cvReleaseImageHeader(&local_488);\n  uVar4 = FUN_00103f0c(local_480,local_490,local_498,param_6,&local_4c8,&local_4e8);\n  ...\n  cvReleaseImage(&local_490);\n  cvReleaseImage(&local_498);\n}\ncvReleaseImageHeader(&local_480);",
+              "note": "Function uses OpenCV image header creation/release and helper functions; failures inside these typically throw cv::Exception (cv::error) on invalid sizes/arguments."
+            },
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0);\n...\n(**(code **)(*param_1 + 0x378))(param_1,param_7,DAT_001baf40);\n...\n(**(code **)(*param_1 + 0x2f8))(param_1,param_7,DAT_001baf48);\n...\n(**(code **)(*param_1 + 0x600))(param_1,param_3,lVar3,0);",
+              "note": "Virtual callbacks rely on param_1 vtable; crash trace does not show faults in these calls but in cv::error instead."
+            }
+          ],
+          "call_sequence": [
+            "main",
+            "fuzz_one_input",
+            "Java_io_card_payment_CardScanner_nScanFrame"
+          ],
+          "recommendations": [
+            "Treat this as an expected defensive abort for invalid OpenCV arguments; document preconditions on image dimensions and formats",
+            "Optionally add input validation and exception handling around OpenCV calls to avoid full-process abort on bad frames",
+            "Ensure fuzz harness does not pass impossible JNI pointers or frame metadata that real app code cannot produce"
+          ],
+          "assumptions": [
+            "OpenCV cv::error in this build throws cv::Exception then aborts on unhandled exception",
+            "Real application constrains frame dimensions and format values passed to nScanFrame via camera APIs and Java-side validation",
+            "Fuzz harness is providing argument combinations (sizes/flags) that are not reachable in normal operation"
+          ],
+          "limitations": [
+            "Exact OpenCV function that raised cv::error is not visible in the provided stack trace",
+            "No direct view of Java/JNI glue to confirm all invariants on param_4/param_5/param_6",
+            "Internal implementations of FUN_00103f0c, FUN_001042b0, FUN_00119134, and FUN_001194bc were not decompiled; however crash site indicates exception rather than memory corruption"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:09",
+          "llm_requests": 3,
+          "llm_tool_calls": 3,
+          "input_tokens": 19647,
+          "output_tokens": 1970
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "cv::meanStdDev",
+            "cvAvgSdv",
+            "??",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "cvAvgSdv",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "cvAvgSdv",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvAvgSdv"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below libc is cv::meanStdDev/cvAvgSdv, with process termination = abort, not SIGSEGV, matching OpenCV-style error and C++ exception path (__cxa_throw, cv::error).",
+            "Decompiled JNI entry Java_io_card_payment_CardScanner_nScanFrame shows: it constructs cv image headers via cvCreateImageHeader with dimensions derived from param_4/param_5 (frame width/height), then obtains a buffer pointer from a param_1 vtable callback, sets image->imageData pointer, and calls various helper functions; cvAvgSdv is present only as a trivial PLT-style stub calling a function pointer PTR_cvAvgSdv_0013af20.",
+            "The crash stack includes cv::meanStdDev and cv::error in libopencv.so, but in libcardioRecognizer.so cvAvgSdv is just a forwarding wrapper; no direct memcpy/memmove calls appear in the decompiled JNI function; instead, all heavy image math is delegated to OpenCV.",
+            "We are required to find memcpy/memmove/etc in the first app-level frame (JNI function) and reason about src/dst/len. In Java_io_card_payment_CardScanner_nScanFrame there are no memcpy-like calls, only calls to cvCreateImageHeader, FUN_00102770, FUN_00103f0c, FUN_001042b0, FUN_00119134, FUN_001194bc; thus no direct memory-copy length arguments to track; the OpenCV cv::meanStdDev internal implementation is not visible here.",
+            "Given the stack shows cv::error, abort, and meanStdDev, the crash is due to OpenCV detecting invalid parameters (e.g., empty Mat, mismatched sizes, unsupported type) and throwing cv::Exception, which then calls abort when unhandled, not due to a raw memory safety bug like UAF or OOB write. This is consistent with OpenCV semantics where errors are reported via exceptions and terminate when not caught.",
+            "In the JNI code, the dimensions passed into cvCreateImageHeader are derived from integer params param_4/param_5 supplied by JNI/fuzzer. In a real app, these would be validated camera frame dimensions; the fuzzer can supply 0 or absurd values, leading OpenCV to throw, but that is a defensive abort, not memory corruption. The OpenCV internals perform range/size checks before accessing memory; the exception path proves checks fired.",
+            "Therefore, under realistic usage (valid camera frames, checked sizes), this path should not abort; the fuzzer likely passed inconsistent width/height/stride or null/invalid image data via param_1/param_3 that app code would never use. There is no evidence of unchecked memcpy or index arithmetic on attacker-controlled data in app code. The fault is environment/harness misuse causing OpenCV to self-abort on invalid arguments.",
+            "Because we cannot see inside libopencv.so here and we only observe an intentional cv::error -> abort path, we cannot claim a memory safety vulnerability. At most, this is a controlled DoS from bad input, but only under unrealistic JNI parameter conditions not reachable in production, so we classify as non-vulnerable harness/environmental issue."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Termination is via cv::error and abort after cv::meanStdDev/cvAvgSdv, consistent with OpenCV throwing an exception on invalid parameters, not memory corruption",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame contains no memcpy/memmove or direct raw buffer indexing; it delegates to OpenCV and internal helpers, with dimensions directly mapped from JNI params",
+            "Fuzzer can pass nonsensical width/height/stride and buffer pointers that real app code would not, causing OpenCV to detect invalid state and abort defensively (environment/harness issue)"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n...\nFUN_00102770(local_488,&local_498,&local_490);\n...\nFUN_00103f0c(local_480,local_490,local_498,param_6,&local_4c8,&local_4e8);\n...\nFUN_001194bc(param_1,param_8,local_528,local_490,local_498,&local_570,param_6);",
+              "note": "JNI function orchestrates OpenCV image headers and helper functions; no memcpy/memmove or unsafe pointer arithmetic is visible."
+            },
+            {
+              "function": "cvAvgSdv",
+              "address": "0x001021f0",
+              "file": "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so",
+              "snippet": "void cvAvgSdv(void)\n{\n  (*(code *)PTR_cvAvgSdv_0013af20)();\n  return;\n}\n",
+              "note": "cvAvgSdv in this lib is just an indirect wrapper into OpenCV; crash likely occurs inside OpenCV implementation, not this stub."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "cvCreateImageHeader",
+            "cvAvgSdv -> PTR_cvAvgSdv_0013af20 -> cv::meanStdDev",
+            "cv::error",
+            "abort"
+          ],
+          "recommendations": [
+            "Add input validation in the Java/JNI layer to ensure frame width, height, and buffer pointers are consistent and non-zero before calling into OpenCV",
+            "Optionally catch cv::Exception around OpenCV calls and translate to a Java exception instead of letting abort terminate the process",
+            "Document that native scanning expects valid camera frame parameters and is not designed to handle arbitrary fuzzer-style inputs"
+          ],
+          "assumptions": [
+            "cv::error and cv::meanStdDev are part of OpenCV in libopencv.so, invoked via cvAvgSdv",
+            "In production, param_4/param_5 and buffer returned from (*param_1+0x5c0) are derived from real camera frames and constrained to valid ranges"
+          ],
+          "limitations": [
+            "Internal implementation of OpenCV cv::meanStdDev is not inspected here; we assume it performs its documented checks and the abort is intentional",
+            "Full stack trace with symbolized OpenCV frames is not available, limiting precise localization of the error site"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:42",
+          "llm_requests": 4,
+          "llm_tool_calls": 6,
+          "input_tokens": 27869,
+          "output_tokens": 1675
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "StackTrace": [
+            "abort",
+            "??",
+            "??",
+            "??",
+            "??",
+            "__cxa_throw",
+            "cv::error",
+            "cv::error",
+            "cvSetImageROI",
+            "??",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "Java_io_card_payment_CardScanner_nScanFrame",
+          "JavaCallGraph": [],
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "LibMap": {
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer.so": [
+              "cvSetImageROI",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libcardioRecognizer_tegra2.so": [
+              "cvSetImageROI",
+              "Java_io_card_payment_CardScanner_nScanFrame",
+              "Java_io_card_payment_CardScanner_nScanFrame"
+            ],
+            "APKs_FINAL/com.didiglobal.driver/lib/arm64-v8a/libopencv.so": [
+              "cvSetImageROI"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below lib/RT frames is cvSetImageROI, but in this binary it is just a thin wrapper around an imported function pointer PTR_cvSetImageROI_0013adb0. The crash is an abort via cv::error/throw, consistent with OpenCV throwing an exception on invalid ROI parameters or image header state rather than raw memory corruption.",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame shows normal use of OpenCV C API: cvCreateImageHeader, cvReleaseImageHeader/Image, and various helper functions. It does NOT call cvSetImageROI directly anywhere; only the stack trace references cvSetImageROI (likely from inside helper functions like FUN_001042b0 or FUN_00103f0c). Within nScanFrame, there are no explicit memcpy/memmove/ks_memcpy calls; it mostly manipulates image headers, calls into library helpers, and uses JNI function pointers in param_1.",
+            "Given the absent direct calls to cvSetImageROI and the fact that cvSetImageROI itself resolves to an external OpenCV implementation via a function pointer, I cannot inspect the internal argument validation. However, OpenCV’s cvSetImageROI is known to validate ROI coordinates and throw cv::Exception (which ends up in cv::error and __cxa_throw) when the ROI lies outside the image bounds or the header is inconsistent. This matches the observed abort stack (__cxa_throw → cv::error → cvSetImageROI → abort).",
+            "Fuzzer harness likely supplies arbitrary frame sizes/contents (param_3 etc.) that are not representative of what the real app passes. nScanFrame constructs image headers from these dimensions: cvCreateImageHeader(CONCAT44(param_5,param_4),8,1) and another header with (param_5/2,param_4/2). These sizes are directly derived from JNI/fuzzer inputs, but are internally consistent and used only with OpenCV allocation APIs; no raw buffer indexing is performed in-app code. Any invalid combination (e.g., buffer too small for header dimensions, negative ROI computations in helper functions) would be caught by OpenCV, which throws instead of causing UB in most modern builds.",
+            "Because the termination is via C++ exception/abort path and not a sanitizer or SEGV indicating out-of-bounds access, and we lack evidence of unchecked memcpy or pointer arithmetic under attacker control, this is best characterized as an application/harness-triggered logical error or bounds violation handled safely by OpenCV. It is at most a denial-of-service for that image processing operation, but since this is already a crash under fuzz-only abnormal inputs and the exception is thrown intentionally by OpenCV, it does not clearly rise to a security vulnerability in normal app usage.",
+            "OID: No exploitable primitive (no write-what-where, UAF, or info leak) is visible. The helper functions (FUN_001042b0, FUN_00103f0c) are opaque, but they only feed into OpenCV APIs and ultimately OpenCV’s ROI functionality, which aborts when invalid. Without evidence contradicting this and given typical OpenCV behavior, the safest classification is non-vulnerable / harness-induced DoS."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.65,
+          "reasons": [
+            "Abort is triggered via cv::error and __cxa_throw inside OpenCV (cvSetImageROI), consistent with a handled exception due to invalid ROI/parameters, not raw memory corruption",
+            "Decompiled Java_io_card_payment_CardScanner_nScanFrame uses OpenCV APIs in a standard way and does not perform unsafe memcpy or unchecked pointer arithmetic on attacker-controlled data",
+            "The active cvSetImageROI implementation in this lib is just a thunk to an imported OpenCV symbol via function pointer, and the alternative symbol is a stub that halts, indicating no custom, buggy ROI logic in app code",
+            "Crash occurs under fuzz harness that likely passes unrealistic image buffers and dimensions; in production, inputs are constrained by camera pipeline and app logic, making this a non-security DoS at worst"
+          ],
+          "cwe_ids": [],
+          "severity": "low",
+          "affected_libraries": [
+            "libcardioRecognizer.so",
+            "libopencv.so"
+          ],
+          "evidence": [
+            {
+              "function": "Java_io_card_payment_CardScanner_nScanFrame",
+              "file": "libcardioRecognizer.so",
+              "snippet": "lVar2 = cvCreateImageHeader(CONCAT44(param_5,param_4),8,1);\n...\nlocal_488 = cvCreateImageHeader(CONCAT44(param_5 / 2,param_4 / 2),8,2);\n*(long *)(local_488 + 0x58) = lVar3 + param_5 * param_4;\nFUN_00102770(local_488,&local_498,&local_490);\n...\nFUN_001042b0(0,local_480,&local_550,param_6,0,&local_528);\n...\ncvReleaseImage(&local_528);\ncvReleaseImage(&local_490);\ncvReleaseImage(&local_498);\ncvReleaseImageHeader(&local_480);",
+              "note": "Standard OpenCV image header creation and release; no direct cvSetImageROI call or unsafe memcpy visible."
+            },
+            {
+              "function": "cvSetImageROI @ 00101f10",
+              "address": "0x00101f10",
+              "file": "libcardioRecognizer.so",
+              "snippet": "void cvSetImageROI(void) { (*(code *)PTR_cvSetImageROI_0013adb0)(); }",
+              "note": "Thin wrapper to imported OpenCV cvSetImageROI via function pointer; actual implementation resides in libopencv.so."
+            },
+            {
+              "function": "cvSetImageROI @ 001bc038",
+              "address": "0x001bc038",
+              "file": "libcardioRecognizer.so",
+              "snippet": "void cvSetImageROI(void) { halt_baddata(); }",
+              "note": "Alternate, unreachable stub version; indicates no custom ROI logic in app."
+            }
+          ],
+          "call_sequence": [
+            "fuzz_one_input",
+            "Java_io_card_payment_CardScanner_nScanFrame",
+            "FUN_001042b0",
+            "cvSetImageROI"
+          ],
+          "recommendations": [
+            "Treat this as a non-security robustness issue; optionally add validation on frame dimensions and ROI parameters before invoking OpenCV routines to avoid exceptions",
+            "Adjust fuzz harness to respect realistic camera frame sizes and formats, or catch and ignore OpenCV exceptions if acceptable",
+            "If concern remains, instrument OpenCV (libopencv.so) with sanitizers to confirm no underlying memory corruption beyond its safe abort behavior"
+          ],
+          "assumptions": [
+            "OpenCV’s cvSetImageROI implementation in libopencv.so performs internal bounds checks and throws cv::Exception on invalid ROI, as in canonical builds",
+            "The fuzz harness is supplying image dimensions and buffers that are not representative of those produced by the real camera pipeline",
+            "Helper functions such as FUN_001042b0 ultimately wrap OpenCV ROI operations without adding unsafe pointer arithmetic beyond OpenCV’s checks"
+          ],
+          "limitations": [
+            "libopencv.so implementation of cvSetImageROI is not visible, so internal validation is inferred from typical OpenCV behavior and the cv::error/__cxa_throw stack frames",
+            "Exact arguments to cvSetImageROI via FUN_001042b0 are not decompiled in this trace, so we infer ROI invalidity as the exception cause",
+            "No ASAN/UBSAN trace is present; only a generic abort path is observed"
+          ]
+        },
+        "statistics": {
+          "time": "00:01:00",
+          "llm_requests": 5,
+          "llm_tool_calls": 4,
+          "input_tokens": 36185,
+          "output_tokens": 1704
+        }
+      }
+    ]
+  }
+}

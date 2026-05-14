@@ -1,0 +1,400 @@
+{
+  "analysis": {
+    "tool": {
+      "model_name": "gpt-5.1",
+      "apk_path": "APKs_FINAL/com.skt.smartbill/base.apk",
+      "version": "1.0"
+    },
+    "app": {
+      "app_name": "",
+      "package": "com.skt.smartbill",
+      "min_sdk": 19,
+      "target_sdk": 31,
+      "version_name": "6.4.1",
+      "version_code": "145"
+    },
+    "analysisResults": [
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Init_SEED",
+            "SEED_CBC",
+            "EncCertExchangeMessage_to_CertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.skt.smartbill.utillity.KeyStoreHelper: decryptString(Ljava/lang/String;)Ljava/lang/String;>",
+          "LibMap": {
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so": [
+              "Init_SEED",
+              "SEED_CBC",
+              "EncCertExchangeMessage_to_CertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy; first app frame below it is Java_com_ubikey_jni_UbikeyJni_jdecrypt in libUbikeyJni.so. I decompiled this function to inspect how memcpy is used and where its arguments come from.",
+            "The decompiled JNI function obtains a length via a JNIEnv virtual call: iVar1 = (**(code **)(*param_1 + 0x558))(param_1,param_3); then casts it to size_t __size. It then obtains a pointer __src from another JNIEnv call: __src = (void *)(**(code **)(*param_1 + 0x5c0))(param_1,param_3,0); this is very likely GetStringUTFLength / GetArrayLength and GetStringUTFChars / GetByteArrayElements or similar, based on common JNI vtable indices.",
+            "It allocates a heap buffer of exactly __size bytes: __s = malloc(__size); then zeroes it with memset(__s,0,__size); and copies __size bytes from __src into __s with memcpy(__s,__src,__size). Finally, it releases the JNI resource and calls DecryptCertExchange(DAT_..., __s, iVar1). It frees __s afterwards.",
+            "The crash occurs in __memcpy, so the likely failing operation is memcpy(__s,__src,__size). I must check whether any bounds validation is done. The function uses the length value returned by JNIEnv for both allocation and copy. Assuming the JNIEnv length corresponds to the actual allocated size of __src, there should not be an overflow here: dest and source lengths are aligned. However, there are two potential issues: (1) malloc can return NULL when __size is 0 or for allocation failure; the code calls memset and memcpy unconditionally on __s, which would dereference NULL, and (2) if the JNIEnv length does not match the representation returned by the pointer (e.g., using GetStringLength vs GetStringUTFChars), there could be a mismatch leading to buffer over-read/write.",
+            "On Android/ART, passing very large or malformed JNI strings/arrays via the harness could produce sizes that are inconsistent or trigger integer issues inside libc memcpy, leading to the observed crash. But I must decide if this is a genuine app-level vulnerability or a harness artifact. Looking closely, __size is directly iVar1 (int) cast to size_t. If iVar1 is negative, the cast would produce a huge size_t, leading to malloc(very_big) and memcpy with that length. However, the preceding JNIEnv call that fills iVar1 is a standard function that will not return negative values for string/array length under normal operation—it’s defined to return non-negative lengths or throw an exception. Fuzz harnesses can pass arbitrary jobject values, but real Java callers will pass proper Strings or arrays. Thus, under realistic app usage, iVar1 will be non-negative and consistent with __src’s buffer size.",
+            "The more concrete bug is that the code never checks if __size is zero or if malloc returned NULL before calling memset/memcpy. If malloc fails (e.g., due to huge input length from an attacker), __s will be NULL and the subsequent memset/memcpy(NULL,...) causes a crash. This is a potential denial-of-service vector: a remote or local attacker who controls the length of the data being decrypted can induce a huge allocation and cause controlled crash. In this app, the JNI is called from KeyStoreHelper.decryptString(String), and the length of the Java String passed down can be influenced by untrusted input if the app ever decrypts user-provided ciphertext or similar. However, without the Java-side context I cannot be certain the attacker controls this input; but generically, decrypt APIs are often reachable via network or external data.",
+            "There is no evidence of out-of-bounds write within memcpy itself: the function sources its length from the same JNIEnv that allocated/owns the data. The crash in __memcpy is more plausibly from NULL dest or from an inconsistent pointer because the fuzz harness may be passing invalid jobjects not obtainable in production. Considering the fuzz harness: fuzz_one_input probably constructs arbitrary Java objects or passes invalid jobject references to the JNI method, which can cause JNIEnv calls to return nonsense lengths or pointers, leading to memcpy faults that would never happen with well-typed Java objects. This is a classic harness-induced JNI misuse pattern.",
+            "I must apply the checklist: (1) unsafe operations: there is unchecked memcpy and memset on a malloc result without NULL-check. (2) backward data flow: length comes from JNIEnv; attacker control depends on whether decryptString(String) is reachable with attacker-chosen String length. That is plausible but not guaranteed. (3) realistic reachability: a decryptString utility inside KeyStoreHelper sounds like it primarily handles app’s own encrypted config or keystore data, not arbitrary user content; so typical threat models may not allow remote control over String size. (4) env/harness artifacts: fuzz_one_input suggests the harness is directly invoking the JNI method with synthetic values, possibly bypassing any Java validation and constructing broken jobjects. The double listing of Java_com_ubikey_jni_UbikeyJni_jdecrypt in the library map is irrelevant.",
+            "Balancing this, I see a clear, generic C bug: not checking malloc return and using it in memset/memcpy is a memory-safety issue that can cause a deterministic crash if allocation fails, potentially influenced by input size. That is a legitimate vulnerability pattern (CWE-690 / NULL pointer dereference / DoS), although its impact is limited to local process crash. The more severe outcomes (heap overflow) seem unlikely given the alignment of size and buffer. Thus I should classify this as a real but low-severity vulnerability, not merely a harness glitch.",
+            "I will mark it as vulnerable with moderate-high confidence (~0.8), CWE-476 or CWE-690, severity low (DoS via NULL-deref). Call sequence from harness: fuzz_one_input → Java_com_ubikey_jni_UbikeyJni_jdecrypt → (indirect) DecryptCertExchange → SEED_CBC / Init_SEED → __memcpy. Recommendations include adding malloc NULL checks and verifying that __size is reasonable and non-negative before allocation/copy."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.8,
+          "reasons": [
+            "JNI function Java_com_ubikey_jni_UbikeyJni_jdecrypt calls malloc(__size) and then unconditionally memset/memcpy on the returned pointer without checking for NULL",
+            "Length __size is fully derived from attacker-influenced Java input length via JNIEnv, so large sizes can force allocation failure and trigger a NULL-pointer dereference crash (DoS)",
+            "No evidence of bounds mismatch for memcpy arguments, so the main issue is unchecked allocation result rather than buffer overflow"
+          ],
+          "cwe_ids": [
+            "CWE-476",
+            "CWE-690"
+          ],
+          "severity": "low",
+          "affected_libraries": [
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 0x001161c8",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 0x001161c8 -> DecryptCertExchange @ 0x001120f0",
+            "DecryptCertExchange @ 0x001120f0 -> SEED_CBC @ 0x00111620",
+            "SEED_CBC @ 0x00111620 -> __memcpy"
+          ],
+          "recommendations": [
+            "Add explicit NULL checks after malloc(__size) and before calling memset/memcpy, and gracefully handle allocation failure",
+            "Validate __size against a reasonable upper bound before allocation and copying to avoid excessive memory usage and potential DoS",
+            "Optionally, add sanity checks on the Java input size in KeyStoreHelper.decryptString before invoking the JNI layer"
+          ],
+          "assumptions": [
+            "JNI vtable calls used to obtain iVar1 and __src correspond to standard string/array length and data-access functions returning non-negative lengths for valid Java objects",
+            "decryptString can potentially be invoked on input influenced by untrusted data, allowing control over the String length"
+          ],
+          "limitations": [
+            "Exact JNIEnv functions at vtable slots 0x558 and 0x5c0 are inferred, not symbolized",
+            "The precise nature and controllability of the Java-side input to decryptString were not inspected",
+            "The exact reason for the observed memcpy crash (NULL dest vs inconsistent source) cannot be fully determined from the native code alone"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:47",
+          "llm_requests": 5,
+          "llm_tool_calls": 12,
+          "input_tokens": 27813,
+          "output_tokens": 2146
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "Get_DER_Child",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "Get_DER_Child",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.skt.smartbill.utillity.KeyStoreHelper: decryptString(Ljava/lang/String;)Ljava/lang/String;>",
+          "LibMap": {
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so": [
+              "Get_DER_Child",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is Get_DER_Child, which is just an indirect call through PTR_Get_DER_Child and likely part of ASN.1 parsing. The termination reason name suggests some internal error, not a signal or sanitizer. Without its body we can’t see the exact bug, but xrefs show it is a general-purpose DER walker used by many ASN.1/PKCS converters, so a parsing bug here could be serious. However we must still follow the mandatory memcpy analysis path starting from the first app-level native frame below allocators/sanitizers.",
+            "The first concrete native frame with code we have is Java_com_ubikey_jni_UbikeyJni_jdecrypt. Decompilation shows: it gets a length iVar1 from a JNI env vtable call, allocates __s = malloc(__size) with __size = (size_t)iVar1, zeroes it, then memcpy(__s,__src,__size). It then calls back into JNI to release the original buffer and calls DecryptCertExchange(...,__s,iVar1). Finally it frees __s. So the only obvious memory-unsafe primitive in this function is memcpy.",
+            "Analyze memcpy args: dest=__s is result of malloc(__size); src=__src comes from another JNI vtable function taking (param_1,param_3,0), i.e. GetByteArrayElements/GetStringUTFChars-like; len=__size is cast from iVar1, which came from another vtable call, likely GetArrayLength or GetStringUTFLength. In normal JNI, these two lengths are consistent (same env and object), so memcpy should be safe for valid Java inputs. Fuzzer might provide weird param_1/param_3 combos (not a real JNIEnv*, invalid jbyteArray), but in production these are created by the JVM and not attacker-controlled. There is no sign of integer overflow: size_t is set from a 32-bit int without checks, but JNI lengths are bounded by Java array/string length, so on 64-bit this won’t overflow small->large; only negative values would sign-extend, but iVar1 is an int returned by trusted JNI, not attacker data.",
+            "Backward data-flow/taint: The key tainted value is iVar1/__size. Its ultimate source is the JNI env call (**(code **)(*param_1 + 0x558))(param_1,param_3). param_3 is the Java argument to jdecrypt, coming from the fuzzer via the Java KeyStoreHelper.decryptString, but actual length computation is done inside JVM/JNI. The fuzzer cannot force inconsistent or oversized lengths: if it passes a huge string, JVM will allocate that many bytes but will also report that exact length and back the pointer with a real buffer. Therefore, as long as the JNI environment is valid, there’s no direct attacker control over making len larger than the backing allocation for __src or __s. The only realistic way memcpy can misbehave here is if the fuzzer has broken the contract by passing a fake JNIEnv or object, which is harness-specific and not reachable in real app execution.",
+            "The crash is reported at Get_DER_Child, deeper in DecryptCertExchange. That code is indirect through function pointers we can’t see. It probably parses ASN.1/DER from the decrypted blob. Potentially, malformed attacker-provided ASN.1 could trigger memory corruption in those parsers. However, we have no concrete evidence of memory-unsafe operations (no decompilation of Get_DER_Child impl, no ASAN messages, no SIGSEGV description). The process termination label is just the function name, suggesting a logical abort/return, not necessarily memory corruption. Without the body or crash signal, claiming a vulnerability there would be speculative.",
+            "Given the available concrete code, the only visible low-level primitive is memcpy in Java_com_ubikey_jni_UbikeyJni_jdecrypt, and that memcpy’s size is derived from trusted JVM length and buffers. The crash likely stems from deeper crypto/ASN.1 code or from the fuzzer misusing JNI (e.g., invalid env, freed arrays), not from a clear, externally-triggerable memory-safety flaw we can point to. We also can’t tie Get_DER_Child’s failure definitively to attacker-controlled input without its implementation. Thus the safest classification is that this crash is not yet a proven vulnerability; more binary analysis of Get_DER_Child would be required to upgrade it.",
+            "Therefore classify as not confirmed vulnerable, leaning to non-vulnerability / environment artifact, with moderate uncertainty."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.45,
+          "reasons": [
+            "Visible memcpy in Java_com_ubikey_jni_UbikeyJni_jdecrypt uses length and source derived from JVM/JNI, not directly attacker-controlled, so no clear overflow/UB there",
+            "Crash endpoint Get_DER_Child is an indirect function pointer with no implementation available; termination reason does not show a memory-safety signal",
+            "Likely dependence on correct JNI environment; fuzzer may violate JNI contracts in ways that real app cannot, making this more likely a harness artifact than a reachable exploit"
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> DecryptCertExchange -> Convert_ASN1_to_EncCertExchangeMessage -> Get_DER_Child"
+          ],
+          "recommendations": [
+            "Obtain and analyze the concrete implementation of Get_DER_Child and related ASN.1 parsers for bounds checks on DER lengths and indices",
+            "Run the binary under ASAN/Valgrind with structured but malformed ASN.1 inputs via the real Java API to see if any memory errors are reported",
+            "Enhance the fuzz harness to use a valid JVM/JNI environment mirroring production usage, to rule out crashes caused by invalid JNIEnv or object handles"
+          ],
+          "assumptions": [
+            "JNI env and jbyteArray/jstring handles are always valid in real app execution",
+            "JNI length and data accessors (GetArrayLength/GetPrimitiveArrayCritical etc.) return consistent buffer and size",
+            "Process termination reason 'Get_DER_Child' does not itself encode a low-level signal like SIGSEGV"
+          ],
+          "limitations": [
+            "Implementation of Get_DER_Child and DecryptCertExchange is hidden behind function pointers, so internal safety checks are unknown",
+            "No precise crash signal, register state, or sanitizer output is provided",
+            "Fuzzing harness details for how Java side and JNI are wired are not available"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:33",
+          "llm_requests": 3,
+          "llm_tool_calls": 6,
+          "input_tokens": 19256,
+          "output_tokens": 1540
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "abort",
+          "FuzzHarnessEntry": "??",
+          "ProgramEntry": "cktrace stopped: previous frame identical to this frame",
+          "StackTrace": [
+            "abort",
+            "__stack_chk_fail",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "??",
+            "cktrace stopped: previous frame identical to this frame"
+          ],
+          "JNIBridgeMethod": "<com.skt.smartbill.utillity.KeyStoreHelper: decryptString(Ljava/lang/String;)Ljava/lang/String;>",
+          "LibMap": {
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so": [
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame below allocator/sanitizer is Convert_ASN1_to_EncCertExchangeMessage; decompiled version at 0x001345ac shows normal control flow with stack canary and no memcpy/memmove usage; abort occurs via __stack_chk_fail when stack canary corrupted, implying prior memory corruption elsewhere or misuse of this function.",
+            "Convert_ASN1_to_EncCertExchangeMessage takes (param_1, param_2) where param_2 is a pointer to a long*; it conditionally allocates or reuses an EncCertExchangeMessage object, fills its fields using Get_DER_Child and Convert_BINT_to_Binary, then on failure deletes the object; no unbounded copies or pointer arithmetic visible; stack variables are small fixed-size (local_1c[4]) and Convert_BINT_to_Binary is the only function writing into that buffer.",
+            "Because stack canary fails at function epilogue, likely overwrite of local_1c/local_38/local_18 by Convert_BINT_to_Binary or another callee; those implementations are not visible here, so cannot confirm which one is buggy; however they operate on ASN.1/BINT data, which ultimately derives from attacker-controllable ciphertext given JNI decrypt flow.",
+            "Decompilation of JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt shows it obtains size via (*env+0x558)(env, param_3) and bytes via (*env+0x5c0)(env, param_3, 0), then malloc(__size), memset, memcpy(__s,__src,__size), then calls DecryptCertExchange(...,__s,iVar1); this is standard GetStringUTFLength/GetStringUTFChars pattern with length-checked allocation and copy, so JNI wrapper itself is safe and passes length+buffer to DecryptCertExchange.",
+            "DecryptCertExchange is likely where ASN.1 parsing occurs and eventually calls Convert_ASN1_to_EncCertExchangeMessage; since ciphertext/string size is obtained from Java and used consistently for malloc and memcpy, the only plausible corruption is in deeper native parsing (e.g., Convert_BINT_to_Binary overflowing 4-byte local_1c or other stack objects when handling malformed ASN.1 / BINT structures).",
+            "Given crash reason (__stack_chk_fail) and structure of Convert_ASN1_to_EncCertExchangeMessage, it is highly suggestive of a stack-based buffer overflow or similar memory corruption in callee Convert_BINT_to_Binary (or ASN.1 helpers) driven by attacker-controlled ASN.1 data; this is a genuine vulnerability, not harness-only, because JNI decrypt function is a regular app API taking arbitrary strings from Java, and no additional validation is apparent before native parsing.",
+            "Severity is high: stack corruption with stack canary abort indicates potential for code execution if protections are bypassed; at minimum this is a reliable native crash (DoS) when processing malicious input.",
+            "Limitations: we do not have decompilation of DecryptCertExchange or Convert_BINT_to_Binary to pinpoint exact overflow site; we infer based on stack canary failure and untrusted ASN.1 input path; there is also a wrapper-thunk version of Convert_ASN1_to_EncCertExchangeMessage at 0x001106b0 calling a function pointer, but the crashing frame in trace names the concrete implementation, so we focus on that."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.78,
+          "reasons": [
+            "__stack_chk_fail in Convert_ASN1_to_EncCertExchangeMessage indicates stack corruption rather than benign abort.",
+            "ASN.1 / BINT parsing in Convert_ASN1_to_EncCertExchangeMessage relies on helper Convert_BINT_to_Binary writing into a 4-byte stack buffer, suggesting potential overflow in callee when parsing crafted data.",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt safely copies attacker-controlled Java string into native buffer and passes it into DecryptCertExchange, which likely feeds Convert_ASN1_to_EncCertExchangeMessage without additional validation, making the corruption reachable from untrusted input."
+          ],
+          "cwe_ids": [
+            "CWE-121",
+            "CWE-787"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "com.skt.smartbill.utillity.KeyStoreHelper.decryptString(String)",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 001161c8",
+            "DecryptCertExchange (address unknown)",
+            "Convert_ASN1_to_EncCertExchangeMessage @ 001345ac"
+          ],
+          "recommendations": [
+            "Audit and decompile DecryptCertExchange and Convert_BINT_to_Binary to identify the exact overflow or out-of-bounds access corrupting the stack in Convert_ASN1_to_EncCertExchangeMessage.",
+            "Add strict bounds checking in ASN.1/BINT parsing routines and avoid writing into fixed-size stack buffers without validating encoded lengths.",
+            "Add fuzzing and negative tests for DecryptCertExchange/Convert_ASN1_to_EncCertExchangeMessage using malformed ASN.1/BINT inputs originating from Java strings."
+          ],
+          "assumptions": [
+            "DecryptCertExchange processes attacker-provided Java strings without additional validation beyond what is visible in JNI wrapper.",
+            "The __stack_chk_fail in the stack trace corresponds to the implementation of Convert_ASN1_to_EncCertExchangeMessage at 0x001345ac rather than the thunk at 0x001106b0."
+          ],
+          "limitations": [
+            "Implementations of DecryptCertExchange, Convert_BINT_to_Binary, and Get_DER_Child were not inspected, so the precise corrupting write is inferred.",
+            "Exact constraints on the Java-level decryptString API (e.g., preprocessing or filtering in KeyStoreHelper) are not visible in the provided data."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:29",
+          "llm_requests": 5,
+          "llm_tool_calls": 7,
+          "input_tokens": 27739,
+          "output_tokens": 1446
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_OctetString",
+            "Get_DER_Child",
+            "Convert_ASN1_to_EncCertExchangeMessage",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.skt.smartbill.utillity.KeyStoreHelper: decryptString(Ljava/lang/String;)Ljava/lang/String;>",
+          "LibMap": {
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_OctetString",
+              "Get_DER_Child",
+              "Convert_ASN1_to_EncCertExchangeMessage",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy; first app frame below that is Decode_DER_OctetString in libUbikeyJni.so.",
+            "Decompiled Decode_DER_OctetString at 0x0012162c shows it computes iVar1 = Compute_ASN1_LengthSize(param_1+1) and iVar2 = Compute_ASN1_ValueLength_from_LO(param_1+1). It then mallocs iVar2 bytes and calls memcpy(dst = local_18+2 ptr, src = param_1 + (iVar1 + 1), len = iVar2).",
+            "The memcpy length iVar2 derives from ASN.1 length field in attacker-controlled DER buffer param_1 coming from earlier parsing routines, ultimately from jdecrypt JNI which copies fuzz/JNI input into __s and passes it to DecryptCertExchange, which then leads to Convert_ASN1_to_EncCertExchangeMessage → Get_DER_Child → Decode_DER_OctetString.",
+            "Compute_ASN1_ValueLength_from_LO likely parses length octets but there is no evidence it validates that (param_1 + iVar1 + 1 + iVar2) stays within the actual input buffer bounds. There is also no size information passed into Decode_DER_OctetString—only a raw pointer—so it has no way to enforce bounds.",
+            "Thus, if the provided DER data advertises a length larger than the actual available bytes, memcpy will read past the end of the input buffer, causing the crash in __memcpy. This is a classic out-of-bounds read from attacker-controlled ASN.1 input.",
+            "From JNI side, Java_com_ubikey_jni_UbikeyJni_jdecrypt obtains a byte array and its length from the JNIEnv via indirect calls, allocates a heap buffer of that exact size, copies the data, and calls DecryptCertExchange with (buffer, length). There is no sanitisation of the inner ASN.1 fields, so the attacker can fully control the inner DER length field that drives Decode_DER_OctetString.",
+            "Crash cause is therefore a genuine memory safety issue in the ASN.1 parsing logic, not a harness artifact. The same flawed pattern could also lead to OOB write in other contexts if reused. Given realistic untrusted inputs (cert exchange messages) this is a high severity vulnerability allowing out-of-bounds read and likely facilitating further exploitation."
+          ],
+          "is_vulnerable": true,
+          "confidence": 0.95,
+          "reasons": [
+            "Decode_DER_OctetString performs memcpy using a length derived from ASN.1-encoded data without any buffer-size parameter or bounds check",
+            "JNI entry Java_com_ubikey_jni_UbikeyJni_jdecrypt passes attacker-controlled DER data into DecryptCertExchange/Decode_DER_OctetString",
+            "Observed crash in __memcpy is consistent with out-of-bounds read from undersized input buffer due to overlarge ASN.1 length"
+          ],
+          "cwe_ids": [
+            "CWE-125",
+            "CWE-20"
+          ],
+          "severity": "high",
+          "affected_libraries": [
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input → Java_com_ubikey_jni_UbikeyJni_jdecrypt @ 0x001161c8 → DecryptCertExchange → Convert_ASN1_to_EncCertExchangeMessage → Get_DER_Child → Decode_DER_OctetString @ 0x0012162c → memcpy"
+          ],
+          "recommendations": [
+            "Modify Decode_DER_OctetString (and related ASN.1 parsers) to take an explicit buffer length and validate that advertised ASN.1 length fits within remaining bytes before memcpy",
+            "Add robust ASN.1 length checks in Compute_ASN1_ValueLength_from_LO and callers, returning failure if length would exceed the received message size",
+            "Introduce fuzzing and negative tests for malformed ASN.1/DER inputs on the JNI decryption path to catch similar issues"
+          ],
+          "assumptions": [
+            "Compute_ASN1_ValueLength_from_LO does not have hidden global knowledge of the original buffer size",
+            "DecryptCertExchange and its callers do not perform comprehensive bounds checks on individual ASN.1 elements before calling Decode_DER_OctetString"
+          ],
+          "limitations": [
+            "Did not decompile intermediate functions (Get_DER_Child, Convert_ASN1_to_EncCertExchangeMessage, DecryptCertExchange) to see any partial validation they might perform",
+            "Exact shape of attacker-controlled Java inputs to jdecrypt in production app paths not fully confirmed, inferred from typical JNI byte-array handling"
+          ]
+        },
+        "statistics": {
+          "time": "00:00:22",
+          "llm_requests": 3,
+          "llm_tool_calls": 8,
+          "input_tokens": 17114,
+          "output_tokens": 1200
+        }
+      },
+      {
+        "crash": {
+          "ProcessTermination": "__memcpy",
+          "FuzzHarnessEntry": "fuzz_one_input",
+          "ProgramEntry": "main",
+          "StackTrace": [
+            "__memcpy",
+            "Decode_DER_ASN1_ST",
+            "DecryptCertExchange",
+            "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+            "fuzz_one_input",
+            "main"
+          ],
+          "JNIBridgeMethod": "<com.skt.smartbill.utillity.KeyStoreHelper: decryptString(Ljava/lang/String;)Ljava/lang/String;>",
+          "LibMap": {
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so": [
+              "Decode_DER_ASN1_ST",
+              "DecryptCertExchange",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt",
+              "Java_com_ubikey_jni_UbikeyJni_jdecrypt"
+            ]
+          }
+        },
+        "assessment": {
+          "chain_of_thought": [
+            "Top native frame is __memcpy, but first app-level frame is Java_com_ubikey_jni_UbikeyJni_jdecrypt in libUbikeyJni.so.",
+            "Decompiled Java_com_ubikey_jni_UbikeyJni_jdecrypt shows a direct memcpy(__s,__src,__size) with __size derived from iVar1, which is the result of a JNI env call (**(code **)(*param_1 + 0x558))(param_1,param_3).",
+            "The source pointer __src is obtained via another JNI env call (**(code **)(*param_1 + 0x5c0))(param_1,param_3,0). For standard JNI this pattern matches GetStringUTFLength/GetStringUTFChars or similar, so __size is the length in bytes of the string content, and __src points to a buffer owned by the VM with at least that many bytes.",
+            "The code then allocates __s = malloc(__size), memset(__s,0,__size), and calls memcpy(__s,__src,__size) with the same size. This is normally safe because destination buffer is exactly __size and source buffer, by JNI contract, is at least that large.",
+            "The crash occurs inside __memcpy, which strongly suggests either __s or __src is invalid or __size is inconsistent with the real source/dest buffers. In this function there is no apparent harness-only misuse: the only inputs are param_1 (JNI env) and param_3 (jstring from Java).",
+            "Under normal JVM semantics, passing a valid jstring ensures these JNI calls return a correct length and pointer pair, preventing overflow and underflow. Therefore, a memcpy crash here typically indicates the fuzzer supplied an invalid/forged JNI environment, corrupt jstring handle, or otherwise violated the JNI contract.",
+            "Since the fuzz harness entry is fuzz_one_input, not real app code, it's plausible the harness is creating arbitrary jstring handles or corrupting the JNI env. That can make __src arbitrary or NULL and __size arbitrary, leading to memcpy faults unrelated to application logic.",
+            "There is no evidence in this function of unchecked attacker-controlled arithmetic beyond trusting JNI-provided length; the only potential vulnerability would be if real Java code can ever pass a bogus jstring or if native code misuses the env pointer elsewhere. Given typical Android environment, Java cannot forge jstring or env, so this is an unrealistic harness condition.",
+            "Other functions Decode_DER_ASN1_ST and DecryptCertExchange are thunks through function pointers; the crash stack given starts at __memcpy, but our memcpy is inside Java_com_ubikey_jni_UbikeyJni_jdecrypt and not within Decode_DER_ASN1_ST/DecryptCertExchange. Likely the stack trace in the report is simplified or another memcpy deeper inside Decode_DER_ASN1_ST crashed, but we do see at least one concrete memcpy site that matches the termination.",
+            "Because the memcpy length and allocation are directly coupled and based on JNI-guaranteed length, and because the only plausible cause of corruption is an invalid JNI environment imposed by the fuzzer, this crash is best classified as harness/environment-induced, not a genuine app-level vulnerability."
+          ],
+          "is_vulnerable": false,
+          "confidence": 0.78,
+          "reasons": [
+            "Decompiled JNI function shows memcpy size equals malloc size with no intermediate modification, so no intrinsic overflow logic bug.",
+            "Source pointer and size are obtained from standard JNI-like calls that, in a real JVM, guarantee consistency; crash implies the JNI env or jstring was invalid, which is a fuzzer/harness artifact.",
+            "No data-flow path from attacker-controlled Java-level input to unsafe buffer manipulation beyond trusting JVM invariants, which are not under attacker control in production."
+          ],
+          "cwe_ids": [],
+          "affected_libraries": [
+            "APKs_FINAL/com.skt.smartbill/lib/arm64-v8a/libUbikeyJni.so"
+          ],
+          "call_sequence": [
+            "fuzz_one_input -> Java_com_ubikey_jni_UbikeyJni_jdecrypt -> memcpy"
+          ],
+          "recommendations": [
+            "Treat this finding as likely harness-induced; adjust the JNI fuzz harness to construct valid jstring objects via the real JVM rather than raw handle mutation.",
+            "Add defensive checks (e.g., null checks on __src and __s, sanity limits on __size) around memcpy to harden against unexpected JNI misuse.",
+            "Extend fuzzing to higher-level Java APIs that ultimately call decryptString, using a real JVM, to discover any reachable ASN.1/DER parsing bugs in Decode_DER_ASN1_ST/DecryptCertExchange."
+          ],
+          "assumptions": [
+            "JNI env function pointers at offsets 0x558 and 0x5c0 correspond to standard string-length and string-pointer accessors.",
+            "The crash at __memcpy originates from the memcpy in Java_com_ubikey_jni_UbikeyJni_jdecrypt, as no other __memcpy sites are currently evidenced.",
+            "Fuzzer controls native inputs and may violate JNI contracts that normal app code cannot violate."
+          ],
+          "limitations": [
+            "Did not decompile internal implementations behind function pointers used in Decode_DER_ASN1_ST/DecryptCertExchange; there could be other memcpy sites not examined.",
+            "Stack trace in CrashEntry lists Decode_DER_ASN1_ST and DecryptCertExchange but allocator frame mapping to this specific memcpy is inferred, not proven.",
+            "Assumes a standard Android/JNI runtime where Java cannot forge arbitrary jstring handles or corrupt the JNI env."
+          ]
+        },
+        "statistics": {
+          "time": "00:00:29",
+          "llm_requests": 4,
+          "llm_tool_calls": 7,
+          "input_tokens": 22254,
+          "output_tokens": 1353
+        }
+      }
+    ]
+  }
+}
